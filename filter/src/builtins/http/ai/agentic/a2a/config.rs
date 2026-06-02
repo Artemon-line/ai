@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::FilterError;
+use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -170,6 +170,14 @@ fn default_max_body_bytes() -> usize {
 pub(crate) fn build_config(cfg: A2aConfig) -> Result<A2aConfig, FilterError> {
     if cfg.max_body_bytes == 0 {
         return Err("a2a: 'max_body_bytes' must be greater than 0".into());
+    }
+
+    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
+        return Err(format!(
+            "a2a: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
+            cfg.max_body_bytes
+        )
+        .into());
     }
 
     // Validate header names

@@ -62,6 +62,16 @@ fn reject_zero_max_body_bytes() {
 }
 
 #[test]
+fn rejects_max_body_bytes_above_ceiling() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("max_body_bytes: 67108865").unwrap();
+    let err = A2aFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("exceeds maximum"),
+        "error should mention exceeds maximum"
+    );
+}
+
+#[test]
 fn reject_invalid_alias_target() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
