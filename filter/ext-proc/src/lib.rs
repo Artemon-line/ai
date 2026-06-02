@@ -398,6 +398,13 @@ fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
     if cfg.message_timeout_ms == 0 {
         return Err("ext_proc: message_timeout_ms must be greater than 0".into());
     }
+    if cfg.deferred_close_timeout_ms > 0 && cfg.deferred_close_timeout_ms < cfg.message_timeout_ms {
+        let close = cfg.deferred_close_timeout_ms;
+        let msg = cfg.message_timeout_ms;
+        return Err(
+            format!("ext_proc: deferred_close_timeout_ms ({close}) must be >= message_timeout_ms ({msg})").into(),
+        );
+    }
     if let Some(max) = cfg.max_message_timeout_ms {
         if max == 0 {
             return Err("ext_proc: max_message_timeout_ms must be greater than 0".into());
