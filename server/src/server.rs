@@ -77,17 +77,7 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
     enforce_root_check(&config);
     warn_insecure_options(&config);
-    if let Some(max) = config.runtime.max_connections {
-        praxis_protocol::connections::init_global_limit(max as usize);
-        info!(max_connections = max, "global connection limit enabled");
-    }
-    if let Some(threshold) = config.runtime.max_memory_bytes {
-        praxis_core::memory::init(threshold);
-        info!(
-            threshold_mib = threshold / 1_048_576,
-            "memory pressure monitoring enabled"
-        );
-    }
+    init_runtime_limits(&config.runtime);
     info!("building filter pipelines");
     warn_insecure_key_permissions(&config);
 
@@ -167,53 +157,62 @@ fn spawn_watcher(
 }
 
 // -----------------------------------------------------------------------------
+// Runtime Limits
+// -----------------------------------------------------------------------------
+
+/// Initialize global connection and memory limits from runtime config.
+fn init_runtime_limits(runtime: &praxis_core::config::RuntimeConfig) {
+    if let Some(max) = runtime.max_connections {
+        praxis_protocol::connections::init_global_limit(max as usize);
+        info!(max_connections = max, "global connection limit enabled");
+    }
+    if let Some(threshold) = runtime.max_memory_bytes {
+        praxis_core::memory::init(threshold);
+        info!(
+            threshold_mib = threshold / 1_048_576,
+            "memory pressure monitoring enabled"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Insecure Options Warnings
 // -----------------------------------------------------------------------------
 
 /// Emit startup warnings for every active insecure option.
 fn warn_insecure_options(config: &Config) {
-    let opts = &config.insecure_options;
-    if opts.allow_unbounded_body {
-        tracing::warn!(
-            "insecure_options.allow_unbounded_body is enabled; \
-             body size safety ceiling is relaxed"
-        );
-    }
-    if opts.allow_open_security_filters {
-        tracing::warn!(
-            "insecure_options.allow_open_security_filters is enabled; \
-             security filters may use failure_mode: open"
-        );
-    }
-    if opts.allow_public_admin {
-        tracing::warn!(
-            "insecure_options.allow_public_admin is enabled; \
-             admin endpoint may bind to all interfaces"
-        );
-    }
-    if opts.allow_tls_without_sni {
-        tracing::warn!(
-            "insecure_options.allow_tls_without_sni is enabled; \
-             TLS hostname verification is weakened"
-        );
-    }
-    if opts.allow_private_health_checks {
-        tracing::warn!(
-            "insecure_options.allow_private_health_checks is enabled; \
-             health checks may target loopback/metadata addresses"
-        );
-    }
-    if opts.csrf_log_only {
-        tracing::warn!(
-            "insecure_options.csrf_log_only is enabled; \
-             CSRF violations are logged but not rejected"
-        );
-    }
-    if opts.skip_pipeline_validation {
-        tracing::warn!(
-            "insecure_options.skip_pipeline_validation is enabled; \
-             pipeline ordering errors are demoted to warnings"
-        );
+    let o = &config.insecure_options;
+    insecure_warn(
+        o.allow_unbounded_body,
+        "allow_unbounded_body: body size ceiling relaxed",
+    );
+    insecure_warn(
+        o.allow_open_security_filters,
+        "allow_open_security_filters: open failure_mode allowed",
+    );
+    insecure_warn(
+        o.allow_public_admin,
+        "allow_public_admin: admin may bind all interfaces",
+    );
+    insecure_warn(
+        o.allow_tls_without_sni,
+        "allow_tls_without_sni: TLS hostname verification weakened",
+    );
+    insecure_warn(
+        o.allow_private_health_checks,
+        "allow_private_health_checks: loopback health checks allowed",
+    );
+    insecure_warn(o.csrf_log_only, "csrf_log_only: CSRF violations logged, not rejected");
+    insecure_warn(
+        o.skip_pipeline_validation,
+        "skip_pipeline_validation: pipeline errors demoted to warnings",
+    );
+}
+
+/// Log a warning if an insecure option is active.
+fn insecure_warn(active: bool, msg: &str) {
+    if active {
+        tracing::warn!("insecure_options.{msg}");
     }
 }
 

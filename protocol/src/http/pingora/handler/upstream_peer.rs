@@ -202,16 +202,19 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
 /// Check the DNS cache for a non-expired entry.
 fn lookup_cached(address: &str) -> Option<SocketAddr> {
     let cache = dns_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let entry = cache.get(address)?;
-    if entry.resolved_at.elapsed().as_secs() >= DNS_TTL_SECS {
-        return None;
-    }
-    entry
-        .addrs
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| entry.addrs.first())
-        .copied()
+    let result = cache.get(address).and_then(|entry| {
+        if entry.resolved_at.elapsed().as_secs() >= DNS_TTL_SECS {
+            return None;
+        }
+        entry
+            .addrs
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| entry.addrs.first())
+            .copied()
+    });
+    drop(cache);
+    result
 }
 
 /// Perform blocking DNS resolution off the async runtime.
