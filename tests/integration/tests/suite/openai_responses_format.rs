@@ -6,7 +6,7 @@
 use praxis_core::config::Config;
 use praxis_test_utils::{
     free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
-    start_echo_backend_with_shutdown, start_header_echo_backend_with_shutdown, start_proxy,
+    start_echo_backend, start_header_echo_backend, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -292,7 +292,7 @@ fn stream_header_routes_streaming_traffic() {
 
 #[test]
 fn reserved_headers_stripped_before_upstream() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
 
     let yaml = header_echo_yaml(proxy_port, backend_guard.port());
@@ -607,7 +607,7 @@ fn get_unrelated_path_routes_to_default() {
 
 #[test]
 fn body_unchanged_after_classification() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let proxy_port = free_port();
 
     let yaml = echo_yaml(proxy_port, backend_guard.port());
@@ -627,7 +627,7 @@ fn body_unchanged_after_classification() {
 
 #[test]
 fn large_body_over_64k_classified_and_forwarded() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let proxy_port = free_port();
 
     let yaml = echo_yaml(proxy_port, backend_guard.port());
