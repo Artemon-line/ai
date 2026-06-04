@@ -77,6 +77,10 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
     enforce_root_check(&config);
     warn_insecure_options(&config);
+    if let Some(max) = config.runtime.max_connections {
+        praxis_protocol::connections::init_global_limit(max as usize);
+        info!(max_connections = max, "global connection limit enabled");
+    }
     if let Some(threshold) = config.runtime.max_memory_bytes {
         praxis_core::memory::init(threshold);
         info!(

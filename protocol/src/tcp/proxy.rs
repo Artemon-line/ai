@@ -218,6 +218,11 @@ impl ServerApp for PingoraTcpProxy {
             return None;
         }
 
+        if crate::connections::try_acquire_global().is_err() {
+            warn!("global max connections reached, closing TCP connection");
+            return None;
+        }
+
         let _permit = if let Some(ref sem) = self.connection_semaphore {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 Some(permit)

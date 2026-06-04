@@ -31,6 +31,25 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
+    /// Process-wide maximum concurrent connections across all listeners.
+    ///
+    /// When set, new connections beyond this limit are rejected
+    /// (HTTP 503 / TCP close), regardless of per-listener limits.
+    /// `None` (the default) means no global limit.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let cfg: RuntimeConfig =
+    ///     serde_yaml::from_str("max_connections: 10000").unwrap();
+    /// assert_eq!(cfg.max_connections, Some(10_000));
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert!(cfg.max_connections.is_none());
+    /// ```
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+
     /// Maximum resident memory (RSS) in bytes before shedding load.
     ///
     /// When set, Praxis monitors process RSS and rejects new
@@ -131,6 +150,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            max_connections: None,
             max_memory_bytes: None,
             threads: 0,
             work_stealing: default_work_stealing(),

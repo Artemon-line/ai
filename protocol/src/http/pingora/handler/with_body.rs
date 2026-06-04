@@ -130,6 +130,20 @@ impl ProxyHttp for PingoraHttpHandler {
             ));
         }
 
+        match crate::connections::try_acquire_global() {
+            Ok(permit) => ctx._global_connection_permit = permit,
+            Err(()) => {
+                warn!("global max connections reached, rejecting request");
+                let mut header = pingora_http::ResponseHeader::build(503, None)?;
+                header.append_header("Retry-After", "1")?;
+                session.write_response_header(Box::new(header), true).await?;
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(503),
+                    "global max connections exceeded",
+                ));
+            },
+        }
+
         if let Some(ref sem) = self.connection_semaphore {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 ctx._connection_permit = Some(permit);
