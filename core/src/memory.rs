@@ -6,7 +6,7 @@
 //! Tracks resident set size (RSS) via `/proc/self/statm` on
 //! Linux and sheds load when a configured threshold is exceeded.
 //! Sampling is cached: at most one `/proc` read per
-//! [`CHECK_INTERVAL_MS`].
+//! `CHECK_INTERVAL_MS`.
 
 use std::sync::{
     OnceLock,
@@ -63,7 +63,7 @@ pub fn is_exceeded() -> bool {
 
 /// RSS-based memory pressure detector with cached sampling.
 ///
-/// Reads `/proc/self/statm` at most every [`CHECK_INTERVAL_MS`]
+/// Reads `/proc/self/statm` at most every `CHECK_INTERVAL_MS`
 /// and compares RSS against a fixed threshold. All fields are
 /// atomic for lock-free concurrent access from multiple worker
 /// threads.
@@ -104,7 +104,7 @@ impl MemoryPressure {
     /// Whether the most-recent RSS sample exceeds the threshold.
     ///
     /// Lazily samples `/proc/self/statm` when the cached value
-    /// is older than [`CHECK_INTERVAL_MS`].
+    /// is older than `CHECK_INTERVAL_MS`.
     pub fn is_exceeded(&self) -> bool {
         self.maybe_refresh();
         self.cached_rss.load(Ordering::Relaxed) > self.threshold
