@@ -15,6 +15,8 @@ pub mod errors;
 pub mod health;
 /// Key-value store trait and registry.
 pub mod kv;
+/// Process-wide memory pressure monitoring.
+pub mod memory;
 /// Tracing subscriber setup.
 pub mod logging;
 /// Server factory and runtime options.

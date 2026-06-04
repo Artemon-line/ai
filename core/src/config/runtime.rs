@@ -31,6 +31,25 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
+    /// Maximum resident memory (RSS) in bytes before shedding load.
+    ///
+    /// When set, Praxis monitors process RSS and rejects new
+    /// requests with 503 when the threshold is exceeded. `None`
+    /// (the default) disables memory pressure monitoring.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let cfg: RuntimeConfig =
+    ///     serde_yaml::from_str("max_memory_bytes: 1073741824").unwrap();
+    /// assert_eq!(cfg.max_memory_bytes, Some(1_073_741_824));
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert!(cfg.max_memory_bytes.is_none());
+    /// ```
+    #[serde(default)]
+    pub max_memory_bytes: Option<usize>,
+
     /// Number of worker threads per service.
     ///
     /// Auto-detected by default.
@@ -112,6 +131,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            max_memory_bytes: None,
             threads: 0,
             work_stealing: default_work_stealing(),
             global_queue_interval: default_global_queue_interval(),

@@ -77,6 +77,13 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
     enforce_root_check(&config);
     warn_insecure_options(&config);
+    if let Some(threshold) = config.runtime.max_memory_bytes {
+        praxis_core::memory::init(threshold);
+        info!(
+            threshold_mib = threshold / 1_048_576,
+            "memory pressure monitoring enabled"
+        );
+    }
     info!("building filter pipelines");
     warn_insecure_key_permissions(&config);
 

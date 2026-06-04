@@ -213,6 +213,11 @@ impl PingoraTcpProxy {
 impl ServerApp for PingoraTcpProxy {
     #[allow(clippy::too_many_lines, reason = "linear connection lifecycle")]
     async fn process_new(self: &Arc<Self>, mut session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
+        if praxis_core::memory::is_exceeded() {
+            warn!("memory pressure threshold exceeded, closing TCP connection");
+            return None;
+        }
+
         let _permit = if let Some(ref sem) = self.connection_semaphore {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 Some(permit)

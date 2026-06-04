@@ -119,6 +119,17 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
+        if praxis_core::memory::is_exceeded() {
+            warn!("memory pressure threshold exceeded, rejecting request");
+            let mut header = pingora_http::ResponseHeader::build(503, None)?;
+            header.append_header("Retry-After", "5")?;
+            session.write_response_header(Box::new(header), true).await?;
+            return Err(pingora_core::Error::explain(
+                pingora_core::ErrorType::HTTPStatus(503),
+                "memory pressure exceeded",
+            ));
+        }
+
         if let Some(ref sem) = self.connection_semaphore {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 ctx._connection_permit = Some(permit);
