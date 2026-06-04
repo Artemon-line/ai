@@ -6,8 +6,8 @@
 use praxis_core::config::Config;
 use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext};
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_body, parse_status, start_backend_with_shutdown,
-    start_header_echo_backend, start_proxy, start_proxy_with_registry,
+    free_port, http_get, http_send, parse_body, parse_status, start_backend_with_shutdown, start_header_echo_backend,
+    start_proxy, start_proxy_with_registry,
 };
 
 // -----------------------------------------------------------------------------

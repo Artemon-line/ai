@@ -40,8 +40,7 @@ pub struct RuntimeConfig {
     /// ```
     /// use praxis_core::config::RuntimeConfig;
     ///
-    /// let cfg: RuntimeConfig =
-    ///     serde_yaml::from_str("max_connections: 10000").unwrap();
+    /// let cfg: RuntimeConfig = serde_yaml::from_str("max_connections: 10000").unwrap();
     /// assert_eq!(cfg.max_connections, Some(10_000));
     ///
     /// let cfg = RuntimeConfig::default();
@@ -59,8 +58,7 @@ pub struct RuntimeConfig {
     /// ```
     /// use praxis_core::config::RuntimeConfig;
     ///
-    /// let cfg: RuntimeConfig =
-    ///     serde_yaml::from_str("max_memory_bytes: 1073741824").unwrap();
+    /// let cfg: RuntimeConfig = serde_yaml::from_str("max_memory_bytes: 1073741824").unwrap();
     /// assert_eq!(cfg.max_memory_bytes, Some(1_073_741_824));
     ///
     /// let cfg = RuntimeConfig::default();

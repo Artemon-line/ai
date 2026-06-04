@@ -115,8 +115,16 @@ impl FilterPipeline {
             self.body_capabilities.needs_response_body = true;
         }
 
-        check_unbounded_stream_buffer("request", &mut self.body_capabilities.request_body_mode, allow_unbounded)?;
-        check_unbounded_stream_buffer("response", &mut self.body_capabilities.response_body_mode, allow_unbounded)?;
+        check_unbounded_stream_buffer(
+            "request",
+            &mut self.body_capabilities.request_body_mode,
+            allow_unbounded,
+        )?;
+        check_unbounded_stream_buffer(
+            "response",
+            &mut self.body_capabilities.response_body_mode,
+            allow_unbounded,
+        )?;
 
         Ok(())
     }

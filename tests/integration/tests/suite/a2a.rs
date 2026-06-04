@@ -7,8 +7,8 @@ use std::io::{Read, Write};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    Backend, free_port, http_send, parse_body, parse_status, start_backend_with_shutdown,
-    start_header_echo_backend, start_proxy,
+    Backend, free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_header_echo_backend,
+    start_proxy,
 };
 
 // -----------------------------------------------------------------------------

@@ -7,8 +7,7 @@ use bytes::Bytes;
 use praxis_core::config::Config;
 use praxis_filter::{BodyAccess, FilterAction, FilterError, HttpFilter, HttpFilterContext};
 use praxis_test_utils::{
-    custom_filter_yaml, free_port, parse_header, registry_with, start_echo_backend,
-    start_proxy_with_registry,
+    custom_filter_yaml, free_port, parse_header, registry_with, start_echo_backend, start_proxy_with_registry,
 };
 
 // ---------------------------------------------------------------------------

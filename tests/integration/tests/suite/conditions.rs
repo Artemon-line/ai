@@ -3,8 +3,7 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    RoutedBackend, free_port, http_get, http_send, parse_body, parse_status, start_header_echo_backend,
-    start_proxy,
+    RoutedBackend, free_port, http_get, http_send, parse_body, parse_status, start_header_echo_backend, start_proxy,
 };
 
 // -----------------------------------------------------------------------------

@@ -6,9 +6,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    filters::BodyMutatingStreamBufferFilter, free_port, http_send, parse_body, parse_status,
-    start_echo_backend, start_header_echo_backend, start_proxy_with_registry,
-    start_uri_echo_backend,
+    filters::BodyMutatingStreamBufferFilter, free_port, http_send, parse_body, parse_status, start_echo_backend,
+    start_header_echo_backend, start_proxy_with_registry, start_uri_echo_backend,
 };
 
 #[test]

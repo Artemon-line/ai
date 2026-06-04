@@ -22,7 +22,7 @@ const CHECK_INTERVAL_MS: u64 = 1000;
 
 /// Assumed page size for converting `/proc/self/statm` pages to bytes.
 ///
-/// 4 KiB on all supported Linux architectures (x86_64, aarch64).
+/// 4 `KiB` on all supported Linux architectures (`x86_64`, `aarch64`).
 #[cfg(target_os = "linux")]
 const PAGE_SIZE: usize = 4096;
 
@@ -158,12 +158,7 @@ fn sample_rss() -> Option<usize> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    reason = "tests"
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -180,30 +175,21 @@ mod tests {
     #[test]
     fn very_large_threshold_never_exceeded() {
         let mp = MemoryPressure::new(usize::MAX);
-        assert!(
-            !mp.is_exceeded(),
-            "usize::MAX threshold should never be exceeded"
-        );
+        assert!(!mp.is_exceeded(), "usize::MAX threshold should never be exceeded");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn sample_rss_returns_positive_value() {
         let rss = sample_rss();
-        assert!(
-            rss.is_some_and(|v| v > 0),
-            "RSS should be a positive value on Linux"
-        );
+        assert!(rss.is_some_and(|v| v > 0), "RSS should be a positive value on Linux");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn tiny_threshold_is_exceeded() {
         let mp = MemoryPressure::new(1);
-        assert!(
-            mp.is_exceeded(),
-            "1-byte threshold should always be exceeded"
-        );
+        assert!(mp.is_exceeded(), "1-byte threshold should always be exceeded");
     }
 
     #[test]

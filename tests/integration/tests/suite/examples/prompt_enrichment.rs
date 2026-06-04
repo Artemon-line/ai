@@ -5,9 +5,7 @@
 
 use std::collections::HashMap;
 
-use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_echo_backend, start_proxy,
-};
+use praxis_test_utils::{free_port, http_send, json_post, parse_body, parse_status, start_echo_backend, start_proxy};
 
 // -----------------------------------------------------------------------------
 // Tests

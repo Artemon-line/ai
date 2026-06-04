@@ -5,8 +5,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
-    start_echo_backend, start_header_echo_backend, start_proxy,
+    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown, start_echo_backend,
+    start_header_echo_backend, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
