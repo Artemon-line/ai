@@ -213,13 +213,13 @@ coverage:
 	cargo llvm-cov --workspace --html --output-dir target/coverage \
 		--exclude praxis-tests-conformance \
 		--ignore-filename-regex '(target/|tests/|xtask/|benchmarks/)' \
-		--fail-under-lines 90
+		--fail-under-lines 95
 
 coverage-check:
 	cargo llvm-cov --workspace --json \
 		--exclude praxis-tests-conformance \
 		--ignore-filename-regex '(target/|tests/|xtask/|benchmarks/)' \
-		--fail-under-lines 90 \
+		--fail-under-lines 95 \
 		--output-path coverage.json
 
 # -------------------------------------------------------------------
@@ -373,7 +373,7 @@ help:
 	@echo "  fmt                  format with nightly rustfmt"
 	@echo "  audit                cargo audit + cargo deny"
 	@echo "  coverage             HTML coverage report"
-	@echo "  coverage-check       fail if line coverage < 90%%"
+	@echo "  coverage-check       fail if line coverage < 95%%"
 	@echo ""
 	@echo "Container:"
 	@echo "  container            build container image"
