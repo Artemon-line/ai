@@ -218,7 +218,8 @@ impl ServerApp for PingoraTcpProxy {
             return None;
         }
 
-        if crate::connections::try_acquire_global().is_err() {
+        let (exceeded, _global_permit) = crate::connections::try_acquire_global();
+        if exceeded {
             warn!("global max connections reached, closing TCP connection");
             return None;
         }

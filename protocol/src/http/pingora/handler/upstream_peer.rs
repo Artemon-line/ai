@@ -185,21 +185,23 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
     let addrs = resolve_blocking(address).await?;
     let preferred = select_preferred_address(&addrs, address)?;
 
-    let mut cache = dns_cache().lock().unwrap_or_else(|e| e.into_inner());
-    cache.insert(
-        address.to_owned(),
-        DnsCacheEntry {
-            addrs,
-            resolved_at: Instant::now(),
-        },
-    );
+    dns_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            address.to_owned(),
+            DnsCacheEntry {
+                addrs,
+                resolved_at: Instant::now(),
+            },
+        );
 
     Ok(preferred)
 }
 
 /// Check the DNS cache for a non-expired entry.
 fn lookup_cached(address: &str) -> Option<SocketAddr> {
-    let cache = dns_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let cache = dns_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let entry = cache.get(address)?;
     if entry.resolved_at.elapsed().as_secs() >= DNS_TTL_SECS {
         return None;

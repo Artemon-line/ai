@@ -29,14 +29,19 @@ pub fn init_global_limit(max: usize) {
 
 /// Try to acquire a global connection permit.
 ///
-/// Returns `Ok(None)` when no global limit is configured,
-/// `Ok(Some(permit))` on success, or `Err(())` when the
-/// limit is exceeded.
-pub fn try_acquire_global() -> Result<Option<OwnedSemaphorePermit>, ()> {
+/// Returns `None` when no global limit is configured or the
+/// permit was acquired. Returns `Some(permit)` on success.
+/// Callers check `is_none()` after filtering out the
+/// "no limit configured" case via the two-field tuple.
+pub fn try_acquire_global() -> (bool, Option<OwnedSemaphorePermit>) {
     let Some(sem) = GLOBAL_LIMIT.get() else {
-        return Ok(None);
+        return (false, None);
     };
-    Arc::clone(sem).try_acquire_owned().map(Some).map_err(|_| ())
+    if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
+        (false, Some(permit))
+    } else {
+        (true, None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -44,20 +49,14 @@ pub fn try_acquire_global() -> Result<Option<OwnedSemaphorePermit>, ()> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    reason = "tests"
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
 
     #[test]
-    fn no_init_returns_ok_none() {
-        assert!(
-            matches!(try_acquire_global(), Ok(None)),
-            "uninitialized global should return Ok(None)"
-        );
+    fn no_init_returns_not_exceeded() {
+        let (exceeded, permit) = try_acquire_global();
+        assert!(!exceeded, "uninitialized global should not exceed");
+        assert!(permit.is_none(), "uninitialized global should return no permit");
     }
 }
