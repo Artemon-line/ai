@@ -76,6 +76,7 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
     enforce_root_check(&config);
+    warn_insecure_options(&config);
     info!("building filter pipelines");
     warn_insecure_key_permissions(&config);
 
@@ -152,6 +153,57 @@ fn spawn_watcher(
         shutdown: CancellationToken::new(),
     });
     Some(handle)
+}
+
+// -----------------------------------------------------------------------------
+// Insecure Options Warnings
+// -----------------------------------------------------------------------------
+
+/// Emit startup warnings for every active insecure option.
+fn warn_insecure_options(config: &Config) {
+    let opts = &config.insecure_options;
+    if opts.allow_unbounded_body {
+        tracing::warn!(
+            "insecure_options.allow_unbounded_body is enabled; \
+             body size safety ceiling is relaxed"
+        );
+    }
+    if opts.allow_open_security_filters {
+        tracing::warn!(
+            "insecure_options.allow_open_security_filters is enabled; \
+             security filters may use failure_mode: open"
+        );
+    }
+    if opts.allow_public_admin {
+        tracing::warn!(
+            "insecure_options.allow_public_admin is enabled; \
+             admin endpoint may bind to all interfaces"
+        );
+    }
+    if opts.allow_tls_without_sni {
+        tracing::warn!(
+            "insecure_options.allow_tls_without_sni is enabled; \
+             TLS hostname verification is weakened"
+        );
+    }
+    if opts.allow_private_health_checks {
+        tracing::warn!(
+            "insecure_options.allow_private_health_checks is enabled; \
+             health checks may target loopback/metadata addresses"
+        );
+    }
+    if opts.csrf_log_only {
+        tracing::warn!(
+            "insecure_options.csrf_log_only is enabled; \
+             CSRF violations are logged but not rejected"
+        );
+    }
+    if opts.skip_pipeline_validation {
+        tracing::warn!(
+            "insecure_options.skip_pipeline_validation is enabled; \
+             pipeline ordering errors are demoted to warnings"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
