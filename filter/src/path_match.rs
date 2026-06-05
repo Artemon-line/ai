@@ -97,13 +97,7 @@ mod tests {
     /// matches paths whose second byte is `/`.
     #[test]
     fn double_slash_prefix() {
-        assert!(
-            !path_prefix_matches("/foo", "//"),
-            "/foo must not match // prefix"
-        );
-        assert!(
-            path_prefix_matches("//bar", "//"),
-            "//bar should match // prefix"
-        );
+        assert!(!path_prefix_matches("/foo", "//"), "/foo must not match // prefix");
+        assert!(path_prefix_matches("//bar", "//"), "//bar should match // prefix");
     }
 }
