@@ -1,0 +1,6 @@
+# Maintainers
+* @shaneutt @twghu
+
+# Experimental AI Filters
+/filter/src/builtins/http/ai/openai/ @leseb @franciscojavierarceo
+/filter/src/builtins/http/ai/anthropic/ @leseb @franciscojavierarceo
