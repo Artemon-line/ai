@@ -22,13 +22,9 @@
 
 mod validate;
 
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
-
 use async_trait::async_trait;
 use bytes::Bytes;
+use rand::{TryRngCore, rngs::OsRng};
 use tracing::{debug, trace};
 
 use self::validate::validate_request;
@@ -57,18 +53,8 @@ const MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 ///
 /// This filter has no configuration, body buffering is handled by
 /// the upstream `openai_responses_format` classifier.
-pub struct OpenaiResponsesValidateFilter {
-    /// Monotonic counter for unique ID generation.
-    counter: AtomicU64,
-}
-
-impl Default for OpenaiResponsesValidateFilter {
-    fn default() -> Self {
-        Self {
-            counter: AtomicU64::new(0),
-        }
-    }
-}
+#[derive(Default)]
+pub struct OpenaiResponsesValidateFilter;
 
 impl OpenaiResponsesValidateFilter {
     /// Create a filter from YAML config.
@@ -84,35 +70,40 @@ impl OpenaiResponsesValidateFilter {
     /// [`FilterFactory`]: crate::FilterFactory
     #[allow(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
     pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
-        Ok(Box::new(Self::default()))
+        Ok(Box::new(Self))
     }
 
     /// Generate a response ID with `resp_` prefix.
-    fn generate_response_id(&self) -> String {
-        let id = self.generate_raw_id();
-        format!("resp_{id}")
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the system CSPRNG fails.
+    fn generate_response_id() -> Result<String, FilterError> {
+        let id = Self::generate_raw_id()?;
+        Ok(format!("resp_{id}"))
     }
 
     /// Generate a conversation ID with `conv_` prefix.
-    fn generate_conversation_id(&self) -> String {
-        let id = self.generate_raw_id();
-        format!("conv_{id}")
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the system CSPRNG fails.
+    fn generate_conversation_id() -> Result<String, FilterError> {
+        let id = Self::generate_raw_id()?;
+        Ok(format!("conv_{id}"))
     }
 
-    // TODO(#460): replace with shared IdGenerator that includes
-    // per-instance entropy to avoid collisions across instances.
-    /// Generate a raw hex ID from timestamp and counter.
-    fn generate_raw_id(&self) -> String {
-        #[allow(clippy::cast_possible_truncation, reason = "micros fit u64")]
-        let micros = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros()
-            .min(u128::from(u64::MAX)) as u64;
-
-        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
-
-        format!("{micros:016x}{seq:04x}")
+    /// Generate a cryptographically random hex ID (128 bits).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the system CSPRNG fails.
+    fn generate_raw_id() -> Result<String, FilterError> {
+        let mut bytes = [0u8; 16];
+        OsRng
+            .try_fill_bytes(&mut bytes)
+            .map_err(|e| FilterError::from(format!("failed to generate ID: {e}")))?;
+        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
     }
 }
 
@@ -156,12 +147,12 @@ impl HttpFilter for OpenaiResponsesValidateFilter {
             Err(action) => return Ok(action),
         };
 
-        let response_id = self.generate_response_id();
+        let response_id = Self::generate_response_id()?;
         let conversation_id = if let Some(id) = extract_conversation_id(&parsed) {
             trace!(conversation_id = %id, "conversation ID extracted from request");
             id
         } else {
-            let id = self.generate_conversation_id();
+            let id = Self::generate_conversation_id()?;
             trace!(conversation_id = %id, "conversation ID generated");
             id
         };
@@ -287,7 +278,7 @@ mod tests {
 
     #[test]
     fn body_access_is_read_only() {
-        let filter = OpenaiResponsesValidateFilter::default();
+        let filter = OpenaiResponsesValidateFilter;
         assert_eq!(
             filter.request_body_access(),
             BodyAccess::ReadOnly,
@@ -297,16 +288,33 @@ mod tests {
 
     #[test]
     fn response_id_has_prefix() {
-        let filter = OpenaiResponsesValidateFilter::default();
-        let id = filter.generate_response_id();
+        let id = OpenaiResponsesValidateFilter::generate_response_id().unwrap();
         assert!(id.starts_with("resp_"), "response ID should start with resp_");
     }
 
     #[test]
     fn conversation_id_has_prefix() {
-        let filter = OpenaiResponsesValidateFilter::default();
-        let id = filter.generate_conversation_id();
+        let id = OpenaiResponsesValidateFilter::generate_conversation_id().unwrap();
         assert!(id.starts_with("conv_"), "conversation ID should start with conv_");
+    }
+
+    #[test]
+    fn raw_id_is_32_hex_chars() {
+        let id = OpenaiResponsesValidateFilter::generate_raw_id().unwrap();
+        assert_eq!(id.len(), 32, "raw ID should be 32 hex characters (128 bits)");
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "raw ID should contain only hex digits"
+        );
+    }
+
+    #[test]
+    fn generated_ids_are_unique() {
+        let ids: Vec<String> = (0..1000)
+            .map(|_| OpenaiResponsesValidateFilter::generate_raw_id().unwrap())
+            .collect();
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(ids.len(), unique.len(), "all generated IDs should be unique");
     }
 
     #[tokio::test]
@@ -533,7 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn not_end_of_stream_continues() {
-        let filter = OpenaiResponsesValidateFilter::default();
+        let filter = OpenaiResponsesValidateFilter;
         let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         let mut body = Some(Bytes::from(r#"{"input": "partial"}"#));
