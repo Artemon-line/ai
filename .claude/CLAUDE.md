@@ -223,12 +223,28 @@ Branches rejoin at configurable points (next,
 terminal, named filter, re-entrance with iteration
 limits).
 
+## Terminology: Routing vs Pipelining
+
+These two concepts are distinct, take care to not conflate them.
+
+- **Routing** (runtime): the `router` filter selects
+  an upstream cluster at request time based on path,
+  host, and headers. This decides *where* a request
+  goes.
+- **Pipelining** (config-time): the operator composes
+  named filter chains per listener; chains are
+  resolved and concatenated into a single
+  `FilterPipeline` at startup. This decides *what
+  processing* a request receives. Branch chains add
+  conditional paths within a pipeline.
+
 ## Key Patterns
 
-- **Classify → route**: classifier filters promote
-  facts to internal headers (`x-praxis-ai-*`) and
-  the router matches those headers to select
-  clusters. See
+- **Classify → route → branch**: classifier filters
+  promote facts to internal headers
+  (`x-praxis-ai-*`) and the router matches those
+  headers to select clusters (routing). Branch
+  chains split pipelines (pipelining). See
   `examples/configs/ai/openai/responses/format-routing.yaml`.
 - **Branch on filter results**: branch chains split
   or rejoin request-phase pipelines based on filter
