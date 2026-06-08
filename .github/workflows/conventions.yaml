@@ -366,6 +366,10 @@ jobs:
           while IFS= read -r file; do
             status=$(echo "$proposal_files" | jq -r --arg f "$file" '.[] | select(.filename == $f) | .status')
 
+            if [ "$status" = "removed" ]; then
+              continue
+            fi
+
             content=$(gh api "repos/${{ github.repository }}/contents/${file}?ref=$HEAD_SHA" \
               --jq '.content' | base64 -d)
 
