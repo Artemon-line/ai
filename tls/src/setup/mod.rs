@@ -134,14 +134,10 @@ fn build_server_config_base(
     if tls.client_cert_mode == ClientCertMode::None {
         Ok(builder.with_no_client_auth())
     } else {
-        let ca_path =
-            tls.client_ca
-                .as_ref()
-                .map(|ca| ca.ca_path.as_str())
-                .ok_or_else(|| TlsError::MissingClientCa {
-                    mode: tls.client_cert_mode.clone(),
-                })?;
-        let verifier = client_auth::build_client_verifier(ca_path, &tls.client_cert_mode)?;
+        let ca_cfg = tls.client_ca.as_ref().ok_or_else(|| TlsError::MissingClientCa {
+            mode: tls.client_cert_mode.clone(),
+        })?;
+        let verifier = client_auth::build_client_verifier(&ca_cfg.ca_path, &tls.client_cert_mode, &ca_cfg.crl_paths)?;
         Ok(builder.with_client_cert_verifier(verifier))
     }
 }
@@ -267,6 +263,7 @@ mod tests {
             cipher_suites: None,
             client_ca: Some(CaConfig {
                 ca_path: server.ca_cert_path.to_str().expect("ca path").to_owned(),
+                crl_paths: Vec::new(),
             }),
             client_cert_mode: ClientCertMode::Require,
             hot_reload: None,
@@ -380,6 +377,7 @@ mod tests {
             cipher_suites: None,
             client_ca: Some(CaConfig {
                 ca_path: "/ca.pem".to_owned(),
+                crl_paths: Vec::new(),
             }),
             client_cert_mode: ClientCertMode::Require,
             hot_reload: None,

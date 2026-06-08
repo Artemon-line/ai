@@ -378,6 +378,7 @@ mod tests {
         let tls = crate::ClusterTls {
             ca: Some(crate::CaConfig {
                 ca_path: ca.ca_path.to_str().unwrap().to_owned(),
+                crl_paths: Vec::new(),
             }),
             ..crate::ClusterTls::default()
         };
@@ -436,6 +437,7 @@ mod tests {
         let tls = crate::ClusterTls {
             ca: Some(crate::CaConfig {
                 ca_path: "/nonexistent/ca.pem".to_owned(),
+                crl_paths: Vec::new(),
             }),
             ..crate::ClusterTls::default()
         };
@@ -483,6 +485,7 @@ mod tests {
         let tls = crate::ClusterTls {
             ca: Some(crate::CaConfig {
                 ca_path: ca.ca_path.to_str().unwrap().to_owned(),
+                crl_paths: Vec::new(),
             }),
             ..crate::ClusterTls::default()
         };

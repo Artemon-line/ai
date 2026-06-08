@@ -523,6 +523,7 @@ mod tests {
         let tls = ClusterTls {
             ca: Some(praxis_tls::CaConfig {
                 ca_path: ca_path.to_owned(),
+                crl_paths: Vec::new(),
             }),
             sni: Some("api.example.com".to_owned()),
             ..ClusterTls::default()

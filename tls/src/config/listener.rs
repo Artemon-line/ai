@@ -517,6 +517,7 @@ mod tests {
         let tls = ListenerTls {
             client_ca: Some(CaConfig {
                 ca_path: "/etc/../../evil-ca.pem".to_owned(),
+                crl_paths: Vec::new(),
             }),
             client_cert_mode: ClientCertMode::Require,
             ..ListenerTls::new_validated(&tmp.cert, &tmp.key).unwrap()
