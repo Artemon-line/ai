@@ -24,6 +24,7 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails to instantiate.
+    #[allow(clippy::too_many_lines, reason = "cfg attribute inflates line count")]
     pub fn build(entries: &mut [FilterEntry], registry: &FilterRegistry) -> Result<Self, FilterError> {
         let mut filters = Vec::with_capacity(entries.len());
         for entry in entries.iter_mut() {
@@ -53,6 +54,8 @@ impl FilterPipeline {
             filters,
             health_registry: None,
             kv_stores: None,
+            #[cfg(feature = "ai-inference")]
+            response_stores: None,
             time_source: Arc::new(SystemTimeSource),
         })
     }
@@ -83,6 +86,8 @@ impl FilterPipeline {
             filters,
             health_registry: None,
             kv_stores: None,
+            #[cfg(feature = "ai-inference")]
+            response_stores: None,
             time_source: Arc::new(SystemTimeSource),
         })
     }

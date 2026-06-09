@@ -59,6 +59,7 @@ fuzz_target!(|data: &str| {
             filter_results: std::collections::HashMap::new(),
             health_registry: None,
             kv_stores: None,
+            response_stores: None,
             request: &request,
             request_body_bytes: 0,
             request_body_mode: praxis_filter::BodyMode::Stream,

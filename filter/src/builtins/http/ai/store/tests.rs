@@ -3,9 +3,14 @@
 
 //! Tests for the response store persistence layer.
 
+use std::sync::Arc;
+
 use serde_json::json;
 
-use super::{ConversationRecord, ResponseRecord, SqliteResponseStore, trait_def::ResponseStore};
+use super::{
+    ConversationRecord, ResponseRecord, ResponseStoreRegistry, SqliteResponseStore, StoreError,
+    trait_def::ResponseStore,
+};
 use crate::builtins::http::ai::openai::responses::store::{ListParams, Order, list_input_items};
 
 // -----------------------------------------------------------------------------
@@ -532,6 +537,56 @@ async fn delete_conversation_tenant_isolation() {
     assert!(
         still_exists.is_some(),
         "conversation should still exist after cross-tenant delete attempt"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Registry
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn registry_register_and_get() {
+    let registry = ResponseStoreRegistry::new();
+    let store: Arc<dyn ResponseStore> = Arc::new(make_store().await);
+    registry
+        .register(&Arc::from("primary"), Arc::clone(&store))
+        .expect("register should succeed");
+
+    let fetched = registry.get("primary");
+    assert!(fetched.is_some(), "registered store should be retrievable");
+}
+
+#[test]
+fn registry_get_missing_returns_none() {
+    let registry = ResponseStoreRegistry::new();
+    assert!(
+        registry.get("nonexistent").is_none(),
+        "get on empty registry should return None"
+    );
+}
+
+#[tokio::test]
+async fn registry_duplicate_registration_fails() {
+    let registry = ResponseStoreRegistry::new();
+    let store: Arc<dyn ResponseStore> = Arc::new(make_store().await);
+    let name = Arc::from("dup");
+    registry
+        .register(&name, Arc::clone(&store))
+        .expect("first register should succeed");
+
+    let result = registry.register(&name, store);
+    assert!(
+        matches!(result, Err(StoreError::Unavailable(_))),
+        "duplicate registration should return StoreError::Unavailable"
+    );
+}
+
+#[test]
+fn registry_default_is_empty() {
+    let registry = ResponseStoreRegistry::default();
+    assert!(
+        registry.get("anything").is_none(),
+        "default registry should have no stores"
     );
 }
 

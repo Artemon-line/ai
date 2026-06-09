@@ -13,6 +13,8 @@ pub use http::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
+pub use http::ResponseStoreRegistry;
+#[cfg(feature = "ai-inference")]
 pub use http::ResponsesFormatFilter;
 pub use http::{
     A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter,

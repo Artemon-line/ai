@@ -29,6 +29,8 @@ pub use builtins::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use builtins::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
+pub use builtins::ResponseStoreRegistry;
+#[cfg(feature = "ai-inference")]
 pub use builtins::ResponsesFormatFilter;
 pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction,
@@ -268,6 +270,8 @@ pub(crate) mod test_utils {
             filter_results: std::collections::HashMap::new(),
             health_registry: None,
             kv_stores: None,
+            #[cfg(feature = "ai-inference")]
+            response_stores: None,
             request: req,
             request_body_bytes: 0,
             request_body_mode: crate::body::BodyMode::Stream,

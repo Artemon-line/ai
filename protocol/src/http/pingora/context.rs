@@ -208,6 +208,8 @@ macro_rules! filter_context {
             filter_results: std::mem::take(&mut $ctx.filter_results),
             health_registry: $pipeline.health_registry(),
             kv_stores: $pipeline.kv_stores(),
+            #[cfg(feature = "ai-inference")]
+            response_stores: $pipeline.response_stores(),
             request: $request,
             request_body_bytes: $ctx.request_body_bytes,
             request_body_mode: $ctx.request_body_mode,
