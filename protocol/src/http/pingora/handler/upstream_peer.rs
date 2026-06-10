@@ -129,7 +129,10 @@ fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora_cor
 fn derive_sni(address: &str) -> String {
     let host = address.rsplit_once(':').map_or(address, |(h, _)| h);
     if host.parse::<std::net::IpAddr>().is_ok() {
-        tracing::debug!(address, "upstream address is an IP; SNI left empty");
+        tracing::warn!(
+            address,
+            "upstream is an IP without explicit SNI; TLS hostname verification is meaningless"
+        );
         return String::new();
     }
     tracing::debug!(address, sni = host, "derived SNI from upstream address");
