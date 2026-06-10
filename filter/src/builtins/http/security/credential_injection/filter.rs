@@ -117,13 +117,13 @@ impl CredentialInjectionFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: CredentialInjectionConfig = parse_filter_config("credential_injection", config)?;
 
-        if cfg.names.is_empty() {
+        if cfg.clusters.is_empty() {
             return Err("credential_injection: 'clusters' must not be empty".into());
         }
 
-        let mut credentials = HashMap::with_capacity(cfg.names.len());
+        let mut credentials = HashMap::with_capacity(cfg.clusters.len());
 
-        for cluster_cfg in &cfg.names {
+        for cluster_cfg in &cfg.clusters {
             let credential = resolve_credential(cluster_cfg)?;
             credentials.insert(Arc::<str>::from(cluster_cfg.name.as_str()), credential);
         }
