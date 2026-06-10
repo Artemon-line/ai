@@ -21,16 +21,16 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StaticResponseConfig {
-    /// HTTP status code to return.
-    status: u16,
+    /// Optional response body string.
+    #[serde(default)]
+    body: Option<String>,
 
     /// Response headers to include.
     #[serde(default)]
     headers: Vec<HeaderEntry>,
 
-    /// Optional response body string.
-    #[serde(default)]
-    body: Option<String>,
+    /// HTTP status code to return.
+    status: u16,
 }
 
 /// A name/value header pair in the static response config.
@@ -68,12 +68,12 @@ struct HeaderEntry {
 /// assert_eq!(filter.name(), "static_response");
 /// ```
 pub struct StaticResponseFilter {
-    /// HTTP status code to return.
-    status: u16,
-    /// Response headers as (name, value) pairs.
-    headers: Vec<(String, String)>,
     /// Optional response body.
     body: Option<Bytes>,
+    /// Response headers as (name, value) pairs.
+    headers: Vec<(String, String)>,
+    /// HTTP status code to return.
+    status: u16,
 }
 
 impl StaticResponseFilter {

@@ -79,10 +79,6 @@ impl TryFrom<u16> for RedirectStatus {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RedirectConfig {
-    /// HTTP redirect status code (301, 302, 307, or 308).
-    #[serde(default = "default_status", deserialize_with = "deserialize_redirect_status")]
-    status: RedirectStatus,
-
     /// Location URL template. Supports `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders.
     ///
     /// `${query}` expands to `?key=val` (with leading `?`) when a query string
@@ -91,6 +87,10 @@ struct RedirectConfig {
     /// inferred scheme (`http` or `https`). Templates should use
     /// `${path}${query}` without a literal `?` separator.
     location: String,
+
+    /// HTTP redirect status code (301, 302, 307, or 308).
+    #[serde(default = "default_status", deserialize_with = "deserialize_redirect_status")]
+    status: RedirectStatus,
 }
 
 /// Default redirect status: 301 Moved Permanently.
@@ -158,10 +158,10 @@ where
 /// assert!(result.is_err());
 /// ```
 pub struct RedirectFilter {
-    /// HTTP redirect status code.
-    status: RedirectStatus,
     /// Location URL template with `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders.
     location: String,
+    /// HTTP redirect status code.
+    status: RedirectStatus,
 }
 
 impl RedirectFilter {

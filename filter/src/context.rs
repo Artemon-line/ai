@@ -30,6 +30,9 @@ pub struct HttpFilterContext<'a> {
     /// Downstream client IP address (from the TCP connection).
     pub client_addr: Option<IpAddr>,
 
+    /// The cluster name selected by the router filter.
+    pub cluster: Option<Arc<str>>,
+
     /// Whether the downstream connection uses TLS.
     ///
     /// Set by the protocol layer from the connection's SSL
@@ -43,9 +46,6 @@ pub struct HttpFilterContext<'a> {
     /// during the request phase. The response phase skips
     /// filters that did not run (e.g. due to `SkipTo`).
     pub executed_filter_indices: Vec<bool>,
-
-    /// The cluster name selected by the router filter.
-    pub cluster: Option<Arc<str>>,
 
     /// Extra headers to inject into the upstream request.
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
@@ -549,6 +549,48 @@ mod tests {
             ctx.kv_stores.unwrap().get("nonexistent").is_none(),
             "missing store name should return None"
         );
+    }
+
+    #[test]
+    fn set_metadata_rejects_empty_key() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("", "val");
+        assert!(ctx.get_metadata("").is_none(), "empty key should be silently rejected");
+    }
+
+    #[test]
+    fn set_metadata_rejects_long_key() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let long_key = "k".repeat(65);
+        ctx.set_metadata(long_key.as_str(), "val");
+        assert!(
+            ctx.get_metadata(long_key.as_str()).is_none(),
+            "65-byte key should be rejected"
+        );
+    }
+
+    #[test]
+    fn set_metadata_accepts_max_length_key() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let max_key = "k".repeat(64);
+        ctx.set_metadata(max_key.as_str(), "val");
+        assert_eq!(
+            ctx.get_metadata(max_key.as_str()),
+            Some("val"),
+            "64-byte key should be accepted"
+        );
+    }
+
+    #[test]
+    fn set_metadata_rejects_long_value() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let long_value = "v".repeat(257);
+        ctx.set_metadata("key", long_value.as_str());
+        assert!(ctx.get_metadata("key").is_none(), "257-byte value should be rejected");
     }
 
     #[test]
