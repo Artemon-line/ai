@@ -44,10 +44,7 @@ mod tests {
 
     #[test]
     fn rejects_null_byte() {
-        assert!(
-            !is_safe_promoted_value("bad\0value"),
-            "null byte should be rejected"
-        );
+        assert!(!is_safe_promoted_value("bad\0value"), "null byte should be rejected");
     }
 
     #[test]

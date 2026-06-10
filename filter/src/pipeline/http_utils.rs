@@ -339,10 +339,7 @@ mod tests {
             "stub"
         }
 
-        async fn on_request(
-            &self,
-            _ctx: &mut HttpFilterContext<'_>,
-        ) -> Result<FilterAction, FilterError> {
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Continue)
         }
     }

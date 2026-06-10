@@ -166,6 +166,17 @@ body: '{"ok": true}'
         assert!(result.is_err(), "missing status should fail");
     }
 
+    #[test]
+    fn from_config_rejects_invalid_status() {
+        let below = serde_yaml::from_str::<serde_yaml::Value>("status: 99").unwrap();
+        let err = StaticResponseFilter::from_config(&below);
+        assert!(err.is_err(), "status 99 is below 100 and should be rejected");
+
+        let above = serde_yaml::from_str::<serde_yaml::Value>("status: 600").unwrap();
+        let err = StaticResponseFilter::from_config(&above);
+        assert!(err.is_err(), "status 600 is above 599 and should be rejected");
+    }
+
     #[tokio::test]
     async fn returns_configured_response() {
         let yaml = serde_yaml::from_str::<serde_yaml::Value>(
