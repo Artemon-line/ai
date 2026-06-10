@@ -502,6 +502,87 @@ filter_chains:
     }
 
     #[test]
+    fn credential_injection_env_var_redacted_in_dump() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: credential_injection
+        clusters:
+          - name: backend
+            header: Authorization
+            env_var: "SECRET_TOKEN"
+            header_prefix: "Bearer "
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:9090"
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let output = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            !output.contains("SECRET_TOKEN"),
+            "env_var credential must be redacted in dump: {output}"
+        );
+        assert!(output.contains("[REDACTED]"), "redaction marker must appear: {output}");
+        assert!(
+            output.contains("header_prefix"),
+            "non-sensitive fields must remain: {output}"
+        );
+    }
+
+    #[test]
+    fn redact_sensitive_keys_nested_password() {
+        let mut value = serde_yaml::Value::Mapping({
+            let mut root = serde_yaml::Mapping::new();
+            let mut filter_map = serde_yaml::Mapping::new();
+            let mut config_map = serde_yaml::Mapping::new();
+            config_map.insert(
+                serde_yaml::Value::String("password".to_owned()),
+                serde_yaml::Value::String("secret123".to_owned()),
+            );
+            filter_map.insert(
+                serde_yaml::Value::String("config".to_owned()),
+                serde_yaml::Value::Mapping(config_map),
+            );
+            root.insert(
+                serde_yaml::Value::String("some_filter".to_owned()),
+                serde_yaml::Value::Mapping(filter_map),
+            );
+            root
+        });
+        redact_sensitive_keys(&mut value);
+        let nested_password = value
+            .as_mapping()
+            .unwrap()
+            .get(serde_yaml::Value::String("some_filter".to_owned()))
+            .unwrap()
+            .as_mapping()
+            .unwrap()
+            .get(serde_yaml::Value::String("config".to_owned()))
+            .unwrap()
+            .as_mapping()
+            .unwrap()
+            .get(serde_yaml::Value::String("password".to_owned()))
+            .unwrap();
+        assert_eq!(
+            nested_password.as_str(),
+            Some("[REDACTED]"),
+            "nested password field must be redacted"
+        );
+    }
+
+    #[test]
     fn redact_credential_values_non_sequence_clusters() {
         let mut config = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
         config.as_mapping_mut().unwrap().insert(
