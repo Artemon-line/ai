@@ -246,14 +246,18 @@ fn strip_port(host: &str) -> &str {
 /// Checks `X-Forwarded-Proto` first, then `downstream_tls`, then
 /// falls back to the URI scheme. Defaults to `"http"`.
 fn infer_scheme(ctx: &HttpFilterContext<'_>) -> &'static str {
-    if ctx
+    if let Some(proto) = ctx
         .request
         .headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| s.eq_ignore_ascii_case("https"))
     {
-        return "https";
+        if proto.eq_ignore_ascii_case("https") {
+            return "https";
+        }
+        if proto.eq_ignore_ascii_case("http") {
+            return "http";
+        }
     }
     if ctx.downstream_tls {
         return "https";
