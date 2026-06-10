@@ -31,6 +31,7 @@ use self::{
     envelope::{A2aEnvelope, extract_a2a_envelope},
     task_routing::LocalTaskRouteStore,
 };
+use super::MAX_DYNAMIC_VALUE_LEN;
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
@@ -41,8 +42,6 @@ use crate::{
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
-
-use super::MAX_DYNAMIC_VALUE_LEN;
 
 // -----------------------------------------------------------------------------
 // A2aFilter

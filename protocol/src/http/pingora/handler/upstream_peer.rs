@@ -221,7 +221,10 @@ fn lookup_cached(address: &str) -> Option<SocketAddr> {
             .copied()
     });
 
-    if CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 64 == 0 {
+    if CALL_COUNT
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .is_multiple_of(64)
+    {
         cache.retain(|_, entry| entry.resolved_at.elapsed().as_secs() < DNS_TTL_SECS);
     }
 

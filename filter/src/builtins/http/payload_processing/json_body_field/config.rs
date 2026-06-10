@@ -5,7 +5,10 @@
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::{DEFAULT_JSON_BODY_MAX_BYTES, MAX_JSON_BODY_BYTES}};
+use crate::{
+    FilterError,
+    body::{DEFAULT_JSON_BODY_MAX_BYTES, MAX_JSON_BODY_BYTES},
+};
 
 // -----------------------------------------------------------------------------
 // JsonBodyFieldMapping

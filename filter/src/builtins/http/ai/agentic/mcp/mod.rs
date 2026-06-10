@@ -23,8 +23,6 @@ mod tests;
 
 use std::borrow::Cow;
 
-use super::MAX_DYNAMIC_VALUE_LEN;
-
 use async_trait::async_trait;
 use bytes::Bytes;
 use tracing::{trace, warn};
@@ -33,7 +31,10 @@ use self::{
     config::{InvalidMcpBehavior, McpConfig, MismatchBehavior, MissingHeaderBehavior, build_config},
     envelope::{McpEnvelope, extract_mcp_envelope},
 };
-use super::json_rpc::{config::JsonRpcConfig, envelope::parse_json_rpc_value};
+use super::{
+    MAX_DYNAMIC_VALUE_LEN,
+    json_rpc::{config::JsonRpcConfig, envelope::parse_json_rpc_value},
+};
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
@@ -315,9 +316,7 @@ fn validate_single_header(
                 return Err(FilterAction::Reject(Rejection::status(400)));
             },
             MissingHeaderBehavior::Synthesize => {
-                if !contains_control_chars(body_value)
-                    && body_value.len() <= MAX_DYNAMIC_VALUE_LEN
-                {
+                if !contains_control_chars(body_value) && body_value.len() <= MAX_DYNAMIC_VALUE_LEN {
                     ctx.extra_request_headers
                         .push((Cow::Owned(header_name.to_owned()), body_value.to_owned()));
                 }
