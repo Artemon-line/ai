@@ -117,13 +117,13 @@ impl CredentialInjectionFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: CredentialInjectionConfig = parse_filter_config("credential_injection", config)?;
 
-        if cfg.clusters.is_empty() {
+        if cfg.names.is_empty() {
             return Err("credential_injection: 'clusters' must not be empty".into());
         }
 
-        let mut credentials = HashMap::with_capacity(cfg.clusters.len());
+        let mut credentials = HashMap::with_capacity(cfg.names.len());
 
-        for cluster_cfg in &cfg.clusters {
+        for cluster_cfg in &cfg.names {
             let credential = resolve_credential(cluster_cfg)?;
             credentials.insert(Arc::<str>::from(cluster_cfg.name.as_str()), credential);
         }
@@ -170,7 +170,7 @@ fn resolve_credential(cfg: &ClusterCredentialConfig) -> Result<ClusterCredential
     http::HeaderName::from_bytes(cfg.header.as_bytes()).map_err(|e| -> FilterError {
         format!(
             "credential_injection: invalid header name '{}' for cluster '{}': {e}",
-            cfg.header, cfg.cluster
+            cfg.header, cfg.name
         )
         .into()
     })?;
@@ -185,7 +185,7 @@ fn resolve_credential(cfg: &ClusterCredentialConfig) -> Result<ClusterCredential
     http::HeaderValue::from_str(&header_value).map_err(|e| -> FilterError {
         format!(
             "credential_injection: assembled header value is invalid for cluster '{}': {e}",
-            cfg.cluster
+            cfg.name
         )
         .into()
     })?;
