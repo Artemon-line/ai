@@ -76,9 +76,9 @@ mod tests {
 
         drop(first);
 
-        let (exceeded, _reclaimed) = try_acquire_global();
+        let (exceeded, reclaimed) = try_acquire_global();
         assert!(!exceeded, "acquire after drop should not exceed limit");
-        assert!(_reclaimed.is_some(), "released slot should yield a permit");
+        assert!(reclaimed.is_some(), "released slot should yield a permit");
 
         drop(second);
     }
