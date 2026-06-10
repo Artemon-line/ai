@@ -167,12 +167,28 @@ impl HttpFilter for CredentialInjectionFilter {
 
 /// Resolve a cluster credential config into a ready-to-inject value.
 fn resolve_credential(cfg: &ClusterCredentialConfig) -> Result<ClusterCredential, FilterError> {
+    http::HeaderName::from_bytes(cfg.header.as_bytes()).map_err(|e| -> FilterError {
+        format!(
+            "credential_injection: invalid header name '{}' for cluster '{}': {e}",
+            cfg.header, cfg.cluster
+        )
+        .into()
+    })?;
+
     let raw_value = resolve_raw_value(cfg)?;
 
     let header_value = match &cfg.header_prefix {
         Some(prefix) => format!("{prefix}{raw_value}"),
         None => raw_value,
     };
+
+    http::HeaderValue::from_str(&header_value).map_err(|e| -> FilterError {
+        format!(
+            "credential_injection: assembled header value is invalid for cluster '{}': {e}",
+            cfg.cluster
+        )
+        .into()
+    })?;
 
     Ok(ClusterCredential {
         header: cfg.header.clone(),
