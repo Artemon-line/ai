@@ -154,6 +154,10 @@ impl HttpFilter for CredentialInjectionFilter {
             header = %cred.header,
             "injecting credential header (replaces any client-provided value)"
         );
+        // Zeroizing<String> is cloned into a plain String here because
+        // http::HeaderValue does not support zeroize. The unzeroized copy
+        // persists in heap until deallocation. Accepted residual risk:
+        // exploitation requires a memory-read primitive on the proxy process.
         ctx.extra_request_headers
             .push((Cow::Owned(cred.header.clone()), cred.header_value.as_str().to_owned()));
 
