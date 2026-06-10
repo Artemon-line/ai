@@ -23,6 +23,8 @@ mod tests;
 
 use std::borrow::Cow;
 
+use super::MAX_DYNAMIC_VALUE_LEN;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use tracing::{trace, warn};
@@ -313,7 +315,9 @@ fn validate_single_header(
                 return Err(FilterAction::Reject(Rejection::status(400)));
             },
             MissingHeaderBehavior::Synthesize => {
-                if !contains_control_chars(body_value) {
+                if !contains_control_chars(body_value)
+                    && body_value.len() <= MAX_DYNAMIC_VALUE_LEN
+                {
                     ctx.extra_request_headers
                         .push((Cow::Owned(header_name.to_owned()), body_value.to_owned()));
                 }
@@ -370,8 +374,10 @@ fn write_metadata(
     envelope: &super::json_rpc::envelope::JsonRpcEnvelope,
     mcp: &McpEnvelope,
 ) {
+    let max_len = MAX_DYNAMIC_VALUE_LEN;
+
     let method_str = mcp.method.as_str();
-    if !contains_control_chars(method_str) {
+    if !contains_control_chars(method_str) && method_str.len() <= max_len {
         ctx.set_metadata("json_rpc.method", method_str);
         ctx.set_metadata("mcp.method", method_str);
     }
@@ -379,6 +385,7 @@ fn write_metadata(
 
     if let Some(name) = &mcp.name
         && !contains_control_chars(name)
+        && name.len() <= max_len
     {
         ctx.set_metadata("mcp.name", name.clone());
     }
@@ -401,9 +408,11 @@ fn promote_mcp_headers(
     config: &McpConfig,
     headers: &mut Vec<(Cow<'static, str>, String)>,
 ) {
+    let max_len = MAX_DYNAMIC_VALUE_LEN;
+
     if let Some(header_name) = &config.headers.method {
         let method_str = mcp.method.as_str();
-        if !contains_control_chars(method_str) {
+        if !contains_control_chars(method_str) && method_str.len() <= max_len {
             headers.push((Cow::Owned(header_name.clone()), method_str.to_owned()));
         }
     }
@@ -411,6 +420,7 @@ fn promote_mcp_headers(
     if let Some(header_name) = &config.headers.name
         && let Some(name) = &mcp.name
         && !contains_control_chars(name)
+        && name.len() <= max_len
     {
         headers.push((Cow::Owned(header_name.clone()), name.clone()));
     }

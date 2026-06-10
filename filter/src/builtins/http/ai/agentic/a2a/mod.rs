@@ -42,12 +42,7 @@ use crate::{
     filter::{HttpFilter, HttpFilterContext},
 };
 
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Maximum length for dynamic values before promotion (256 bytes to match durable metadata limit).
-const MAX_DYNAMIC_VALUE_LEN: usize = 256;
+use super::MAX_DYNAMIC_VALUE_LEN;
 
 // -----------------------------------------------------------------------------
 // A2aFilter
