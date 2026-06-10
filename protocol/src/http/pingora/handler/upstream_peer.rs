@@ -190,7 +190,10 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
 
     dns_cache()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(|e| {
+            tracing::warn!("DNS cache mutex poisoned; recovering");
+            e.into_inner()
+        })
         .insert(
             address.to_owned(),
             DnsCacheEntry {
@@ -208,7 +211,10 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
 fn lookup_cached(address: &str) -> Option<SocketAddr> {
     static CALL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    let mut cache = dns_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cache = dns_cache().lock().unwrap_or_else(|e| {
+        tracing::warn!("DNS cache mutex poisoned; recovering");
+        e.into_inner()
+    });
     let result = cache.get(address).and_then(|entry| {
         if entry.resolved_at.elapsed().as_secs() >= DNS_TTL_SECS {
             return None;
