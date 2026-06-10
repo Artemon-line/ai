@@ -218,6 +218,12 @@ impl HttpFilter for RedirectFilter {
 ///
 /// `${query}` includes the `?` prefix when a query string is present,
 /// and expands to an empty string when absent.
+///
+/// # Security
+///
+/// `${host}` is populated from the request `Host` header without
+/// validation. Templates using `${host}` should only be deployed
+/// behind host-constrained listeners to prevent open redirect.
 fn expand_location(template: &str, path: &str, query: Option<&str>, host: Option<&str>, scheme: &str) -> String {
     let safe_path = crate::builtins::http::transformation::path_sanitize::normalize_rewritten_path(path);
     let mut result = template.replace("${path}", &safe_path);

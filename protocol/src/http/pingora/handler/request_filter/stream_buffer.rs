@@ -46,7 +46,11 @@ const TRACE_ALLOWED_HEADERS: &[&str] = &[
 /// Build a TRACE echo response containing the request headers as the body.
 ///
 /// Per [RFC 9110 Section 9.3.8], a TRACE response echoes the request
-/// message with content-type `message/http`.
+/// message with content-type `message/http`. Only headers in
+/// [`TRACE_ALLOWED_HEADERS`] are echoed; all others are redacted.
+///
+/// TRACE is enabled by default per RFC. Deployments concerned about
+/// TRACE-based reconnaissance should block it via filter conditions.
 ///
 /// [RFC 9110 Section 9.3.8]: https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.8
 pub(super) fn build_trace_response(session: &Session) -> Rejection {

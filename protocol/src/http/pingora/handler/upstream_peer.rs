@@ -83,6 +83,9 @@ async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls, address: &str) {
+    // verify: false disables both cert and hostname verification as a
+    // single toggle. Splitting into verify_cert / verify_hostname would
+    // require a config schema change (accepted design limitation).
     if !tls.verify() {
         tracing::debug!(upstream = %address, "upstream TLS verification disabled for this peer");
         peer.options.verify_cert = false;
