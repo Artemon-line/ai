@@ -141,18 +141,14 @@ impl EndpointHealth {
     /// assert!(ep.is_healthy());
     /// ```
     #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn record_success(&self, healthy_threshold: u32) -> bool {
-        let transitioned = {
-            let mut inner = self.inner.lock().expect("health lock poisoned");
-            inner.consecutive_failures = 0;
-            inner.consecutive_successes = inner.consecutive_successes.saturating_add(1);
-            let t = inner.consecutive_successes >= healthy_threshold && !inner.healthy;
-            if t {
-                inner.healthy = true;
-            }
-            t
-        };
+        let mut inner = self.inner.lock().expect("health lock poisoned");
+        inner.consecutive_failures = 0;
+        inner.consecutive_successes = inner.consecutive_successes.saturating_add(1);
+        let transitioned = inner.consecutive_successes >= healthy_threshold && !inner.healthy;
         if transitioned {
+            inner.healthy = true;
             self.healthy_cache.store(true, Ordering::Release);
         }
         transitioned
@@ -175,18 +171,14 @@ impl EndpointHealth {
     /// assert!(!ep.is_healthy());
     /// ```
     #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn record_failure(&self, unhealthy_threshold: u32) -> bool {
-        let transitioned = {
-            let mut inner = self.inner.lock().expect("health lock poisoned");
-            inner.consecutive_successes = 0;
-            inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
-            let t = inner.consecutive_failures >= unhealthy_threshold && inner.healthy;
-            if t {
-                inner.healthy = false;
-            }
-            t
-        };
+        let mut inner = self.inner.lock().expect("health lock poisoned");
+        inner.consecutive_successes = 0;
+        inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
+        let transitioned = inner.consecutive_failures >= unhealthy_threshold && inner.healthy;
         if transitioned {
+            inner.healthy = false;
             self.healthy_cache.store(false, Ordering::Release);
         }
         transitioned
