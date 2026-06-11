@@ -111,7 +111,7 @@ const POSTGRES_MAX_IDENTIFIER_LEN: usize = 63;
 const POSTGRES_MAX_CONVERSATION_TABLE_LEN: usize = POSTGRES_MAX_IDENTIFIER_LEN - 14;
 
 /// Reject identifiers that could cause SQL injection or invalid DDL.
-fn validate_identifier(name: &str) -> Result<(), StoreError> {
+pub(crate) fn validate_identifier(name: &str) -> Result<(), StoreError> {
     if name.is_empty() {
         return Err(StoreError::Database("table name must not be empty".to_owned()));
     }
