@@ -162,9 +162,7 @@ fn validate_server_name(name: &str) -> Result<(), TlsError> {
     }
     if has_wildcard && label_count < 3 {
         return Err(TlsError::ServerConfigError {
-            detail: format!(
-                "server_names '{name}': wildcard requires at least 3 labels (e.g. *.example.com)"
-            ),
+            detail: format!("server_names '{name}': wildcard requires at least 3 labels (e.g. *.example.com)"),
         });
     }
     Ok(())

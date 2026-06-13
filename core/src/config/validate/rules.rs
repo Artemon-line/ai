@@ -17,7 +17,7 @@ use super::{
     listener::{validate_listener_names, validate_listeners},
 };
 use crate::{
-    config::{BodyLimitsConfig, Config, ABSOLUTE_MAX_BODY_BYTES, ProtocolKind},
+    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, ProtocolKind},
     errors::ProxyError,
 };
 
