@@ -59,8 +59,10 @@ pub(super) fn validate_tcp_group_consistency(
     groups: &HashMap<TcpGroupKey, Vec<&praxis_core::config::Listener>>,
 ) -> Result<(), ProxyError> {
     for listeners in groups.values() {
-        let first = &listeners[0];
-        for listener in &listeners[1..] {
+        let Some((first, rest)) = listeners.split_first() else {
+            continue;
+        };
+        for listener in rest {
             if listener.filter_chains != first.filter_chains {
                 return Err(ProxyError::Config(format!(
                     "TCP listeners '{}' and '{}' share the same upstream/timeout \

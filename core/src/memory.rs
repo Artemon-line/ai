@@ -141,8 +141,8 @@ fn epoch_ms() -> u64 {
 ///
 /// Uses `VmRSS` (reported in kB) instead of `/proc/self/statm`
 /// (reported in pages) to avoid dependence on the kernel page
-/// size, which varies across architectures (4 KiB on x86_64,
-/// 4/16/64 KiB on aarch64 depending on kernel config).
+/// size, which varies across architectures (4 `KiB` on `x86_64`,
+/// 4/16/64 `KiB` on `aarch64` depending on kernel config).
 ///
 /// Returns `None` on non-Linux or on parse failure.
 #[cfg(target_os = "linux")]

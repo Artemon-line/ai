@@ -307,6 +307,10 @@ pub struct ClusterHealthEntry {
 
 impl ClusterHealthEntry {
     /// Create a new cluster health entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `endpoints` and `addresses` have different lengths.
     pub fn new(
         endpoints: Vec<EndpointHealth>,
         addresses: Vec<Arc<str>>,
