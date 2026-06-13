@@ -258,6 +258,16 @@ impl ServerApp for PingoraTcpProxy {
             && let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream, &peeked_bytes).await
         {
             warn!(upstream = %upstream_addr, error = %e, "failed to write peeked bytes to upstream");
+            self.run_disconnect_filters(
+                &remote_addr,
+                &local_addr,
+                &upstream_addr,
+                sni_hostname.as_deref(),
+                connect_time,
+                0,
+                0,
+            )
+            .await;
             return None;
         }
 
