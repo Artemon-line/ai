@@ -35,7 +35,7 @@ pub(super) fn group_tcp_listeners(config: &Config) -> HashMap<TcpGroupKey, Vec<&
         let key = (
             listener.upstream.clone(),
             listener.cluster.clone(),
-            listener.tcp_idle_timeout_ms,
+            listener.tcp_session_timeout_ms,
             listener.tcp_max_duration_secs,
         );
         groups.entry(key).or_default().push(listener);
@@ -163,7 +163,7 @@ listeners:
         .unwrap();
         let groups = group_tcp_listeners(&config);
         assert_eq!(groups.len(), 1, "same upstream + timeout should produce one group");
-        let default_timeout = config.listeners[0].tcp_idle_timeout_ms;
+        let default_timeout = config.listeners[0].tcp_session_timeout_ms;
         let key = (Some("10.0.0.1:5432".to_owned()), None, default_timeout, None);
         assert_eq!(groups[&key].len(), 2, "both listeners should be in the same group");
     }
@@ -201,7 +201,7 @@ listeners:
     address: "0.0.0.0:5433"
     protocol: tcp
     upstream: "10.0.0.1:5432"
-    tcp_idle_timeout_ms: 30000
+    tcp_session_timeout_ms: 30000
 "#,
         )
         .unwrap();
@@ -223,7 +223,7 @@ listeners:
             .iter()
             .find(|l| l.protocol == ProtocolKind::Tcp)
             .unwrap()
-            .tcp_idle_timeout_ms;
+            .tcp_session_timeout_ms;
         let key = (Some("10.0.0.1:5432".to_owned()), None, timeout, None);
         assert!(groups.contains_key(&key), "only TCP listener should be grouped");
     }
@@ -327,7 +327,7 @@ filter_chains:
                 filter_chains: vec![],
                 max_connections: None,
                 protocol: ProtocolKind::Tcp,
-                tcp_idle_timeout_ms: None,
+                tcp_session_timeout_ms: None,
                 tcp_max_duration_secs: None,
                 tls: None,
                 upstream: None,

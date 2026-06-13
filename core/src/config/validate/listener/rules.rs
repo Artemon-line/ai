@@ -286,7 +286,7 @@ filter_chains:
                 max_connections: None,
                 name: format!("l{i}"),
                 protocol: Default::default(),
-                tcp_idle_timeout_ms: None,
+                tcp_session_timeout_ms: None,
                 tcp_max_duration_secs: None,
                 tls: None,
                 upstream: None,
