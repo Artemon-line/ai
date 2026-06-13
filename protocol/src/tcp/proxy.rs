@@ -393,7 +393,7 @@ fn handle_sni_read(buf: &mut Vec<u8>, filled: usize) -> PeekAction {
                 return PeekAction::Done(None);
             }
             if filled == buf.len() {
-                buf.resize(buf.len() * 2, 0);
+                buf.resize((buf.len() * 2).min(PEEK_MAX), 0);
             }
             PeekAction::ReadMore
         },
