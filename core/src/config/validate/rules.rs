@@ -103,12 +103,12 @@ fn validate_body_limits(limits: &BodyLimitsConfig, allow_unbounded: bool) -> Res
 
 /// Reject a body limit that exceeds the absolute ceiling.
 fn validate_body_limit_ceiling(field: &str, value: Option<usize>) -> Result<(), ProxyError> {
-    if let Some(v) = value {
-        if v > ABSOLUTE_MAX_BODY_BYTES {
-            return Err(ProxyError::Config(format!(
-                "body_limits.{field} ({v} bytes) exceeds maximum ({ABSOLUTE_MAX_BODY_BYTES} bytes / 64 MiB)"
-            )));
-        }
+    if let Some(v) = value
+        && v > ABSOLUTE_MAX_BODY_BYTES
+    {
+        return Err(ProxyError::Config(format!(
+            "body_limits.{field} ({v} bytes) exceeds maximum ({ABSOLUTE_MAX_BODY_BYTES} bytes / 64 MiB)"
+        )));
     }
     Ok(())
 }
