@@ -313,7 +313,7 @@ impl ClusterHealthEntry {
         passive_unhealthy_threshold: Option<u32>,
         passive_healthy_threshold: Option<u32>,
     ) -> Self {
-        debug_assert_eq!(
+        assert_eq!(
             endpoints.len(),
             addresses.len(),
             "endpoints and addresses must have the same length"
