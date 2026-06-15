@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! [`ResponseStoreFilter`] persists non-streaming Responses API
-//! responses to the configured store backend.
+//! responses to the configured store backend and handles
+//! `DELETE /v1/responses/{id}` locally.
 //!
 //! # Lifecycle design
 //!
@@ -147,6 +148,28 @@ impl ResponseStoreFilter {
         }
     }
 
+    /// Handle `DELETE /v1/responses/{id}` by deleting from the store.
+    async fn handle_delete(&self, tenant_id: &str, id: &str) -> Result<FilterAction, FilterError> {
+        let store = self.store.get_or_init(|| async { self.init_store().await }).await;
+
+        let Some(store) = store else {
+            return Ok(FilterAction::Continue);
+        };
+
+        let deleted = store
+            .delete_response(tenant_id, id)
+            .await
+            .map_err(|e| FilterError::from(format!("openai_response_store: delete failed: {e}")))?;
+
+        if deleted {
+            debug!(id, tenant_id, "response deleted");
+            Ok(FilterAction::Reject(delete_success_rejection(id)?))
+        } else {
+            debug!(id, tenant_id, "response not found for delete");
+            Ok(FilterAction::Reject(delete_not_found_rejection(id)?))
+        }
+    }
+
     /// Return whether this exchange should release response body
     /// chunks immediately instead of waiting for EOS.
     fn should_release_skipped_response_body(&self, ctx: &HttpFilterContext<'_>) -> bool {
@@ -191,6 +214,56 @@ impl ResponseCapture {
             messages: json.get("output").cloned().unwrap_or(Value::Null),
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Path Extraction
+// -----------------------------------------------------------------------------
+
+/// Extract the response ID from a `/v1/responses/{id}` path.
+///
+/// Returns `None` if the path does not match the expected pattern.
+pub(super) fn extract_response_id(path: &str) -> Option<&str> {
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let segments: Vec<&str> = path.split('/').collect();
+
+    match segments.as_slice() {
+        ["", "v1", "responses", id] if !id.is_empty() => Some(id),
+        _ => None,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Delete Response Helpers
+// -----------------------------------------------------------------------------
+
+/// Build the 200 rejection for a successful delete.
+fn delete_success_rejection(id: &str) -> Result<Rejection, FilterError> {
+    let body = serde_json::to_string(&serde_json::json!({
+        "id": id,
+        "object": "response.deleted",
+        "deleted": true,
+    }))
+    .map_err(|e| FilterError::from(format!("openai_response_store: serialize failed: {e}")))?;
+
+    Ok(Rejection::status(200)
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from(body)))
+}
+
+/// Build the 404 rejection for a missing response.
+fn delete_not_found_rejection(id: &str) -> Result<Rejection, FilterError> {
+    let body = serde_json::to_string(&serde_json::json!({
+        "error": {
+            "message": format!("No response found with id: '{id}'."),
+            "type": "invalid_request_error",
+        }
+    }))
+    .map_err(|e| FilterError::from(format!("openai_response_store: serialize failed: {e}")))?;
+
+    Ok(Rejection::status(404)
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from(body)))
 }
 
 // -----------------------------------------------------------------------------
@@ -369,6 +442,14 @@ impl HttpFilter for ResponseStoreFilter {
         if ctx.request.method == http::Method::GET {
             if let Some(action) = self.try_get_retrieval(ctx).await? {
                 return Ok(action);
+            }
+            return Ok(FilterAction::Continue);
+        }
+
+        if ctx.request.method == http::Method::DELETE {
+            if let Some(id) = extract_response_id(ctx.request.uri.path()) {
+                let tenant_id = ctx.get_metadata(TENANT_METADATA_KEY).unwrap_or(DEFAULT_TENANT_ID);
+                return self.handle_delete(tenant_id, id).await;
             }
             return Ok(FilterAction::Continue);
         }
