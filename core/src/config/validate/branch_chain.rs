@@ -106,6 +106,7 @@ fn collect_branch_names(
     );
 
     for entry in filters {
+        entry.warn_config_typos();
         let Some(branches) = &entry.branch_chains else {
             continue;
         };
