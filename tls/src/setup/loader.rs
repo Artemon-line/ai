@@ -47,7 +47,12 @@ pub(crate) fn load_certified_key(pair: &CertKeyPair) -> Result<CertifiedKey, Tls
             path: pair.key_path.clone(),
             detail: format!("unsupported private key type: {e}"),
         })?;
-    Ok(CertifiedKey::new(certs, signing_key))
+    let certified = CertifiedKey::new(certs, signing_key);
+    certified.keys_match().map_err(|e| TlsError::FileLoadError {
+        path: pair.cert_path.clone(),
+        detail: format!("certificate and private key do not match: {e}"),
+    })?;
+    Ok(certified)
 }
 
 /// Load certificate chain and private key from PEM files.
