@@ -430,81 +430,49 @@ filter_chains:
         owned.iter().map(|(k, v)| (k.clone(), v.iter().collect())).collect()
     }
 
-    /// Build grouped listeners with different filter_chains.
+    /// Build grouped listeners with different `filter_chains`.
     fn groups_with_different_filter_chains() -> HashMap<TcpGroupKey, Vec<praxis_core::config::Listener>> {
-        use praxis_core::config::{Listener, ProtocolKind};
-        let key = (Some("10.0.0.1:5432".to_owned()), None, None, None);
-        let mut groups = HashMap::new();
-        groups.insert(
-            key,
-            vec![
-                Listener {
-                    name: "a".to_owned(),
-                    address: "0.0.0.0:5432".to_owned(),
-                    cluster: None,
-                    downstream_read_timeout_ms: None,
-                    filter_chains: vec!["chain-a".to_owned()],
-                    max_connections: None,
-                    protocol: ProtocolKind::Tcp,
-                    tcp_session_timeout_ms: None,
-                    tcp_max_duration_secs: None,
-                    tls: None,
-                    upstream: Some("10.0.0.1:5432".to_owned()),
-                },
-                Listener {
-                    name: "b".to_owned(),
-                    address: "0.0.0.0:5433".to_owned(),
-                    cluster: None,
-                    downstream_read_timeout_ms: None,
-                    filter_chains: vec!["chain-b".to_owned()],
-                    max_connections: None,
-                    protocol: ProtocolKind::Tcp,
-                    tcp_session_timeout_ms: None,
-                    tcp_max_duration_secs: None,
-                    tls: None,
-                    upstream: Some("10.0.0.1:5432".to_owned()),
-                },
-            ],
-        );
-        groups
+        let mut a = make_tcp_listener("a", "0.0.0.0:5432");
+        a.filter_chains = vec!["chain-a".to_owned()];
+        let mut b = make_tcp_listener("b", "0.0.0.0:5433");
+        b.filter_chains = vec!["chain-b".to_owned()];
+        make_group(vec![a, b])
     }
 
-    /// Build grouped listeners with different max_connections.
+    /// Build grouped listeners with different `max_connections`.
     fn groups_with_different_max_connections() -> HashMap<TcpGroupKey, Vec<praxis_core::config::Listener>> {
+        let mut a = make_tcp_listener("a", "0.0.0.0:5432");
+        a.max_connections = Some(100);
+        let mut b = make_tcp_listener("b", "0.0.0.0:5433");
+        b.max_connections = Some(200);
+        make_group(vec![a, b])
+    }
+
+    /// Build a TCP listener with the given name and address.
+    fn make_tcp_listener(name: &str, address: &str) -> praxis_core::config::Listener {
         use praxis_core::config::{Listener, ProtocolKind};
+        Listener {
+            name: name.to_owned(),
+            address: address.to_owned(),
+            cluster: None,
+            downstream_read_timeout_ms: None,
+            filter_chains: vec![],
+            max_connections: None,
+            protocol: ProtocolKind::Tcp,
+            tcp_session_timeout_ms: None,
+            tcp_max_duration_secs: None,
+            tls: None,
+            upstream: Some("10.0.0.1:5432".to_owned()),
+        }
+    }
+
+    /// Wrap listeners into a single-group map.
+    fn make_group(
+        listeners: Vec<praxis_core::config::Listener>,
+    ) -> HashMap<TcpGroupKey, Vec<praxis_core::config::Listener>> {
         let key = (Some("10.0.0.1:5432".to_owned()), None, None, None);
         let mut groups = HashMap::new();
-        groups.insert(
-            key,
-            vec![
-                Listener {
-                    name: "a".to_owned(),
-                    address: "0.0.0.0:5432".to_owned(),
-                    cluster: None,
-                    downstream_read_timeout_ms: None,
-                    filter_chains: vec![],
-                    max_connections: Some(100),
-                    protocol: ProtocolKind::Tcp,
-                    tcp_session_timeout_ms: None,
-                    tcp_max_duration_secs: None,
-                    tls: None,
-                    upstream: Some("10.0.0.1:5432".to_owned()),
-                },
-                Listener {
-                    name: "b".to_owned(),
-                    address: "0.0.0.0:5433".to_owned(),
-                    cluster: None,
-                    downstream_read_timeout_ms: None,
-                    filter_chains: vec![],
-                    max_connections: Some(200),
-                    protocol: ProtocolKind::Tcp,
-                    tcp_session_timeout_ms: None,
-                    tcp_max_duration_secs: None,
-                    tls: None,
-                    upstream: Some("10.0.0.1:5432".to_owned()),
-                },
-            ],
-        );
+        groups.insert(key, listeners);
         groups
     }
 }

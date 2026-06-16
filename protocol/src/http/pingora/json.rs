@@ -32,6 +32,7 @@ pub(crate) fn json_response(status: u16, body: &[u8]) -> Response<Vec<u8>> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
