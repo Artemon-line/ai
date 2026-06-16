@@ -65,8 +65,8 @@ pub(crate) struct PingoraTcpProxy {
     /// Per-listener connection semaphore for max connections.
     connection_semaphore: Option<Arc<Semaphore>>,
 
-    /// Optional idle timeout for the bidirectional forwarding session.
-    idle_timeout: Option<Duration>,
+    /// Optional session timeout for the bidirectional forwarding phase.
+    session_timeout: Option<Duration>,
 
     /// Optional maximum total session duration.
     max_duration: Option<Duration>,
@@ -85,14 +85,14 @@ impl PingoraTcpProxy {
         upstream_addr: Option<String>,
         cluster: Option<Arc<str>>,
         pipeline: Arc<ArcSwap<FilterPipeline>>,
-        idle_timeout: Option<Duration>,
+        session_timeout: Option<Duration>,
         max_duration: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
         Self {
             cluster,
             connection_semaphore,
-            idle_timeout,
+            session_timeout,
             max_duration,
             pipeline,
             upstream_addr,
@@ -129,7 +129,7 @@ impl PingoraTcpProxy {
     ) -> Option<io::Result<(u64, u64)>> {
         let copy_fut = async {
             let copy_future = tokio::io::copy_bidirectional(session, upstream);
-            match self.idle_timeout {
+            match self.session_timeout {
                 Some(timeout) => forward_with_timeout(copy_future, shutdown_rx, timeout, upstream_addr).await,
                 None => forward_no_timeout(copy_future, shutdown_rx).await,
             }
