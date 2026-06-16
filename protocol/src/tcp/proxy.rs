@@ -213,14 +213,17 @@ impl PingoraTcpProxy {
 impl ServerApp for PingoraTcpProxy {
     #[allow(clippy::too_many_lines, reason = "linear connection lifecycle")]
     async fn process_new(self: &Arc<Self>, mut session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
+        let connect_time = std::time::Instant::now();
+        let (remote_addr, local_addr) = extract_addrs(&session);
+
         if praxis_core::memory::is_exceeded() {
-            warn!("memory pressure threshold exceeded, closing TCP connection");
+            warn!(remote = %remote_addr, "memory pressure threshold exceeded, closing TCP connection");
             return None;
         }
 
         let (exceeded, _global_permit) = crate::connections::try_acquire_global();
         if exceeded {
-            warn!("global max connections reached, closing TCP connection");
+            warn!(remote = %remote_addr, "global max connections reached, closing TCP connection");
             return None;
         }
 
@@ -228,15 +231,12 @@ impl ServerApp for PingoraTcpProxy {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 Some(permit)
             } else {
-                warn!("max TCP connections reached, closing connection");
+                warn!(remote = %remote_addr, "max TCP connections reached, closing connection");
                 return None;
             }
         } else {
             None
         };
-
-        let connect_time = std::time::Instant::now();
-        let (remote_addr, local_addr) = extract_addrs(&session);
 
         let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
             let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
