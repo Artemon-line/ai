@@ -62,16 +62,7 @@ fn validate_health_check_timing(hc: &crate::config::HealthCheckConfig, cluster_n
             "cluster '{cluster_name}': health_check.timeout_ms must be greater than 0"
         )));
     }
-    if !hc.path.starts_with('/') {
-        return Err(ProxyError::Config(format!(
-            "cluster '{cluster_name}': health check path must start with '/'"
-        )));
-    }
-    if hc.path.contains('\r') || hc.path.contains('\n') {
-        return Err(ProxyError::Config(format!(
-            "cluster '{cluster_name}': health_check.path must not contain CR or LF characters"
-        )));
-    }
+    validate_health_check_path(&hc.path, cluster_name)?;
     if hc.timeout_ms >= hc.interval_ms {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': health check timeout_ms ({}) must be \
@@ -98,6 +89,42 @@ fn validate_health_check_thresholds(
         )));
     }
     Ok(())
+}
+
+/// Validate health check path for injection-prone characters.
+fn validate_health_check_path(path: &str, cluster_name: &str) -> Result<(), ProxyError> {
+    if !path.starts_with('/') {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': health check path must start with '/'"
+        )));
+    }
+    if path.contains('\r') || path.contains('\n') {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': health_check.path must not contain CR or LF characters"
+        )));
+    }
+    if path.contains('?') || path.contains('#') {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': health_check.path must not contain '?' or '#'"
+        )));
+    }
+    if path.contains("%00") || contains_encoded_crlf(path) {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': health_check.path must not contain percent-encoded control characters"
+        )));
+    }
+    if path.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': health_check.path must not contain non-printable characters"
+        )));
+    }
+    Ok(())
+}
+
+/// Check for percent-encoded CR (%0d/%0D) or LF (%0a/%0A).
+fn contains_encoded_crlf(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    lower.contains("%0d") || lower.contains("%0a")
 }
 
 /// Validate passive health check thresholds.
@@ -832,6 +859,98 @@ clusters:
         assert!(
             err.to_string().contains("expected_status must be 100..=599"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_health_check_path_with_query() {
+        let clusters = vec![Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health?foo=bar".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("'?' or '#'"),
+            "query string in path should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_health_check_path_with_fragment() {
+        let clusters = vec![Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health#frag".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("'?' or '#'"),
+            "fragment in path should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_health_check_path_with_encoded_null() {
+        let clusters = vec![Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health%00z".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("percent-encoded control"),
+            "encoded null byte should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_health_check_path_with_encoded_crlf() {
+        let clusters = vec![Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health%0D%0AEvil: header".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("percent-encoded control"),
+            "encoded CRLF should be rejected: {err}"
         );
     }
 
