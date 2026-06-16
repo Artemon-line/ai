@@ -130,6 +130,7 @@ fn validate_branch(
     depth: usize,
 ) -> Result<(), ProxyError> {
     let bname = &branch.name;
+    super::validate_name_chars(bname, "branch")?;
     if !all_names.insert(branch.name.clone()) {
         return Err(ProxyError::Config(format!("duplicate branch name '{bname}'")));
     }
@@ -151,6 +152,7 @@ fn validate_branch(
 
     validate_max_iterations(branch)?;
     validate_on_result_filter_name(branch)?;
+    validate_on_result_key_value(branch)?;
 
     for chain_ref in &branch.chains {
         validate_chain_ref(chain_ref, all_names, chain_names, depth)?;
@@ -184,6 +186,37 @@ fn validate_on_result_filter_name(branch: &BranchChainConfig) -> Result<(), Prox
     Ok(())
 }
 
+/// Validate `on_result.key` and `on_result.value` are non-empty
+/// and contain only safe characters.
+fn validate_on_result_key_value(branch: &BranchChainConfig) -> Result<(), ProxyError> {
+    let Some(cond) = &branch.on_result else {
+        return Ok(());
+    };
+    let bname = &branch.name;
+    if cond.key.is_empty() {
+        return Err(ProxyError::Config(format!(
+            "branch '{bname}': on_result.key must not be empty"
+        )));
+    }
+    validate_on_result_field(&cond.key, "key", bname)?;
+    if cond.value.is_empty() {
+        return Err(ProxyError::Config(format!(
+            "branch '{bname}': on_result.result must not be empty"
+        )));
+    }
+    validate_on_result_field(&cond.value, "result", bname)
+}
+
+/// Validate a single `on_result` field uses safe characters.
+fn validate_on_result_field(val: &str, field: &str, branch_name: &str) -> Result<(), ProxyError> {
+    if !val.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err(ProxyError::Config(format!(
+            "branch '{branch_name}': on_result.{field} '{val}' must be ASCII alphanumeric, '_', or '-'"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate `max_iterations` constraints.
 fn validate_max_iterations(branch: &BranchChainConfig) -> Result<(), ProxyError> {
     let bname = &branch.name;
@@ -211,6 +244,7 @@ fn validate_chain_ref(
             }
         },
         ChainRef::Inline { name, filters } => {
+            super::validate_name_chars(name, "inline chain")?;
             if depth + 1 > MAX_BRANCH_DEPTH {
                 return Err(ProxyError::Config(format!(
                     "branch nesting depth exceeds maximum ({MAX_BRANCH_DEPTH})"
@@ -250,6 +284,152 @@ fn validate_chain_ref(
 )]
 mod tests {
     use crate::config::Config;
+
+    #[test]
+    fn reject_branch_name_with_special_chars() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: "bad.branch"
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("alphanumeric"),
+            "branch name with dots should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_inline_chain_name_with_special_chars() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            chains:
+              - name: "bad.inline"
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("alphanumeric"),
+            "inline chain name with dots should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_on_result_key() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            on_result:
+              filter: cache
+              key: ""
+              result: hit
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("on_result.key must not be empty"),
+            "empty on_result key should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_on_result_value() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            on_result:
+              filter: cache
+              result: ""
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("on_result.result must not be empty"),
+            "empty on_result value should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_on_result_key_with_special_chars() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            on_result:
+              filter: cache
+              key: "bad.key"
+              result: hit
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("on_result.key"),
+            "on_result key with dots should be rejected: {err}"
+        );
+    }
 
     #[test]
     fn valid_branch_config() {
