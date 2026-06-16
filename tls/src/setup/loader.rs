@@ -60,10 +60,11 @@ pub(super) fn load_cert_and_key(
     ),
     TlsError,
 > {
-    let cert_pem = std::fs::read(&pair.cert_path).map_err(|e| TlsError::FileLoadError {
+    let cert_pem = Zeroizing::new(std::fs::read(&pair.cert_path).map_err(|e| TlsError::FileLoadError {
         path: pair.cert_path.clone(),
         detail: format!("failed to read cert: {e}"),
-    })?;
+    })?);
+
     let key_pem = Zeroizing::new(std::fs::read(&pair.key_path).map_err(|e| TlsError::FileLoadError {
         path: pair.key_path.clone(),
         detail: format!("failed to read key: {e}"),
