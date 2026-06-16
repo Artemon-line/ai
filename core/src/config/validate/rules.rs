@@ -198,7 +198,22 @@ fn validate_upstream_ca_file(ca_file: Option<&str>) -> Result<(), ProxyError> {
         return Err(ProxyError::Config(format!("upstream_ca_file does not exist: {path}")));
     }
 
+    warn_if_symlink(path);
+
     Ok(())
+}
+
+/// Emit a warning when a path is a symlink.
+fn warn_if_symlink(path: &str) {
+    let p = Path::new(path);
+    if p.is_symlink() {
+        let target = std::fs::canonicalize(p).map_or_else(|_| "unknown".to_owned(), |c| c.display().to_string());
+        warn!(
+            path = path,
+            target = %target,
+            "file is a symlink"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
