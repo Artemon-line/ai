@@ -131,33 +131,40 @@ pub(super) fn validate_health_check_ssrf(
     for ep in &cluster.endpoints {
         let addr_str = ep.address();
         let host = extract_host(addr_str);
-
-        let Ok(ip) = host.parse::<IpAddr>() else {
-            continue;
-        };
-
-        let ip = normalize_mapped_ipv4(ip);
-
-        if is_ssrf_sensitive(&ip) {
-            if insecure_options.allow_private_health_checks {
-                warn!(
-                    cluster = %cluster.name,
-                    endpoint = %addr_str,
-                    "health check endpoint resolves to a sensitive address \
-                     (loopback or cloud metadata); allowed by insecure_options.allow_private_health_checks"
-                );
-            } else {
-                return Err(ProxyError::Config(format!(
-                    "cluster '{}': health check endpoint '{addr_str}' resolves to a \
-                     sensitive address (loopback or cloud metadata); set \
-                     insecure_options.allow_private_health_checks: true to allow",
-                    cluster.name
-                )));
-            }
-        }
+        check_ssrf_host(
+            host,
+            &cluster.name,
+            addr_str,
+            insecure_options.allow_private_health_checks,
+        )?;
     }
 
     Ok(())
+}
+
+/// Check a single host for SSRF sensitivity, emitting an error or
+/// warning depending on the override flag.
+fn check_ssrf_host(host: &str, cluster_name: &str, addr_str: &str, allowed: bool) -> Result<(), ProxyError> {
+    let sensitive = match host.parse::<IpAddr>() {
+        Ok(raw) => is_ssrf_sensitive(&normalize_mapped_ipv4(raw)),
+        Err(_) => is_ssrf_sensitive_hostname(host),
+    };
+    if !sensitive {
+        return Ok(());
+    }
+    if allowed {
+        warn!(
+            cluster = %cluster_name,
+            endpoint = %addr_str,
+            "health check endpoint resolves to a sensitive address; \
+             allowed by insecure_options.allow_private_health_checks"
+        );
+        return Ok(());
+    }
+    Err(ProxyError::Config(format!(
+        "cluster '{cluster_name}': health check endpoint '{addr_str}' resolves to a \
+         sensitive address; set insecure_options.allow_private_health_checks: true to allow"
+    )))
 }
 
 // -----------------------------------------------------------------------------
@@ -168,7 +175,7 @@ pub(super) fn validate_health_check_ssrf(
 ///
 /// Handles bracketed IPv6 (`[::1]:80` -> `::1`) and plain
 /// `host:port` (`127.0.0.1:80` -> `127.0.0.1`).
-fn extract_host(addr: &str) -> &str {
+pub(super) fn extract_host(addr: &str) -> &str {
     if let Some(bracketed) = addr.strip_prefix('[') {
         bracketed.split_once(']').map_or(addr, |(host, _)| host)
     } else {
@@ -178,16 +185,26 @@ fn extract_host(addr: &str) -> &str {
 
 /// Returns `true` for IP addresses that are SSRF-sensitive.
 ///
-/// Note: [RFC 1918] private ranges (10/8, 172.16/12, 192.168/16)
-/// are intentionally not flagged; only loopback and link-local
-/// addresses are considered sensitive.
+/// Covers loopback and link-local for both IPv4 and IPv6.
+/// [RFC 1918] private ranges (10/8, 172.16/12, 192.168/16) are
+/// intentionally not flagged.
 ///
 /// [RFC 1918]: https://datatracker.ietf.org/doc/html/rfc1918
-fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
+pub(super) fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local(),
-        IpAddr::V6(v6) => v6.is_loopback(),
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            v6.is_loopback() || (segs[0] & 0xFFC0) == 0xFE80
+        },
     }
+}
+
+/// Returns `true` for hostnames that commonly resolve to
+/// SSRF-sensitive addresses (loopback, cloud metadata).
+pub(super) fn is_ssrf_sensitive_hostname(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower == "localhost" || lower.ends_with(".internal") || lower.ends_with(".local") || lower.starts_with("metadata.")
 }
 
 // -----------------------------------------------------------------------------
@@ -815,6 +832,124 @@ clusters:
         assert!(
             err.to_string().contains("expected_status must be 100..=599"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_flags_ipv6_link_local() {
+        assert!(
+            super::is_ssrf_sensitive(&"fe80::1".parse().unwrap()),
+            "fe80::1 (link-local) should be flagged"
+        );
+        assert!(
+            super::is_ssrf_sensitive(&"fe80::abcd:1234".parse().unwrap()),
+            "fe80::abcd:1234 (link-local) should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_allows_global_ipv6() {
+        assert!(
+            !super::is_ssrf_sensitive(&"2001:db8::1".parse().unwrap()),
+            "global IPv6 should NOT be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_localhost() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("localhost"),
+            "localhost should be flagged"
+        );
+        assert!(
+            super::is_ssrf_sensitive_hostname("LOCALHOST"),
+            "LOCALHOST should be flagged (case-insensitive)"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_internal() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("metadata.google.internal"),
+            "metadata.google.internal should be flagged"
+        );
+        assert!(
+            super::is_ssrf_sensitive_hostname("foo.internal"),
+            "foo.internal should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_local() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("myhost.local"),
+            "myhost.local should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_metadata_prefix() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("metadata.example.com"),
+            "metadata.* should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_allows_normal() {
+        assert!(
+            !super::is_ssrf_sensitive_hostname("example.com"),
+            "example.com should NOT be flagged"
+        );
+        assert!(
+            !super::is_ssrf_sensitive_hostname("api.internal.example.com"),
+            "internal as a subdomain should NOT be flagged"
+        );
+    }
+
+    #[test]
+    fn reject_ssrf_health_check_localhost_hostname() {
+        let clusters = vec![Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec!["localhost:80".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive address"),
+            "hostname 'localhost' should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_ssrf_health_check_ipv6_link_local() {
+        let clusters = vec![Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec!["[fe80::1]:80".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive address"),
+            "IPv6 link-local should be rejected: {err}"
         );
     }
 
