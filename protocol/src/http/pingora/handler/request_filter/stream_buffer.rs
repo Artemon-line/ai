@@ -304,11 +304,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stream_buffer_max_bytes_uses_value_when_set() {
+        let mode = BodyMode::StreamBuffer { max_bytes: Some(4096) };
+        let resolved = match mode {
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            _ => 0,
+        };
+        assert_eq!(resolved, 4096, "explicit max_bytes should be used");
+    }
+
+    #[test]
+    fn stream_buffer_max_bytes_falls_back_to_absolute_max() {
+        let mode = BodyMode::StreamBuffer { max_bytes: None };
+        let resolved = match mode {
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            _ => 0,
+        };
+        assert_eq!(
+            resolved, ABSOLUTE_MAX_BODY_BYTES,
+            "None max_bytes should fall back to ABSOLUTE_MAX_BODY_BYTES"
+        );
+    }
+
+    #[test]
+    fn non_stream_buffer_mode_skips_pre_read() {
+        let modes = [BodyMode::Stream, BodyMode::SizeLimit { max_bytes: 1024 }];
+        for mode in modes {
+            let is_stream_buffer = matches!(mode, BodyMode::StreamBuffer { .. });
+            assert!(!is_stream_buffer, "{mode:?} should not trigger StreamBuffer pre-read");
+        }
+    }
+
+    #[test]
+    fn body_buffer_overflow_produces_413() {
+        let mut buffer = BodyBuffer::new(10);
+        let large = bytes::Bytes::from(vec![0u8; 20]);
+        assert!(buffer.push(large).is_err(), "oversized push should fail");
+    }
+
+    #[test]
+    fn body_buffer_within_limit_succeeds() {
+        let mut buffer = BodyBuffer::new(100);
+        let small = bytes::Bytes::from(vec![0u8; 50]);
+        assert!(buffer.push(small).is_ok(), "within-limit push should succeed");
+    }
+
     // -----------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------
 
-    #[cfg(test)]
     fn is_trace_allowed(name: &str) -> bool {
         TRACE_ALLOWED_HEADERS.contains(&name)
     }

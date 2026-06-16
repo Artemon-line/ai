@@ -115,20 +115,13 @@ fn parse_max_forwards(session: &Session) -> Option<u32> {
         .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
-/// Whether `Max-Forwards` handling applies to the given method.
-#[cfg(test)]
-fn is_max_forwards_method(method: &http::Method) -> bool {
-    matches!(*method, http::Method::TRACE | http::Method::OPTIONS)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
-    use super::*;
-
     #[test]
     fn max_forwards_applies_to_trace() {
         assert!(
@@ -191,5 +184,13 @@ mod tests {
             !is_max_forwards_method(&http::Method::PATCH),
             "Max-Forwards should not apply to PATCH"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    fn is_max_forwards_method(method: &http::Method) -> bool {
+        matches!(*method, http::Method::TRACE | http::Method::OPTIONS)
     }
 }
