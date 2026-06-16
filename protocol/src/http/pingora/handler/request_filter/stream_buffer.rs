@@ -207,3 +207,109 @@ pub(super) async fn pre_read_body(
 
     Ok(all_extra_headers)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_redacts_authorization_header() {
+        assert!(
+            !is_trace_allowed("authorization"),
+            "authorization should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_redacts_cookie_header() {
+        assert!(!is_trace_allowed("cookie"), "cookie should be redacted from TRACE");
+    }
+
+    #[test]
+    fn trace_redacts_x_api_key_header() {
+        assert!(
+            !is_trace_allowed("x-api-key"),
+            "x-api-key should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_redacts_x_auth_token_header() {
+        assert!(
+            !is_trace_allowed("x-auth-token"),
+            "x-auth-token should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_redacts_proxy_authorization_header() {
+        assert!(
+            !is_trace_allowed("proxy-authorization"),
+            "proxy-authorization should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_redacts_set_cookie_header() {
+        assert!(
+            !is_trace_allowed("set-cookie"),
+            "set-cookie should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_allows_host_header() {
+        assert!(is_trace_allowed("host"), "host should be allowed in TRACE");
+    }
+
+    #[test]
+    fn trace_allows_content_type_header() {
+        assert!(
+            is_trace_allowed("content-type"),
+            "content-type should be allowed in TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_allows_accept_header() {
+        assert!(is_trace_allowed("accept"), "accept should be allowed in TRACE");
+    }
+
+    #[test]
+    fn trace_allows_user_agent_header() {
+        assert!(is_trace_allowed("user-agent"), "user-agent should be allowed in TRACE");
+    }
+
+    #[test]
+    fn trace_allowlist_excludes_all_sensitive_headers() {
+        let sensitive = [
+            "authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "x-auth-token",
+            "proxy-authorization",
+            "x-csrf-token",
+            "x-forwarded-for",
+        ];
+        for header in sensitive {
+            assert!(
+                !is_trace_allowed(header),
+                "{header} should not be in the TRACE allowlist"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    #[cfg(test)]
+    fn is_trace_allowed(name: &str) -> bool {
+        TRACE_ALLOWED_HEADERS.contains(&name)
+    }
+}
