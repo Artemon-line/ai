@@ -208,6 +208,11 @@ See `docs/filters/extensions.md` for the full guide.
    `tests/integration/tests/suite/examples/`
 7. Run `cargo xtask sync-example-readme --fix`
 
+For AI inference filters, follow
+`docs/developing/adding-filters.md#ai-inference-validation`:
+validate only fields needed for local proxy behavior and
+leave backend-owned API semantics to the inference backend.
+
 ## Adding a Protocol
 
 1. Implement `Protocol` trait under `protocol/src/`
