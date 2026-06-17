@@ -131,9 +131,7 @@ container-run: | require-container-engine
 # -------------------------------------------------------------------
 
 test-container: | require-container-engine
-	$(CONTAINER_ENGINE) build \
-		$(if $(findstring podman,$(CONTAINER_ENGINE)),--ignorefile Containerfile.test.dockerignore) \
-		-t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
+	$(CONTAINER_ENGINE) build -t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
 
 test-container-run: test-container
 	$(CONTAINER_ENGINE) run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
