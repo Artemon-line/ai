@@ -22,7 +22,7 @@ mod prompt_enrich;
 )]
 pub(crate) mod store;
 #[cfg(feature = "ai-inference")]
-pub mod token_usage;
+pub(crate) mod token_usage;
 
 pub use agentic::{A2aFilter, JsonRpcFilter, McpFilter};
 #[cfg(feature = "ai-inference")]
