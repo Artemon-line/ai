@@ -51,7 +51,7 @@ pub(crate) fn normalize_origin(origin: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -201,6 +201,15 @@ mod tests {
             normalize_origin("https://example.com:443/path"),
             "https://example.com:443/path",
             ":443 is not a suffix when path follows, so port is preserved"
+        );
+    }
+
+    #[test]
+    fn no_scheme_just_lowercased() {
+        assert_eq!(
+            normalize_origin("EXAMPLE.COM"),
+            "example.com",
+            "input without scheme should be lowercased without crash"
         );
     }
 }
