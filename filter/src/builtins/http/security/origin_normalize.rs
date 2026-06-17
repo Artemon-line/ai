@@ -126,4 +126,81 @@ mod tests {
             "already normalized should be unchanged"
         );
     }
+
+    #[test]
+    fn http_port_443_preserved() {
+        assert_eq!(
+            normalize_origin("http://example.com:443"),
+            "http://example.com:443",
+            ":443 is not default for http, must be preserved"
+        );
+    }
+
+    #[test]
+    fn https_port_80_preserved() {
+        assert_eq!(
+            normalize_origin("https://example.com:80"),
+            "https://example.com:80",
+            ":80 is not default for https, must be preserved"
+        );
+    }
+
+    #[test]
+    fn ipv6_bracket_host_preserved() {
+        assert_eq!(
+            normalize_origin("HTTPS://[::1]:8080"),
+            "https://[::1]:8080",
+            "IPv6 brackets and non-default port must be preserved"
+        );
+    }
+
+    #[test]
+    fn ipv6_bracket_with_default_port_stripped() {
+        assert_eq!(
+            normalize_origin("https://[::1]:443"),
+            "https://[::1]",
+            ":443 is default for https and should be stripped from IPv6"
+        );
+    }
+
+    #[test]
+    fn scheme_only_lowered() {
+        assert_eq!(
+            normalize_origin("FTP://EXAMPLE.COM"),
+            "ftp://example.com",
+            "unknown scheme should be lowered with no port stripping"
+        );
+    }
+
+    #[test]
+    fn ws_with_non_default_port() {
+        assert_eq!(
+            normalize_origin("ws://example.com:9090"),
+            "http://example.com:9090",
+            "ws maps to http but non-default port must be preserved"
+        );
+    }
+
+    #[test]
+    fn wss_with_port_80() {
+        assert_eq!(
+            normalize_origin("wss://example.com:80"),
+            "https://example.com:80",
+            "wss maps to https; :80 is not default for https"
+        );
+    }
+
+    #[test]
+    fn empty_origin() {
+        assert_eq!(normalize_origin(""), "", "empty input should stay empty");
+    }
+
+    #[test]
+    fn origin_with_path() {
+        assert_eq!(
+            normalize_origin("https://example.com:443/path"),
+            "https://example.com:443/path",
+            ":443 is not a suffix when path follows, so port is preserved"
+        );
+    }
 }

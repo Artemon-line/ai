@@ -466,6 +466,52 @@ fn rate_limit_headers_saturate_near_u64_max() {
     );
 }
 
+#[test]
+fn from_config_rejects_burst_equal_to_rate_minus_one() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 9").unwrap();
+    let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("burst must be >= rate"),
+        "burst of 9 with rate of 10 should be rejected: {err}"
+    );
+}
+
+#[test]
+fn from_config_accepts_burst_equal_to_rate() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 10").unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).expect("burst equal to rate should be accepted");
+    assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
+}
+
+#[test]
+fn from_config_rejects_unknown_fields() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 20\nextra: true").unwrap();
+    let err = RateLimitFilter::from_config(&yaml)
+        .err()
+        .expect("should error on unknown field");
+    assert!(
+        err.to_string().contains("rate_limit"),
+        "unknown field error should reference the filter name: {err}"
+    );
+}
+
+#[test]
+fn from_config_accepts_fractional_rate() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 0.5\nburst: 1").unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).expect("fractional rate of 0.5 should be accepted");
+    assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
+}
+
+#[test]
+fn from_config_rejects_negative_infinity_rate() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: -.inf\nburst: 10").unwrap();
+    let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("rate must be a finite number greater than 0"),
+        "should reject negative infinity rate: {err}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
