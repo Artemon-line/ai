@@ -27,7 +27,7 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-wildcards = "warn"
+wildcards = "deny"
 allow-wildcard-paths = true
 highlight = "all"
 
