@@ -149,6 +149,9 @@ fn derive_sni(address: &str) -> String {
 /// TTL for cached DNS entries.
 const DNS_TTL_SECS: u64 = 60;
 
+/// Maximum cached DNS entries before oldest-entry eviction.
+const MAX_DNS_ENTRIES: usize = 1_024;
+
 /// Cached DNS resolution result.
 struct DnsCacheEntry {
     /// Resolved socket addresses.
@@ -191,21 +194,41 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
     let addrs = resolve_blocking(address).await?;
     let preferred = select_preferred_address(&addrs, address)?;
 
-    dns_cache()
-        .lock()
-        .unwrap_or_else(|e| {
-            tracing::warn!("DNS cache mutex poisoned; recovering");
-            e.into_inner()
-        })
-        .insert(
-            address.to_owned(),
-            DnsCacheEntry {
-                addrs,
-                resolved_at: Instant::now(),
-            },
-        );
+    let mut cache = dns_cache().lock().unwrap_or_else(|e| {
+        tracing::warn!("DNS cache mutex poisoned; recovering");
+        e.into_inner()
+    });
 
+    if cache.len() >= MAX_DNS_ENTRIES && !cache.contains_key(address) {
+        evict_dns_entries(&mut cache);
+    }
+
+    cache.insert(
+        address.to_owned(),
+        DnsCacheEntry {
+            addrs,
+            resolved_at: Instant::now(),
+        },
+    );
+
+    drop(cache);
     Ok(preferred)
+}
+
+/// Evict expired entries from the DNS cache. If still at capacity
+/// after removing expired entries, evicts the oldest entry.
+fn evict_dns_entries(cache: &mut HashMap<String, DnsCacheEntry>) {
+    cache.retain(|_, entry| entry.resolved_at.elapsed().as_secs() < DNS_TTL_SECS);
+
+    if cache.len() >= MAX_DNS_ENTRIES
+        && let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.resolved_at)
+            .map(|(k, _)| k.clone())
+    {
+        cache.remove(&oldest_key);
+        tracing::debug!(evicted = %oldest_key, remaining = cache.len(), "DNS cache: evicted oldest entry at capacity");
+    }
 }
 
 /// Check the DNS cache for a non-expired entry.
