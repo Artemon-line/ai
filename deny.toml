@@ -35,6 +35,4 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Temporary fork: custom ServerConfig injection (PR #726)
-# and public WrappedX509 constructor for per-cluster CA.
-allow-git = ["https://github.com/praxis-proxy/pingora.git"]
+allow-git = []

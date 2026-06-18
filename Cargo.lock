@@ -2256,212 +2256,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pingora-cache"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "ahash",
- "async-trait",
- "blake2",
- "bstr",
- "bytes",
- "hex",
- "http",
- "httparse",
- "httpdate",
- "indexmap 1.9.3",
- "log",
- "lru",
- "once_cell",
- "parking_lot",
- "pingora-core",
- "pingora-error",
- "pingora-header-serde",
- "pingora-http",
- "pingora-lru",
- "pingora-timeout",
- "rand 0.8.6",
- "regex",
- "rmp",
- "rmp-serde",
- "serde",
- "strum",
- "tokio",
-]
-
-[[package]]
-name = "pingora-core"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "ahash",
- "async-trait",
- "brotli",
- "bstr",
- "bytes",
- "chrono",
- "clap",
- "daemonix",
- "daggy",
- "derivative",
- "flate2",
- "flurry",
- "futures",
- "h2",
- "http",
- "httparse",
- "httpdate",
- "libc",
- "log",
- "nix",
- "once_cell",
- "openssl-probe",
- "ouroboros",
- "parking_lot",
- "percent-encoding",
- "pingora-error",
- "pingora-http",
- "pingora-pool",
- "pingora-runtime",
- "pingora-rustls",
- "pingora-timeout",
- "rand 0.8.6",
- "regex",
- "serde",
- "serde_yaml",
- "sfv",
- "socket2",
- "strum",
- "strum_macros",
- "tokio",
- "tokio-stream",
- "tokio-test",
- "unicase",
- "windows-sys 0.59.0",
- "x509-parser 0.16.0",
- "zstd",
-]
-
-[[package]]
-name = "pingora-error"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-
-[[package]]
-name = "pingora-header-serde"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "bytes",
- "http",
- "httparse",
- "pingora-error",
- "pingora-http",
- "thread_local",
- "zstd",
- "zstd-safe",
-]
-
-[[package]]
-name = "pingora-http"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "bytes",
- "http",
- "pingora-error",
-]
-
-[[package]]
-name = "pingora-lru"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "arrayvec",
- "hashbrown 0.17.1",
- "parking_lot",
- "rand 0.8.6",
-]
-
-[[package]]
-name = "pingora-pool"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "crossbeam-queue",
- "dashmap 5.5.3",
- "futures",
- "log",
- "lru",
- "parking_lot",
- "pingora-timeout",
- "tokio",
-]
-
-[[package]]
-name = "pingora-proxy"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "async-trait",
- "bytes",
- "clap",
- "futures",
- "h2",
- "http",
- "log",
- "once_cell",
- "pingora-cache",
- "pingora-core",
- "pingora-error",
- "pingora-http",
- "rand 0.8.6",
- "regex",
- "tokio",
-]
-
-[[package]]
-name = "pingora-runtime"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "log",
- "once_cell",
- "rand 0.8.6",
- "serde",
- "thread_local",
- "tokio",
-]
-
-[[package]]
-name = "pingora-rustls"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "log",
- "no_debug",
- "pingora-error",
- "ring",
- "rustls",
- "rustls-native-certs",
- "rustls-pemfile",
- "rustls-pki-types",
- "tokio-rustls",
-]
-
-[[package]]
-name = "pingora-timeout"
-version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
-dependencies = [
- "once_cell",
- "parking_lot",
- "pin-project-lite",
- "thread_local",
- "tokio",
-]
-
-[[package]]
 name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2555,8 +2349,8 @@ name = "praxis-proxy-core"
 version = "0.3.1"
 dependencies = [
  "dashmap 6.2.1",
- "pingora-core",
  "praxis-proxy-tls",
+ "quixotic-plecostomus-core",
  "rand 0.9.4",
  "regex",
  "serde",
@@ -2638,12 +2432,12 @@ dependencies = [
  "http",
  "metrics",
  "metrics-exporter-prometheus",
- "pingora-core",
- "pingora-http",
- "pingora-proxy",
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-proxy-tls",
+ "quixotic-plecostomus-core",
+ "quixotic-plecostomus-http",
+ "quixotic-plecostomus-proxy",
  "rcgen",
  "serde_json",
  "tempfile",
@@ -2681,11 +2475,11 @@ dependencies = [
  "futures",
  "h2",
  "http",
- "pingora-core",
  "praxis",
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
+ "quixotic-plecostomus-core",
  "rcgen",
  "rustls",
  "rustls-pemfile",
@@ -2981,6 +2775,223 @@ dependencies = [
  "wasi",
  "web-sys",
  "winapi",
+]
+
+[[package]]
+name = "quixotic-plecostomus-cache"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a820a1a3e59644b38bc03606b638b41f1c5a474215efcec37f94b15871a7e1c"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "blake2",
+ "bstr",
+ "bytes",
+ "hex",
+ "http",
+ "httparse",
+ "httpdate",
+ "indexmap 1.9.3",
+ "log",
+ "lru",
+ "once_cell",
+ "parking_lot",
+ "quixotic-plecostomus-core",
+ "quixotic-plecostomus-error",
+ "quixotic-plecostomus-header-serde",
+ "quixotic-plecostomus-http",
+ "quixotic-plecostomus-lru",
+ "quixotic-plecostomus-timeout",
+ "rand 0.8.6",
+ "regex",
+ "rmp",
+ "rmp-serde",
+ "serde",
+ "strum",
+ "tokio",
+]
+
+[[package]]
+name = "quixotic-plecostomus-core"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7d6d9e04414ba6819c51ec210eddf17865c505431a492c86c6356338c2b4f60"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "brotli",
+ "bstr",
+ "bytes",
+ "chrono",
+ "clap",
+ "daemonix",
+ "daggy",
+ "derivative",
+ "flate2",
+ "flurry",
+ "futures",
+ "h2",
+ "http",
+ "httparse",
+ "httpdate",
+ "libc",
+ "log",
+ "nix",
+ "once_cell",
+ "openssl-probe",
+ "ouroboros",
+ "parking_lot",
+ "percent-encoding",
+ "quixotic-plecostomus-error",
+ "quixotic-plecostomus-http",
+ "quixotic-plecostomus-pool",
+ "quixotic-plecostomus-runtime",
+ "quixotic-plecostomus-rustls",
+ "quixotic-plecostomus-timeout",
+ "rand 0.8.6",
+ "regex",
+ "serde",
+ "serde_yaml",
+ "sfv",
+ "socket2",
+ "strum",
+ "strum_macros",
+ "tokio",
+ "tokio-stream",
+ "tokio-test",
+ "unicase",
+ "windows-sys 0.59.0",
+ "x509-parser 0.16.0",
+ "zstd",
+]
+
+[[package]]
+name = "quixotic-plecostomus-error"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8af30024450d6dc4785ccadf33e7cfd91f837bc6a226f133f9e77b397b4206c5"
+
+[[package]]
+name = "quixotic-plecostomus-header-serde"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9fe7db0e7899a6b2d2cf06e71adacfad4c1bcfe3b5f238494dd3b3eafb2c1b1"
+dependencies = [
+ "bytes",
+ "http",
+ "httparse",
+ "quixotic-plecostomus-error",
+ "quixotic-plecostomus-http",
+ "thread_local",
+ "zstd",
+ "zstd-safe",
+]
+
+[[package]]
+name = "quixotic-plecostomus-http"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f337131150ff271246df2584da8bdb0280b8424646d2c76e3926faa70409dc9"
+dependencies = [
+ "bytes",
+ "http",
+ "quixotic-plecostomus-error",
+]
+
+[[package]]
+name = "quixotic-plecostomus-lru"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec55d3bcbd56e52b3424bc62739a237d43c14df8ed04aaf294ae187b60da348a"
+dependencies = [
+ "arrayvec",
+ "hashbrown 0.17.1",
+ "parking_lot",
+ "rand 0.8.6",
+]
+
+[[package]]
+name = "quixotic-plecostomus-pool"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6383d2998b2298a0f34bb8a7330f5fea4bb0fb55671db2dc788b5f703c2009f"
+dependencies = [
+ "crossbeam-queue",
+ "dashmap 5.5.3",
+ "futures",
+ "log",
+ "lru",
+ "parking_lot",
+ "quixotic-plecostomus-timeout",
+ "tokio",
+]
+
+[[package]]
+name = "quixotic-plecostomus-proxy"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a953dcda74a2c196497ddc7892e571cdaa0bdb8acc8f7afb6d7b97339b28c658"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "clap",
+ "futures",
+ "h2",
+ "http",
+ "log",
+ "once_cell",
+ "quixotic-plecostomus-cache",
+ "quixotic-plecostomus-core",
+ "quixotic-plecostomus-error",
+ "quixotic-plecostomus-http",
+ "rand 0.8.6",
+ "regex",
+ "tokio",
+]
+
+[[package]]
+name = "quixotic-plecostomus-runtime"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51621ff504cfde18409889d6d5b8773e0b0de0e4defa610006a36c27adc06a10"
+dependencies = [
+ "log",
+ "once_cell",
+ "rand 0.8.6",
+ "serde",
+ "thread_local",
+ "tokio",
+]
+
+[[package]]
+name = "quixotic-plecostomus-rustls"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc6ba2674ecab001d9ebdc6dc9944326857c07f9c65e7c0779f25db17f96ee84"
+dependencies = [
+ "log",
+ "no_debug",
+ "quixotic-plecostomus-error",
+ "ring",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "tokio-rustls",
+]
+
+[[package]]
+name = "quixotic-plecostomus-timeout"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f76d183bcbdae3c0f4b0547e0fb7afdc658853a5e7421bbae1b59e48c25e667"
+dependencies = [
+ "once_cell",
+ "parking_lot",
+ "pin-project-lite",
+ "thread_local",
+ "tokio",
 ]
 
 [[package]]
