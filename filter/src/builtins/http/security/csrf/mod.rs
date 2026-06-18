@@ -195,7 +195,7 @@ impl CsrfFilter {
             return false;
         }
 
-        rand::rng().random_range(0u8..100) < self.enforce_percentage
+        rand::rng().random_range(0_u8..100) < self.enforce_percentage
     }
 }
 

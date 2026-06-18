@@ -114,7 +114,7 @@ impl HttpFilter for StaticResponseFilter {
         for (name, value) in &self.headers {
             rejection = rejection.with_header(name, value);
         }
-        if let Some(ref body) = self.body {
+        if let Some(body) = &self.body {
             rejection = rejection.with_body(body.clone());
         }
         Ok(FilterAction::Reject(rejection))

@@ -499,6 +499,7 @@ impl HttpFilter for ResponseStoreFilter {
         }
     }
 
+    #[expect(clippy::large_stack_frames, reason = "async handler with multiple await points")]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if ctx.request.method == http::Method::GET {
             if let Some(action) = self.try_get_retrieval(ctx).await? {
@@ -584,6 +585,7 @@ impl HttpFilter for ResponseStoreFilter {
 // GET Retrieval
 // -----------------------------------------------------------------------------
 
+#[expect(clippy::multiple_inherent_impl, reason = "GET retrieval is a distinct concern")]
 impl ResponseStoreFilter {
     /// Attempt to handle a GET request for a stored response or its
     /// input items. Returns `Some(action)` when the path matches a

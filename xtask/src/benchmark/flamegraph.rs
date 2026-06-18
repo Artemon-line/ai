@@ -269,7 +269,7 @@ fn write_vegeta_targets(args: &Args, tmpdir: &tempfile::TempDir, targets_file: &
     );
     if needs_body {
         let body_file = tmpdir.path().join("body.bin");
-        std::fs::write(&body_file, vec![0u8; 65536]).expect("failed to write body file");
+        std::fs::write(&body_file, vec![0_u8; 65536]).expect("failed to write body file");
         let targets = format!("POST http://{PRAXIS_ADDR}/\n@{}\n", body_file.to_str().unwrap());
         std::fs::write(targets_file, targets).expect("failed to write targets file");
     } else {

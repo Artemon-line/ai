@@ -174,7 +174,7 @@ pub(super) mod http {
     /// stream, returned as raw bytes.
     fn read_with_body(stream: &mut TcpStream) -> Option<Vec<u8>> {
         let mut data = Vec::new();
-        let mut buf = [0u8; 4096];
+        let mut buf = [0_u8; 4096];
 
         loop {
             match stream.read(&mut buf) {

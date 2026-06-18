@@ -92,6 +92,10 @@ pub struct FilterPipeline {
     time_source: Arc<dyn TimeSource>,
 }
 
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "pipeline concerns are split across modules"
+)]
 impl FilterPipeline {
     /// Apply global body size ceilings.
     ///

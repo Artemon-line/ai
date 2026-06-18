@@ -75,7 +75,7 @@ impl RoundRobin {
         }
 
         let slot = tick % healthy_weight;
-        let mut cumulative = 0usize;
+        let mut cumulative = 0_usize;
         for ep in &self.endpoints {
             if ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy() {
                 cumulative += ep.weight as usize;
@@ -93,7 +93,7 @@ impl RoundRobin {
 #[expect(clippy::expect_used, reason = "non-empty at construction")]
 fn select_by_weight(endpoints: &[WeightedEndpoint], tick: usize, total_weight: usize) -> Arc<str> {
     let slot = tick % total_weight;
-    let mut cumulative = 0usize;
+    let mut cumulative = 0_usize;
     for ep in endpoints {
         cumulative += ep.weight as usize;
         if slot < cumulative {
@@ -182,7 +182,7 @@ mod tests {
 
         let mut counts = std::collections::HashMap::new();
         for _ in 0..4 {
-            *counts.entry(rr.select(None).unwrap()).or_insert(0u32) += 1;
+            *counts.entry(rr.select(None).unwrap()).or_insert(0_u32) += 1;
         }
         assert_eq!(
             counts.get("10.0.0.1:80").copied().unwrap_or(0),
@@ -272,7 +272,7 @@ mod tests {
                 &*selected, "10.0.0.2:80",
                 "unhealthy endpoint B should never be selected"
             );
-            *counts.entry(selected).or_insert(0u32) += 1;
+            *counts.entry(selected).or_insert(0_u32) += 1;
         }
 
         let a_count = counts.get("10.0.0.1:80").copied().unwrap_or(0);

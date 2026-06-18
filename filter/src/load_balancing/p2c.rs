@@ -167,7 +167,7 @@ impl PowerOfTwoChoices {
 #[expect(clippy::expect_used, reason = "total_weight > 0 guaranteed by caller")]
 fn weight_index<'a>(endpoints: &[&'a WeightedEndpoint], slot: usize, total_weight: usize) -> &'a WeightedEndpoint {
     let slot = slot % total_weight;
-    let mut cumulative = 0usize;
+    let mut cumulative = 0_usize;
     for ep in endpoints {
         cumulative += ep.weight as usize;
         if slot < cumulative {
@@ -234,7 +234,7 @@ mod tests {
         let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 1, 1)]);
         p2c.counters["10.0.0.1:80"].store(100, Ordering::Relaxed);
 
-        let mut picked_2 = 0u32;
+        let mut picked_2 = 0_u32;
         for _ in 0..20 {
             let addr = p2c.select(None);
             if &*addr == "10.0.0.2:80" {
@@ -255,7 +255,7 @@ mod tests {
         let mut counts = HashMap::new();
         for _ in 0..100 {
             let addr = p2c.select(None);
-            *counts.entry(Arc::clone(&addr)).or_insert(0u32) += 1;
+            *counts.entry(Arc::clone(&addr)).or_insert(0_u32) += 1;
             p2c.release(&addr);
         }
 

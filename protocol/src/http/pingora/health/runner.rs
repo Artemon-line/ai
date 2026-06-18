@@ -72,7 +72,7 @@ struct HealthCheckParams {
 /// ```
 pub fn spawn_health_checks(clusters: &[Cluster], registry: &HealthRegistry, shutdown: &CancellationToken) {
     for cluster in clusters {
-        let Some(ref hc) = cluster.health_check else {
+        let Some(hc) = &cluster.health_check else {
             continue;
         };
         let Some(state) = registry.get(&cluster.name) else {
@@ -314,7 +314,7 @@ mod tests {
         });
 
         let (mut socket, _peer) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 512];
+        let mut buf = [0_u8; 512];
         let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await.unwrap();
         tokio::io::AsyncWriteExt::write_all(&mut socket, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
             .await

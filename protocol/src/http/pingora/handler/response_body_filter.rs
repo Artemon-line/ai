@@ -50,7 +50,7 @@ pub(super) fn execute(
 
     match ctx.response_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if let Some(ref chunk) = *body {
+            if let Some(chunk) = &*body {
                 #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
                 #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
                 let chunk_len = chunk.len() as u64;
@@ -70,7 +70,7 @@ pub(super) fn execute(
         },
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.response_body_released => {
-            if let Some(ref chunk) = *body {
+            if let Some(chunk) = &*body {
                 let limit = max_bytes.unwrap_or(BODY_FALLBACK_LIMIT);
                 let buf = ctx.response_body_buffer.get_or_insert_with(|| BodyBuffer::new(limit));
 

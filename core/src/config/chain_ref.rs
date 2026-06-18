@@ -71,7 +71,7 @@ mod tests {
     fn parse_named_ref() {
         let chain_ref: ChainRef = serde_yaml::from_str(r#""my_chain""#).unwrap();
         assert!(
-            matches!(chain_ref, ChainRef::Named(ref s) if s == "my_chain"),
+            matches!(chain_ref, ChainRef::Named(s) if s == "my_chain"),
             "should parse as Named variant"
         );
     }

@@ -137,11 +137,11 @@ impl HttpFilter for PathRewriteFilter {
 
         let new_path = rewrite_path(&self.op, path);
 
-        match new_path {
+        match &new_path {
             Cow::Borrowed(_) => {
                 trace!(path = %path, "path rewrite: no change");
             },
-            Cow::Owned(ref rewritten) => {
+            Cow::Owned(rewritten) => {
                 let normalized = normalize_rewritten_path(rewritten);
                 let full = append_query(&normalized, query);
                 debug!(original = %path, rewritten = %full, "path rewritten");

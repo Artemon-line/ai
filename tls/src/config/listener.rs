@@ -204,7 +204,7 @@ impl ListenerTls {
             validate_multi_cert_defaults(&self.certificates)?;
         }
 
-        if let Some(ref ca) = self.client_ca {
+        if let Some(ca) = &self.client_ca {
             ca.validate()?;
         }
 
@@ -218,7 +218,7 @@ impl ListenerTls {
             return Err(TlsError::HotReloadMultipleCerts);
         }
 
-        if let Some(ref suites) = self.cipher_suites {
+        if let Some(suites) = &self.cipher_suites {
             if suites.is_empty() {
                 return Err(TlsError::EmptyCipherSuites);
             }

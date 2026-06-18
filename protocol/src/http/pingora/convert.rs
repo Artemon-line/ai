@@ -88,7 +88,7 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
 
     let mut header = build_rejection_header(&rejection);
     let has_body = rejection.body.is_some();
-    if let Some(ref body) = rejection.body {
+    if let Some(body) = &rejection.body {
         let _insert = header.insert_header("content-length", body.len().to_string());
     }
     if let Err(e) = session.write_response_header(Box::new(header), !has_body).await {

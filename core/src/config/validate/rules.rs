@@ -25,6 +25,10 @@ use crate::{
 // Config Validation
 // -----------------------------------------------------------------------------
 
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "validation is split into a dedicated module"
+)]
 impl Config {
     /// Validate config constraints.
     ///

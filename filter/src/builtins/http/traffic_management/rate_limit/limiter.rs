@@ -73,8 +73,8 @@ impl RateLimitFilter {
             reason = "rate/burst nanos"
         )]
         let idle_threshold_nanos = (2.0 * self.burst / self.rate * 1_000_000_000.0) as u64;
-        let mut scanned = 0usize;
-        let mut evicted = 0usize;
+        let mut scanned = 0_usize;
+        let mut evicted = 0_usize;
 
         map.retain(|_ip, bucket| {
             if scanned >= EVICTION_SCAN_LIMIT {

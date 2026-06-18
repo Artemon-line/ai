@@ -48,7 +48,7 @@ pub(crate) fn generate_ddl(tables: &TableNames) -> Result<Vec<String>, StoreErro
         format!("CREATE INDEX IF NOT EXISTS idx_{c}_tenant_id ON {c}(tenant_id)"),
     ];
 
-    if let Some(ref items) = tables.items {
+    if let Some(items) = &tables.items {
         let i = validate_items_table(items, r, c)?;
         append_items_ddl(&mut stmts, i);
     }
@@ -72,7 +72,7 @@ pub(crate) fn validate_postgres_identifiers(tables: &TableNames) -> Result<(), S
     validate_postgres_identifier_len("response table name", r, POSTGRES_MAX_IDENTIFIER_LEN)?;
     validate_postgres_identifier_len("conversation table name", c, POSTGRES_MAX_CONVERSATION_TABLE_LEN)?;
 
-    if let Some(ref items) = tables.items {
+    if let Some(items) = &tables.items {
         let i = validate_items_table(items, r, c)?;
         validate_postgres_identifier_len("items table name", i, POSTGRES_MAX_ITEMS_TABLE_LEN)?;
     }

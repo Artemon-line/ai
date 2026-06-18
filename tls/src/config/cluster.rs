@@ -91,10 +91,10 @@ impl ClusterTls {
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn validate(&self) -> Result<(), TlsError> {
-        if let Some(ref ca) = self.ca {
+        if let Some(ca) = &self.ca {
             ca.validate()?;
         }
-        if let Some(ref cert) = self.client_cert {
+        if let Some(cert) = &self.client_cert {
             cert.validate()?;
         }
         Ok(())

@@ -128,6 +128,10 @@ pub struct RateLimitFilter {
     pub(self) epoch: Instant,
 }
 
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "limiter logic is split into a dedicated module"
+)]
 impl RateLimitFilter {
     /// Create a rate limit filter from parsed YAML config.
     ///

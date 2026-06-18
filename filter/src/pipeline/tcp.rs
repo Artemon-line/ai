@@ -12,6 +12,10 @@ use crate::{FilterError, actions::FilterAction, any_filter::AnyFilter, tcp_filte
 // FilterPipeline TCP
 // -----------------------------------------------------------------------------
 
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "pipeline concerns are split across modules"
+)]
 impl FilterPipeline {
     /// Run all TCP connect filters in order.
     ///

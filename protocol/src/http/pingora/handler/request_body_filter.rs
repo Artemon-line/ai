@@ -25,6 +25,7 @@ const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
 
 /// Run body filters on a request body chunk, enforcing size limits.
 #[expect(
+    clippy::large_stack_frames,
     clippy::too_many_lines,
     clippy::cognitive_complexity,
     reason = "body filter dispatch"
@@ -40,7 +41,7 @@ pub(super) async fn execute(
         return Ok(());
     }
 
-    if let Some(ref mut chunks) = ctx.pre_read_body {
+    if let Some(chunks) = &mut ctx.pre_read_body {
         tracing::trace!("forwarding pre-read body chunks from StreamBuffer mode");
 
         *body = chunks.pop_front();
@@ -60,7 +61,7 @@ pub(super) async fn execute(
 
     match ctx.request_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if let Some(ref chunk) = *body {
+            if let Some(chunk) = &*body {
                 #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
                 #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
                 let chunk_len = chunk.len() as u64;
@@ -81,7 +82,7 @@ pub(super) async fn execute(
         },
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.request_body_released => {
-            if let Some(ref chunk) = *body {
+            if let Some(chunk) = &*body {
                 let limit = max_bytes.unwrap_or(BODY_FALLBACK_LIMIT);
                 let buf = ctx.request_body_buffer.get_or_insert_with(|| BodyBuffer::new(limit));
 

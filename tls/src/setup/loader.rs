@@ -148,7 +148,7 @@ mod tests {
 
         let err = load_cert_and_key(&pair).expect_err("missing cert should fail");
         assert!(
-            matches!(err, TlsError::FileLoadError { ref path, .. } if path == "/nonexistent/cert.pem"),
+            matches!(&err, TlsError::FileLoadError { path, .. } if path == "/nonexistent/cert.pem"),
             "error should reference the cert path, got: {err}"
         );
     }
@@ -165,7 +165,7 @@ mod tests {
 
         let err = load_cert_and_key(&pair).expect_err("missing key should fail");
         assert!(
-            matches!(err, TlsError::FileLoadError { ref path, .. } if path == "/nonexistent/key.pem"),
+            matches!(&err, TlsError::FileLoadError { path, .. } if path == "/nonexistent/key.pem"),
             "error should reference the key path, got: {err}"
         );
     }

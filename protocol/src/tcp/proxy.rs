@@ -211,7 +211,11 @@ impl PingoraTcpProxy {
 
 #[async_trait]
 impl ServerApp for PingoraTcpProxy {
-    #[expect(clippy::too_many_lines, reason = "linear connection lifecycle")]
+    #[expect(
+        clippy::large_stack_frames,
+        clippy::too_many_lines,
+        reason = "linear connection lifecycle"
+    )]
     async fn process_new(self: &Arc<Self>, mut session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
         let connect_time = std::time::Instant::now();
         let (remote_addr, local_addr) = extract_addrs(&session);
@@ -227,7 +231,7 @@ impl ServerApp for PingoraTcpProxy {
             return None;
         }
 
-        let _permit = if let Some(ref sem) = self.connection_semaphore {
+        let _permit = if let Some(sem) = &self.connection_semaphore {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 Some(permit)
             } else {
@@ -304,7 +308,7 @@ async fn resolve_connect_result(
 ) -> Option<String> {
     match pipeline.execute_tcp_connect(ctx).await {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
-            if let Some(ref addr) = ctx.upstream_addr {
+            if let Some(addr) = &ctx.upstream_addr {
                 Some(addr.clone().into_owned())
             } else {
                 warn!(remote = %remote_addr, "no upstream address resolved for TCP connection");
@@ -353,7 +357,7 @@ enum SniPeekResult {
 /// forwarded to the upstream before starting bidirectional copy.
 #[expect(clippy::indexing_slicing, reason = "filled <= buf.len() maintained by loop")]
 async fn peek_sni(session: &mut Stream) -> (Option<String>, Vec<u8>) {
-    let mut buf = vec![0u8; PEEK_INITIAL];
+    let mut buf = vec![0_u8; PEEK_INITIAL];
     let mut filled = 0;
 
     loop {
@@ -514,7 +518,7 @@ mod tests {
 
         let result = try_parse_sni(&record, filled);
         assert!(
-            matches!(result, SniPeekResult::Parsed(ref info) if info.sni.as_deref() == Some("example.com")),
+            matches!(&result, SniPeekResult::Parsed(info) if info.sni.as_deref() == Some("example.com")),
             "valid TLS ClientHello with SNI should return Parsed"
         );
     }
@@ -564,7 +568,7 @@ mod tests {
 
         let result = try_parse_sni(&padded, filled);
         assert!(
-            matches!(result, SniPeekResult::Parsed(ref info) if info.sni.as_deref() == Some("test.example.org")),
+            matches!(&result, SniPeekResult::Parsed(info) if info.sni.as_deref() == Some("test.example.org")),
             "should parse correctly using filled as slice bound"
         );
     }
@@ -580,7 +584,7 @@ mod tests {
 
         let action = handle_sni_read(&mut buf, filled);
         assert!(
-            matches!(action, PeekAction::Done(Some(ref sni)) if sni == "parsed.example.com"),
+            matches!(&action, PeekAction::Done(Some(sni)) if sni == "parsed.example.com"),
             "Parsed result should yield Done with SNI hostname"
         );
         assert_eq!(buf.len(), filled, "buf should be truncated to filled length");
@@ -605,8 +609,8 @@ mod tests {
 
     #[test]
     fn handle_sni_read_need_more_below_peek_max_no_resize_when_not_full() {
-        let raw = [22u8, 3, 3, 0, 100, 1];
-        let mut buf = vec![0u8; 1024];
+        let raw = [22_u8, 3, 3, 0, 100, 1];
+        let mut buf = vec![0_u8; 1024];
         buf[..raw.len()].copy_from_slice(&raw);
         let filled = raw.len();
 
@@ -620,8 +624,8 @@ mod tests {
 
     #[test]
     fn handle_sni_read_need_more_at_peek_max_returns_done_none() {
-        let raw = [22u8, 3, 3, 0, 100, 1];
-        let mut buf = vec![0u8; PEEK_MAX];
+        let raw = [22_u8, 3, 3, 0, 100, 1];
+        let mut buf = vec![0_u8; PEEK_MAX];
         buf[..raw.len()].copy_from_slice(&raw);
         let filled = PEEK_MAX;
 
@@ -671,7 +675,7 @@ mod tests {
         let list_len = entry_len;
 
         let mut ext = Vec::new();
-        ext.extend_from_slice(&0u16.to_be_bytes());
+        ext.extend_from_slice(&0_u16.to_be_bytes());
         let ext_data_len = 2 + list_len;
         ext.extend_from_slice(&ext_data_len.to_be_bytes());
         ext.extend_from_slice(&list_len.to_be_bytes());
@@ -685,7 +689,7 @@ mod tests {
     fn build_client_hello(session_id: &[u8], cipher_suites: &[u8], compression: &[u8], extensions: &[u8]) -> Vec<u8> {
         let mut hello = Vec::new();
         hello.extend_from_slice(&[0x03, 0x03]);
-        hello.extend_from_slice(&[0u8; 32]);
+        hello.extend_from_slice(&[0_u8; 32]);
 
         hello.push(session_id.len() as u8);
         hello.extend_from_slice(session_id);

@@ -189,7 +189,7 @@ impl HttpFilter for McpBrokerFilter {
             return Ok(FilterAction::Reject(Rejection::status(400)));
         };
 
-        let Some(ref method_str) = envelope.method else {
+        let Some(method_str) = &envelope.method else {
             return Ok(FilterAction::Reject(Rejection::status(400)));
         };
 
@@ -406,11 +406,11 @@ fn serialize_catalog(catalog: &[CatalogTool]) -> Result<String, FilterError> {
 fn catalog_tool_to_json(tool: &CatalogTool) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("name".to_owned(), serde_json::Value::String(tool.exposed_name.clone()));
-    if let Some(ref desc) = tool.description {
+    if let Some(desc) = &tool.description {
         obj.insert("description".to_owned(), serde_json::Value::String(desc.clone()));
     }
     obj.insert("inputSchema".to_owned(), tool.input_schema.clone());
-    if let Some(ref annotations) = tool.annotations {
+    if let Some(annotations) = &tool.annotations {
         obj.insert("annotations".to_owned(), annotations.clone());
     }
     serde_json::Value::Object(obj)

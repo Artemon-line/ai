@@ -55,6 +55,10 @@ struct PipelineResult {
     clippy::cognitive_complexity,
     reason = "orchestration function"
 )]
+#[expect(
+    clippy::large_stack_frames,
+    reason = "primary request handler with multiple filter stages"
+)]
 pub(in crate::http) async fn execute(
     pipeline: &FilterPipeline,
     session: &mut Session,
@@ -213,7 +217,7 @@ async fn run_pipeline(
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
     ctx.metrics_cluster_shared = cluster.as_ref().map(|c| ::metrics::SharedString::from(Arc::clone(c)));
-    ctx.metrics_cluster = cluster.clone();
+    ctx.metrics_cluster.clone_from(&cluster);
 
     match action {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {

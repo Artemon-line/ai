@@ -24,6 +24,10 @@ use crate::{
 // FilterPipeline HTTP
 // -----------------------------------------------------------------------------
 
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "pipeline concerns are split across modules"
+)]
 impl FilterPipeline {
     /// Run all HTTP request filters in order.
     ///
@@ -288,7 +292,7 @@ mod tests {
 
     #[test]
     fn accumulate_body_bytes_increments_with_some() {
-        let mut counter = 0u64;
+        let mut counter = 0_u64;
         let body = Some(Bytes::from_static(b"hello"));
         accumulate_body_bytes(&mut counter, &body);
         assert_eq!(counter, 5, "counter should equal body length");
@@ -296,7 +300,7 @@ mod tests {
 
     #[test]
     fn accumulate_body_bytes_multiple_chunks() {
-        let mut counter = 0u64;
+        let mut counter = 0_u64;
         accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"abc")));
         accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"de")));
         assert_eq!(counter, 5, "counter should accumulate across calls");
@@ -304,14 +308,14 @@ mod tests {
 
     #[test]
     fn accumulate_body_bytes_noop_with_none() {
-        let mut counter = 10u64;
+        let mut counter = 10_u64;
         accumulate_body_bytes(&mut counter, &None);
         assert_eq!(counter, 10, "counter should be unchanged when body is None");
     }
 
     #[test]
     fn accumulate_body_bytes_noop_with_empty() {
-        let mut counter = 0u64;
+        let mut counter = 0_u64;
         accumulate_body_bytes(&mut counter, &Some(Bytes::new()));
         assert_eq!(counter, 0, "counter should be unchanged when body is empty");
     }

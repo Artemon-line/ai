@@ -95,7 +95,7 @@ fn is_traversal_segment(seg: &str) -> bool {
     if seg == ".." {
         return true;
     }
-    let mut dots = 0u16;
+    let mut dots = 0_u16;
     let mut i = 0;
     let b = seg.as_bytes();
     while i < b.len() {

@@ -167,7 +167,7 @@ impl HttpFilter for McpFilter {
         let envelope = match parse_json_rpc_value(&value, &self.json_rpc_config) {
             Ok(Some(envelope)) => envelope,
             Ok(None) => return handle_non_mcp(&self.config),
-            Err(ref e) => return handle_parse_error(e, &self.config),
+            Err(e) => return handle_parse_error(&e, &self.config),
         };
 
         let Some(method_str) = &envelope.method else {

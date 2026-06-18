@@ -90,7 +90,7 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     /// Registers Pingora's compression module when compression is
     /// configured.
     fn init_downstream_modules(&self, modules: &mut HttpModules) {
-        if let Some(ref cfg) = self.compression {
+        if let Some(cfg) = &self.compression {
             debug!(level = cfg.default_level, "registering compression module");
             modules.add_module(ResponseCompressionBuilder::enable(cfg.default_level));
         }
@@ -111,7 +111,7 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
             return reject_503(session, "1", "global max connections exceeded").await;
         }
 
-        if let Some(ref sem) = self.connection_semaphore {
+        if let Some(sem) = &self.connection_semaphore {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 ctx._connection_permit = Some(permit);
             } else {

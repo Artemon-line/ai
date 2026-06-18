@@ -85,7 +85,7 @@ pub fn start_reserved_header_response_backend() -> u16 {
 pub fn start_slow_backend(body: &str, delay: Duration) -> u16 {
     let body = body.to_owned();
     spawn_tcp_server(move |mut stream| {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0_u8; 4096];
         let _bytes = stream.read(&mut buf);
         std::thread::sleep(delay);
         let _sent = write_http_response(&mut stream, &body);
@@ -161,7 +161,7 @@ pub(crate) fn spawn_tcp_server_with_shutdown(handler: impl Fn(TcpStream) + Send 
 /// string. Prevents partial-read flakiness under load.
 pub(crate) fn read_until_headers_complete(stream: &mut TcpStream) -> String {
     let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
 
     loop {
         match stream.read(&mut buf) {

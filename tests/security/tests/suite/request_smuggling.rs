@@ -137,7 +137,7 @@ fn cl_te_desync_does_not_poison_connection() {
          \r\n";
     stream.write_all(ambiguous.as_bytes()).unwrap();
 
-    let mut first_response = vec![0u8; 8192];
+    let mut first_response = vec![0_u8; 8192];
     let n = stream.read(&mut first_response).unwrap_or(0);
     let first_raw = String::from_utf8_lossy(&first_response[..n]);
     let first_status = parse_status(&first_raw);

@@ -102,7 +102,7 @@ pub(super) fn register_tcp_listeners(
     let display_upstream = upstream.unwrap_or("filter-routed");
     let mut shutdown_senders = Vec::new();
     for listener in listeners {
-        if let Some(ref tls) = listener.tls {
+        if let Some(tls) = &listener.tls {
             let (tls_settings, watcher_shutdown) = build_tcp_tls_settings(tls, &listener.address)?;
             if let Some(tx) = watcher_shutdown {
                 shutdown_senders.push(tx);

@@ -165,7 +165,7 @@ impl ServeHttp for PingoraAdminService {
         let path = http_session.req_header().uri.path().to_owned();
 
         if path.starts_with("/api/kv/") {
-            if let Some(ref registry) = self.kv_registry {
+            if let Some(registry) = &self.kv_registry {
                 return dispatch_kv_request(registry, http_session).await;
             }
             return json_response(404, br#"{"error":"not found"}"#);
@@ -331,7 +331,7 @@ fn aggregate_health(registry: &HealthRegistry, verbose: bool) -> HealthAggregate
         }
         append_verbose_detail(&mut agg.verbose_detail, &mut first, name, h, eps.len());
     }
-    if let Some(ref mut vj) = agg.verbose_detail {
+    if let Some(vj) = &mut agg.verbose_detail {
         vj.push('}');
     }
     agg
@@ -357,7 +357,7 @@ fn append_verbose_detail(detail: &mut Option<String>, first: &mut bool, name: &s
 /// Format the ready response body from aggregated health data.
 fn format_ready_body(status_str: &str, agg: &HealthAggregate) -> String {
     let (total, healthy, degraded) = (agg.total, agg.healthy, agg.degraded);
-    if let Some(ref detail) = agg.verbose_detail {
+    if let Some(detail) = &agg.verbose_detail {
         format!(
             r#"{{"status":"{status_str}","clusters":{{"total":{total},"healthy":{healthy},"degraded":{degraded},"detail":{detail}}}}}"#,
         )

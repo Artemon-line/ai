@@ -72,7 +72,7 @@ async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
     let mut peer = HttpPeer::new(addr, tls_enabled, sni);
     apply_connection_options(&mut peer, &upstream.connection);
 
-    if let Some(ref tls) = upstream.tls {
+    if let Some(tls) = &upstream.tls {
         apply_cached_tls(&mut peer, tls, &upstream.address);
     }
 

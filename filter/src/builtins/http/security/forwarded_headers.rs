@@ -249,7 +249,7 @@ impl HttpFilter for ForwardedHeadersFilter {
             .get("host")
             .and_then(|h| h.to_str().ok())
             .map(str::to_owned);
-        if let Some(ref host) = host_value {
+        if let Some(host) = &host_value {
             tracing::debug!(host = %host, "setting X-Forwarded-Host from Host header");
             ctx.extra_request_headers
                 .push((Cow::Borrowed("X-Forwarded-Host"), host.clone()));

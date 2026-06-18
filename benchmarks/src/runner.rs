@@ -96,6 +96,10 @@ impl Runner {
     /// Returns [`BenchmarkError`] if the backend, proxy, or load
     /// generator fails to start, or if result parsing fails.
     #[expect(clippy::cognitive_complexity, reason = "orchestration function")]
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "benchmark orchestration allocates tooling structs"
+    )]
     pub async fn run(&self, proxy: &dyn ProxyConfig) -> Result<ScenarioResults, BenchmarkError> {
         info!(scenario = %self.scenario.name, proxy = proxy.name(), "starting benchmark run");
 
@@ -124,7 +128,7 @@ impl Runner {
             info!(scenario = %self.scenario.name, "attaching resource metrics to results");
         }
         for run in &mut results.runs {
-            run.resource = resource.clone();
+            run.resource.clone_from(&resource);
         }
 
         results.compute_median();
@@ -233,6 +237,10 @@ impl Runner {
 // -----------------------------------------------------------------------------
 
 /// Dispatch a workload to the appropriate load tool.
+#[expect(
+    clippy::large_stack_frames,
+    reason = "load tool configs contain large inline buffers"
+)]
 async fn dispatch_workload(
     workload: &Workload,
     url: &str,

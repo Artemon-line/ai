@@ -128,7 +128,7 @@ fn validate_tcp_routing(listener: &Listener) -> Result<(), ProxyError> {
         )));
     }
 
-    if let Some(ref upstream) = listener.upstream {
+    if let Some(upstream) = &listener.upstream {
         super::address::validate_tcp_upstream(upstream, &listener.name)?;
     }
 

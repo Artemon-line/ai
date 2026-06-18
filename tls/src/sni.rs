@@ -633,7 +633,7 @@ mod tests {
 
         #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
         let list_len_u16 = list_len as u16;
-        sni_data.extend_from_slice(&0u16.to_be_bytes());
+        sni_data.extend_from_slice(&0_u16.to_be_bytes());
 
         #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
         let ext_data_len = (2 + list_len) as u16;
@@ -693,7 +693,7 @@ mod tests {
         let ext_data_len: u16 = 2 + list_len;
 
         let mut sni_ext = Vec::new();
-        sni_ext.extend_from_slice(&0u16.to_be_bytes());
+        sni_ext.extend_from_slice(&0_u16.to_be_bytes());
         sni_ext.extend_from_slice(&ext_data_len.to_be_bytes());
         sni_ext.extend_from_slice(&list_len.to_be_bytes());
         sni_ext.push(SNI_NAME_TYPE_HOST);
@@ -789,7 +789,7 @@ mod tests {
         let list_len = entry_len;
 
         let mut ext = Vec::new();
-        ext.extend_from_slice(&0u16.to_be_bytes());
+        ext.extend_from_slice(&0_u16.to_be_bytes());
         let ext_data_len = 2 + list_len;
         ext.extend_from_slice(&ext_data_len.to_be_bytes());
         ext.extend_from_slice(&list_len.to_be_bytes());
@@ -818,7 +818,7 @@ mod tests {
         let mut hello = Vec::new();
 
         hello.extend_from_slice(&[0x03, 0x03]);
-        hello.extend_from_slice(&[0u8; 32]);
+        hello.extend_from_slice(&[0_u8; 32]);
 
         hello.push(session_id.len() as u8);
         hello.extend_from_slice(session_id);

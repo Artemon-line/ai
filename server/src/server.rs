@@ -204,7 +204,7 @@ fn register_admin_endpoints(
     health_registry: &HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
 ) {
-    if let Some(ref admin_addr) = config.admin.address {
+    if let Some(admin_addr) = &config.admin.address {
         praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
             server.server_mut(),
             admin_addr,

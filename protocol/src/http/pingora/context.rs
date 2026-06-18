@@ -341,7 +341,7 @@ impl PingoraRequestCtx {
     /// [`pinned_pipeline`]: Self::pinned_pipeline
     /// [`pipeline`]: Self::pipeline
     pub fn pin_pipeline(&mut self, swap: &arc_swap::ArcSwap<FilterPipeline>) -> Arc<FilterPipeline> {
-        if let Some(ref existing) = self.pinned_pipeline {
+        if let Some(existing) = &self.pinned_pipeline {
             return Arc::clone(existing);
         }
         let pipeline = swap.load_full();

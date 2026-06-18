@@ -226,7 +226,7 @@ mod tests {
         let err = load_ca_root_store(empty_path.to_str().expect("path should be valid UTF-8"))
             .expect_err("empty PEM should fail");
         assert!(
-            matches!(err, TlsError::FileLoadError { ref detail, .. } if detail.contains("no certificates")),
+            matches!(&err, TlsError::FileLoadError { detail, .. } if detail.contains("no certificates")),
             "error should mention no certificates, got: {err}"
         );
     }

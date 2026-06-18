@@ -291,7 +291,7 @@ mod tests {
         let ch = ConsistentHash::new(endpoints, None);
 
         let keys: Vec<String> = (0..300).map(|i| format!("/weighted-{i}")).collect();
-        let mut ep1_count = 0usize;
+        let mut ep1_count = 0_usize;
 
         for key in &keys {
             let selected = ch.select(Some(key), None);

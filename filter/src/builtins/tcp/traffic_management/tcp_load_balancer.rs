@@ -307,7 +307,7 @@ mod tests {
         for _ in 0..4 {
             let mut ctx = make_ctx("weighted");
             lb.on_connect(&mut ctx).await.unwrap();
-            *counts.entry(ctx.upstream_addr.unwrap().into_owned()).or_insert(0u32) += 1;
+            *counts.entry(ctx.upstream_addr.unwrap().into_owned()).or_insert(0_u32) += 1;
         }
         assert_eq!(
             *counts.get("10.0.0.1:80").unwrap_or(&0),
