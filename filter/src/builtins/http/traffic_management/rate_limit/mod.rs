@@ -50,7 +50,14 @@ const MAX_PER_IP_ENTRIES: usize = 100_000;
 const HARD_CAP_PER_IP_ENTRIES: usize = 200_000; // 2 * MAX_PER_IP_ENTRIES
 
 /// Maximum entries to scan during a single eviction pass.
-const EVICTION_SCAN_LIMIT: usize = 128;
+///
+/// When the map exceeds the aggressive eviction threshold
+/// ([`AGGRESSIVE_EVICTION_THRESHOLD`]), the scan limit is
+/// lifted entirely (see [`RateLimitFilter::maybe_evict`]).
+const EVICTION_SCAN_LIMIT: usize = 2_048;
+
+/// Entry count above which eviction scans the entire map.
+const AGGRESSIVE_EVICTION_THRESHOLD: usize = MAX_PER_IP_ENTRIES + MAX_PER_IP_ENTRIES / 2; // 150_000
 
 /// Rate limit header: maximum bucket capacity.
 const HEADER_RATELIMIT_LIMIT: &str = "X-RateLimit-Limit";
