@@ -97,11 +97,11 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 zeroize = "1.9.0"
 
 [profile.release]
-lto = true
 codegen-units = 1
-strip = true
-panic = "abort"
+lto = true
 overflow-checks = true
+panic = "abort"
+strip = true
 
 [profile.profiling]
 inherits = "release"
@@ -136,6 +136,7 @@ meta_variable_misuse = "deny"
 # Drop safety
 let_underscore_drop = "deny"
 # Identifier safety
+keyword_idents_2024 = "deny"
 non_ascii_idents = "deny"
 # Method call correctness
 noop_method_call = "deny"
@@ -154,9 +155,11 @@ large_futures = "deny"
 let_underscore_future = "deny"
 let_underscore_must_use = "deny"
 # Memory and allocation efficiency
+assigning_clones = "deny"
 implicit_clone = "deny"
 inefficient_to_string = "deny"
 large_enum_variant = "deny"
+large_stack_frames = "deny"
 large_types_passed_by_value = "deny"
 needless_pass_by_value = "deny"
 rc_buffer = "deny"
@@ -184,6 +187,10 @@ manual_ok_or = "deny"
 manual_string_new = "deny"
 map_unwrap_or = "deny"
 redundant_closure_for_method_calls = "deny"
+ref_patterns = "deny"
+set_contains_or_insert = "deny"
+try_err = "deny"
+unnecessary_get_then_check = "deny"
 unnested_or_patterns = "deny"
 # Borrow hygiene
 needless_borrow = "deny"
@@ -198,6 +205,7 @@ redundant_else = "deny"
 semicolon_if_nothing_returned = "deny"
 uninlined_format_args = "deny"
 unreadable_literal = "deny"
+unseparated_literal_suffix = "deny"
 unused_self = "deny"
 # Import hygiene
 enum_glob_use = "deny"
@@ -235,9 +243,11 @@ expl_impl_clone_on_copy = "deny"
 # Code clarity
 items_after_statements = "deny"
 macro_use_imports = "deny"
+multiple_inherent_impl = "deny"
 needless_continue = "deny"
 rest_pat_in_fully_bound_structs = "deny"
 same_functions_in_if_condition = "deny"
+same_name_method = "deny"
 stable_sort_primitive = "deny"
 string_add = "deny"
 string_lit_as_bytes = "deny"
@@ -254,14 +264,17 @@ too_many_arguments = "deny"
 # Safety and correctness
 unwrap_used = "deny"
 missing_assert_message = "deny"
+infinite_loop = "deny"
 map_err_ignore = "deny"
 or_fun_call = "deny"
 clone_on_ref_ptr = "deny"
 debug_assert_with_mut_call = "deny"
 collection_is_never_read = "deny"
+rc_mutex = "deny"
 significant_drop_in_scrutinee = "deny"
 mutex_integer = "deny"
 mutex_atomic = "deny"
+zombie_processes = "deny"
 allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 significant_drop_tightening = "warn"
