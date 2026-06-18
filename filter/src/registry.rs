@@ -152,6 +152,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
+        "anthropic_validate",
+        crate::builtins::AnthropicValidateFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
         "model_to_header",
         crate::builtins::ModelToHeaderFilter::from_config,
     );
@@ -299,6 +305,11 @@ mod tests {
         assert!(
             names.contains(&"anthropic_messages_format"),
             "anthropic_messages_format should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_validate"),
+            "anthropic_validate should be registered"
         );
         #[cfg(feature = "ai-inference")]
         assert!(

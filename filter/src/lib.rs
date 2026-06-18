@@ -27,6 +27,8 @@ pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, Bod
 #[cfg(feature = "ai-inference")]
 pub use builtins::AnthropicMessagesFormatFilter;
 #[cfg(feature = "ai-inference")]
+pub use builtins::AnthropicValidateFilter;
+#[cfg(feature = "ai-inference")]
 pub use builtins::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use builtins::PromptEnrichFilter;
