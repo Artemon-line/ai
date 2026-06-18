@@ -4,7 +4,9 @@
 //! Anthropic protocol filters.
 
 mod messages_format;
+mod protocol;
 mod validate;
 
 pub use messages_format::AnthropicMessagesFormatFilter;
+pub use protocol::AnthropicMessagesProtocolFilter;
 pub use validate::AnthropicValidateFilter;

@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown, start_proxy,
+    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown, start_header_echo_backend,
+    start_proxy,
 };
 
 use super::load_example_config;
@@ -77,6 +78,29 @@ fn anthropic_validate_rejects_malformed_json() {
         parsed["error"]["type"].as_str(),
         Some("invalid_request_error"),
         "error type should be invalid_request_error"
+    );
+}
+
+#[test]
+fn anthropic_messages_protocol_injects_default_version() {
+    let backend_guard = start_header_echo_backend();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/messages-protocol.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"model":"claude-opus-4-8","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+    let echoed = parse_body(&raw).to_lowercase();
+
+    assert_eq!(parse_status(&raw), 200, "protocol request should return 200");
+    assert!(
+        echoed.contains("anthropic-version: 2023-06-01"),
+        "backend should receive injected anthropic-version header: {echoed}"
     );
 }
 
