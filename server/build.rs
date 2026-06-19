@@ -13,7 +13,7 @@
     reason = "build script: panics are the only error path; println is cargo directives"
 )]
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Write as _};
 
 use cargo_metadata::{CargoOpt, DependencyKind, Metadata, NodeDep, Package, PackageId, Resolve};
 
@@ -156,7 +156,7 @@ fn generate_registration_code(crates: &[String]) -> String {
 
     if crates.is_empty() {
         code.push_str(
-            "#[allow(\n    \
+            "#[expect(\n    \
              unused_variables,\n    \
              clippy::needless_pass_by_ref_mut,\n    \
              reason = \"generated: no external filters discovered\"\n\
@@ -167,7 +167,7 @@ fn generate_registration_code(crates: &[String]) -> String {
     code.push_str("fn register_external_filters(registry: &mut praxis_filter::FilterRegistry) {\n");
 
     for crate_name in crates {
-        code.push_str(&format!("    {crate_name}::register_filters(registry);\n"));
+        writeln!(code, "    {crate_name}::register_filters(registry);").expect("writing to String should not fail");
     }
 
     code.push_str("}\n");
