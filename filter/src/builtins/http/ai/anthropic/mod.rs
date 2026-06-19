@@ -5,8 +5,10 @@
 
 mod messages_format;
 mod protocol;
+pub(crate) mod to_openai;
 mod validate;
 
 pub use messages_format::AnthropicMessagesFormatFilter;
 pub use protocol::AnthropicMessagesProtocolFilter;
+pub use to_openai::AnthropicToOpenaiFilter;
 pub use validate::AnthropicValidateFilter;

@@ -26,6 +26,8 @@ pub use anthropic::AnthropicMessagesFormatFilter;
 #[cfg(feature = "ai-inference")]
 pub use anthropic::AnthropicMessagesProtocolFilter;
 #[cfg(feature = "ai-inference")]
+pub use anthropic::AnthropicToOpenaiFilter;
+#[cfg(feature = "ai-inference")]
 pub use anthropic::AnthropicValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use inference::ModelToHeaderFilter;

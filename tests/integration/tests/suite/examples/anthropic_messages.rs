@@ -6,11 +6,17 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown, start_header_echo_backend,
-    start_proxy,
+    Backend, free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
+    start_header_echo_backend, start_proxy,
 };
 
 use super::load_example_config;
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+const CHAT_COMPLETIONS_RESPONSE: &str = r#"{"id":"chatcmpl-test","model":"gpt-4","choices":[{"message":{"role":"assistant","content":"Hello from a Chat Completions backend."},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#;
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -101,6 +107,36 @@ fn anthropic_messages_protocol_injects_default_version() {
     assert!(
         echoed.contains("anthropic-version: 2023-06-01"),
         "backend should receive injected anthropic-version header: {echoed}"
+    );
+}
+
+#[test]
+fn anthropic_to_openai_transforms_response_body() {
+    let backend_guard = Backend::fixed(CHAT_COMPLETIONS_RESPONSE)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/messages-to-openai.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"model":"claude-opus-4-8","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+    let transformed: serde_json::Value = serde_json::from_str(&parse_body(&raw)).expect("response body should be JSON");
+
+    assert_eq!(parse_status(&raw), 200, "transformation should return 200");
+    assert_eq!(transformed["type"], "message", "response should be Anthropic message");
+    assert_eq!(
+        transformed["content"][0]["text"], "Hello from a Chat Completions backend.",
+        "Chat Completions response text should map to Anthropic content"
+    );
+    assert_eq!(
+        transformed["usage"]["input_tokens"], 11,
+        "prompt tokens should map to input tokens"
     );
 }
 
