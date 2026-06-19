@@ -553,6 +553,10 @@ fn scope_files_for_anchor(anchor: &FilterAnchor, category_dir: &Path, all_anchor
         return vec![anchor.file.clone()];
     };
 
+    if is_root_anchor_with_nested_anchors(anchor, category_dir, all_anchors) {
+        return root_anchor_scope_files(anchor, category_dir, all_anchors);
+    }
+
     let has_sibling = all_anchors
         .iter()
         .any(|a| a.file != anchor.file && a.file.parent() == Some(anchor_dir));
@@ -574,6 +578,27 @@ fn scope_files_for_anchor(anchor: &FilterAnchor, category_dir: &Path, all_anchor
     let mut files = Vec::new();
     scope_files_recursive(anchor_dir, &excluded, &mut files);
     append_ancestor_support_files(category_dir, anchor_dir, all_anchors, &mut files);
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Return whether this category-root anchor should avoid nested modules.
+fn is_root_anchor_with_nested_anchors(
+    anchor: &FilterAnchor,
+    category_dir: &Path,
+    all_anchors: &[FilterAnchor],
+) -> bool {
+    anchor.file.parent() == Some(category_dir)
+        && all_anchors
+            .iter()
+            .any(|a| a.file != anchor.file && a.file.starts_with(category_dir))
+}
+
+/// Collect files for a filter anchored directly in the category root.
+fn root_anchor_scope_files(anchor: &FilterAnchor, category_dir: &Path, all_anchors: &[FilterAnchor]) -> Vec<PathBuf> {
+    let mut files = vec![anchor.file.clone()];
+    append_direct_support_files(category_dir, all_anchors, &mut files);
     files.sort();
     files.dedup();
     files

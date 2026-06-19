@@ -73,7 +73,7 @@ impl TokenUsageHeadersFilter {
     /// # Errors
     ///
     /// Returns [`FilterError`] if the YAML config is malformed.
-    #[allow(clippy::unnecessary_wraps, reason = "signature required by registry")]
+    #[expect(clippy::unnecessary_wraps, reason = "signature required by registry")]
     pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         Ok(Box::new(Self))
     }
@@ -147,13 +147,7 @@ fn insert_token_header(headers: &mut http::HeaderMap, name: HeaderName, value: &
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    reason = "tests"
-)]
+#[expect(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
 

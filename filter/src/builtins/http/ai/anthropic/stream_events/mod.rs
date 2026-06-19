@@ -251,7 +251,10 @@ fn emit_message_start(ctx: &mut HttpFilterContext<'_>, chunk: &Value, output: &m
     ctx.set_metadata(STREAM_STATE_KEY, STREAM_STATE_STARTED.to_owned());
 }
 
-/// Extract the first choice from an `OpenAI` streaming chunk.
+/// Extract the first choice from a Chat Completions streaming chunk.
+///
+/// Anthropic's response format is structurally single-choice, so only
+/// `choices[0]` can be mapped.
 fn extract_first_choice(chunk: &Value) -> Option<&Value> {
     chunk.get("choices").and_then(Value::as_array).and_then(|c| c.first())
 }

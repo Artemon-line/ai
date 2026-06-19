@@ -22,6 +22,7 @@ Built-in filters organized by protocol and category.
 | [`openai_responses_format`](http/ai/openai_responses_format.md) | `ai-inference` | Classifies AI API request bodies and promotes routing facts to headers, metadata, and filter results without mutating the body. |
 | [`openai_responses_validate`](http/ai/openai_responses_validate.md) | `ai-inference` | Validates and enriches Responses API requests. |
 | [`prompt_enrich`](http/ai/prompt_enrich.md) | `ai-inference` | Injects statically configured messages into the `messages` array of OpenAI-compatible chat completion request bodies. |
+| [`token_usage_headers`](http/ai/token_usage_headers.md) | - | Injects `Praxis-Token-Input`, `Praxis-Token-Output`, and `Praxis-Token-Total` headers into downstream responses when token usage data is present in [`filter_metadata`]. |
 
 ## HTTP / Observability
 
