@@ -29,8 +29,6 @@ pub use agentic::{A2aFilter, JsonRpcFilter, McpFilter};
 #[cfg(feature = "ai-inference")]
 pub use anthropic::AnthropicMessagesFormatFilter;
 #[cfg(feature = "ai-inference")]
-pub use guardrails::AiGuardrailsFilter;
-#[cfg(feature = "ai-inference")]
 pub use anthropic::AnthropicMessagesProtocolFilter;
 #[cfg(feature = "ai-inference")]
 pub use anthropic::AnthropicStreamEventsFilter;
@@ -38,6 +36,8 @@ pub use anthropic::AnthropicStreamEventsFilter;
 pub use anthropic::AnthropicToOpenaiFilter;
 #[cfg(feature = "ai-inference")]
 pub use anthropic::AnthropicValidateFilter;
+#[cfg(feature = "ai-inference")]
+pub use guardrails::AiGuardrailsFilter;
 #[cfg(feature = "ai-inference")]
 pub use inference::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]

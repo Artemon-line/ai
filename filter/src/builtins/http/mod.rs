@@ -12,6 +12,8 @@ mod transformation;
 pub(crate) mod value_safety;
 
 #[cfg(feature = "ai-inference")]
+pub use ai::AiGuardrailsFilter;
+#[cfg(feature = "ai-inference")]
 pub use ai::AnthropicMessagesFormatFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::AnthropicMessagesProtocolFilter;
@@ -33,8 +35,6 @@ pub use ai::ResponseStoreFilter;
 pub use ai::ResponseStoreRegistry;
 #[cfg(feature = "ai-inference")]
 pub use ai::ResponsesFormatFilter;
-#[cfg(feature = "ai-inference")]
-pub use ai::AiGuardrailsFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::token_usage::{TokenUsage, TokenUsageProvider, extract_token_usage};
 pub use ai::{A2aFilter, JsonRpcFilter, McpFilter, TokenUsageHeadersFilter};

@@ -24,7 +24,7 @@ pub(super) struct AiGuardrailsConfig {
     pub provider: ProviderConfig,
 
     /// Which phases to evaluate.
-    #[allow(dead_code, reason = "read once provider evaluation is wired (#578)")]
+    #[expect(dead_code, reason = "read once provider evaluation is wired (#578)")]
     #[serde(default)]
     pub phase: PhaseConfig,
 }
@@ -33,7 +33,7 @@ pub(super) struct AiGuardrailsConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum ProviderType {
-    /// NVIDIA NeMo Guardrails via `/v1/guardrail/checks`.
+    /// NVIDIA `NeMo` Guardrails via `/v1/guardrail/checks`.
     Nemo,
 }
 
@@ -58,12 +58,15 @@ pub(super) struct ProviderConfig {
 #[serde(deny_unknown_fields)]
 pub(super) struct PhaseConfig {
     /// Evaluate client requests before forwarding to the upstream.
-    #[allow(dead_code, reason = "read by on_request_body once provider evaluation is wired (#578)")]
+    #[expect(
+        dead_code,
+        reason = "read by on_request_body once provider evaluation is wired (#578)"
+    )]
     #[serde(default = "default_true")]
     pub request: bool,
 
     /// Evaluate upstream responses before forwarding to the client.
-    #[allow(dead_code, reason = "read once response-side evaluation is implemented (#580)")]
+    #[expect(dead_code, reason = "read once response-side evaluation is implemented (#580)")]
     #[serde(default)]
     pub response: bool,
 }
@@ -77,6 +80,7 @@ impl Default for PhaseConfig {
     }
 }
 
+/// Returns `true` for serde default fields.
 fn default_true() -> bool {
     true
 }

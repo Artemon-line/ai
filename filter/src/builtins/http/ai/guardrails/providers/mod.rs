@@ -18,7 +18,10 @@ use crate::FilterError;
 
 /// Which phase of the proxy pipeline is being evaluated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "used once provider evaluation is wired (#578)")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used once provider evaluation is wired (#578)")
+)]
 pub enum GuardPhase {
     /// Inspecting the client request before it reaches the upstream.
     Request,
@@ -41,15 +44,23 @@ impl fmt::Display for GuardPhase {
 
 /// Normalized verdict from an external guardrail provider evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code, reason = "used once provider evaluation is wired (#578)")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used once provider evaluation is wired (#578)")
+)]
 pub enum GuardResult {
     /// Content is safe — forward unchanged.
     Pass,
     /// Content violates policy — reject with reason.
-    Block { reason: String },
+    Block {
+        /// Human-readable block reason from the provider.
+        reason: String,
+    },
     /// Content contains sensitive data — forward with masked text.
     Redact {
+        /// Provider-rewritten text with sensitive data masked.
         modified_text: String,
+        /// Human-readable redaction reason from the provider.
         reason: String,
     },
 }
@@ -58,7 +69,10 @@ impl GuardResult {
     /// Returns the status label written to [`FilterResultSet`].
     ///
     /// [`FilterResultSet`]: crate::FilterResultSet
-    #[allow(dead_code, reason = "used once provider evaluation emits results (#578)")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used once provider evaluation emits results (#578)")
+    )]
     pub fn status_label(&self) -> &'static str {
         match self {
             Self::Pass => "passed",
@@ -86,14 +100,10 @@ impl GuardResult {
 /// `Err(FilterError)`. The pipeline's per-filter `failure_mode`
 /// (open/closed) handles what happens next.
 #[async_trait]
-#[allow(dead_code, reason = "called once NeMo provider is wired in on_request_body (#578)")]
+#[expect(dead_code, reason = "called once NeMo provider is wired in on_request_body (#578)")]
 pub trait GuardProvider: Send + Sync {
     /// Evaluate the extracted messages against the external guard service.
-    async fn evaluate(
-        &self,
-        messages: Vec<serde_json::Value>,
-        phase: GuardPhase,
-    ) -> Result<GuardResult, FilterError>;
+    async fn evaluate(&self, messages: Vec<serde_json::Value>, phase: GuardPhase) -> Result<GuardResult, FilterError>;
 }
 
 // -----------------------------------------------------------------------------
@@ -113,13 +123,7 @@ mod tests {
     #[test]
     fn guard_result_status_labels() {
         assert_eq!(GuardResult::Pass.status_label(), "passed");
-        assert_eq!(
-            GuardResult::Block {
-                reason: "test".into()
-            }
-            .status_label(),
-            "blocked"
-        );
+        assert_eq!(GuardResult::Block { reason: "test".into() }.status_label(), "blocked");
         assert_eq!(
             GuardResult::Redact {
                 modified_text: "***".into(),

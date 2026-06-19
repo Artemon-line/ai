@@ -6,9 +6,10 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::config::{AiGuardrailsConfig, ProviderType};
-use super::providers::GuardProvider;
-use super::providers::nemo::NemoProvider;
+use super::{
+    config::{AiGuardrailsConfig, ProviderType},
+    providers::{GuardProvider, nemo::NemoProvider},
+};
 use crate::{
     FilterAction, FilterError,
     body::{BodyAccess, BodyMode},
@@ -57,7 +58,11 @@ const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
 /// assert_eq!(filter.name(), "ai_guardrails");
 /// ```
 pub struct AiGuardrailsFilter {
-    #[allow(dead_code, reason = "called by on_request_body once provider evaluation is wired (#578)")]
+    #[expect(
+        dead_code,
+        reason = "called by on_request_body once provider evaluation is wired (#578)"
+    )]
+    /// Guard provider instance.
     provider: Box<dyn GuardProvider>,
 }
 
@@ -74,9 +79,7 @@ impl AiGuardrailsFilter {
         let cfg: AiGuardrailsConfig = parse_filter_config("ai_guardrails", config)?;
 
         let provider: Box<dyn GuardProvider> = match cfg.provider.provider_type {
-            ProviderType::Nemo => {
-                Box::new(NemoProvider::from_config(&cfg.provider.config)?)
-            }
+            ProviderType::Nemo => Box::new(NemoProvider::from_config(&cfg.provider.config)?),
         };
 
         Ok(Box::new(Self { provider }))
@@ -89,10 +92,7 @@ impl HttpFilter for AiGuardrailsFilter {
         "ai_guardrails"
     }
 
-    async fn on_request(
-        &self,
-        _ctx: &mut HttpFilterContext<'_>,
-    ) -> Result<FilterAction, FilterError> {
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }
 

@@ -44,10 +44,10 @@ phase:
 #[test]
 fn missing_provider_rejected() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
-        r#"
+        "
 phase:
   request: true
-"#,
+",
     )
     .unwrap();
 
@@ -113,10 +113,10 @@ provider:
 #[test]
 fn nemo_missing_endpoint_rejected() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
-        r#"
+        "
 provider:
   type: nemo
-"#,
+",
     )
     .unwrap();
 

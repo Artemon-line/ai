@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! NeMo Guardrails provider: calls `/v1/guardrail/checks` and maps
+//! `NeMo` Guardrails provider: calls `/v1/guardrail/checks` and maps
 //! the response to [`GuardResult`].
 //!
 //! Full implementation in #578.
@@ -12,14 +12,14 @@ use serde::Deserialize;
 use super::{GuardPhase, GuardProvider, GuardResult};
 use crate::FilterError;
 
-/// Default timeout for NeMo HTTP calls (10 seconds).
+/// Default timeout for `NeMo` HTTP calls (10 seconds).
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
-/// NeMo-specific configuration fields.
+/// `NeMo`-specific configuration fields.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NemoConfig {
-    /// NeMo endpoint URL.
+    /// `NeMo` endpoint URL.
     endpoint: String,
 
     /// Per-request timeout in milliseconds.
@@ -27,23 +27,24 @@ struct NemoConfig {
     timeout_ms: u64,
 }
 
+/// Returns the default timeout value for serde deserialization.
 fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
 
-/// NeMo Guardrails provider.
+/// `NeMo` Guardrails provider.
 pub(in crate::builtins::http::ai::guardrails) struct NemoProvider {
-    /// NeMo endpoint URL (e.g. `http://nemo:8000/v1/guardrail/checks`).
-    #[allow(dead_code, reason = "used once HTTP calls are wired (#578)")]
+    /// `NeMo` endpoint URL (e.g. `http://nemo:8000/v1/guardrail/checks`).
+    #[expect(dead_code, reason = "used once HTTP calls are wired (#578)")]
     endpoint: String,
 
     /// Per-request timeout in milliseconds.
-    #[allow(dead_code, reason = "used once HTTP calls are wired (#578)")]
+    #[expect(dead_code, reason = "used once HTTP calls are wired (#578)")]
     timeout_ms: u64,
 }
 
 impl NemoProvider {
-    /// Parse and validate NeMo-specific config from the provider settings.
+    /// Parse and validate `NeMo`-specific config from the provider settings.
     pub fn from_config(config: &serde_yaml::Value) -> Result<Self, FilterError> {
         let cfg: NemoConfig = serde_yaml::from_value(config.clone())
             .map_err(|e| FilterError::from(format!("ai_guardrails (nemo): {e}")))?;
