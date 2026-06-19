@@ -7,6 +7,8 @@ pub(crate) mod http;
 mod tcp;
 
 #[cfg(feature = "ai-inference")]
+pub use http::AiGuardrailsFilter;
+#[cfg(feature = "ai-inference")]
 pub use http::AnthropicMessagesFormatFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::AnthropicMessagesProtocolFilter;

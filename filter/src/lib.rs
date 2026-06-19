@@ -26,6 +26,8 @@ pub use actions::{FilterAction, Rejection};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "ai-inference")]
+pub use builtins::AiGuardrailsFilter;
+#[cfg(feature = "ai-inference")]
 pub use builtins::AnthropicMessagesFormatFilter;
 #[cfg(feature = "ai-inference")]
 pub use builtins::AnthropicMessagesProtocolFilter;

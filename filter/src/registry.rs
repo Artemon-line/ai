@@ -147,6 +147,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
+        "ai_guardrails",
+        crate::builtins::AiGuardrailsFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
         "anthropic_messages_format",
         crate::builtins::AnthropicMessagesFormatFilter::from_config,
     );
@@ -317,6 +323,8 @@ mod tests {
         );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
         assert!(names.contains(&"mcp"), "mcp should be registered");
+        #[cfg(feature = "ai-inference")]
+        assert!(names.contains(&"ai_guardrails"), "ai_guardrails should be registered");
         #[cfg(feature = "ai-inference")]
         assert!(
             names.contains(&"model_to_header"),
