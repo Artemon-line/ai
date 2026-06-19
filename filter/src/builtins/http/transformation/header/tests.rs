@@ -256,7 +256,6 @@ fn remove_headers_empty_list_is_noop() {
     assert_eq!(headers.len(), 1, "empty remove list should not affect headers");
 }
 
-
 #[tokio::test]
 async fn request_set_populates_headers_to_set() {
     let filter = make_header_filter(

@@ -33,6 +33,7 @@ pub use ai::ResponseStoreFilter;
 pub use ai::ResponseStoreRegistry;
 #[cfg(feature = "ai-inference")]
 pub use ai::ResponsesFormatFilter;
+pub use ai::TokenUsageHeadersFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::token_usage::{TokenUsage, TokenUsageProvider, extract_token_usage};
 pub use ai::{A2aFilter, JsonRpcFilter, McpFilter};

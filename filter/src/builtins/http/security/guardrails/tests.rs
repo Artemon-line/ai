@@ -573,7 +573,6 @@ async fn pii_email_allows_no_email() {
     assert!(matches!(action, FilterAction::Continue), "non-email @ should pass");
 }
 
-
 #[tokio::test]
 async fn pii_combined_rejects_any_match() {
     let f = make_filter(vec![body_pii(PiiKind::ALL)]);

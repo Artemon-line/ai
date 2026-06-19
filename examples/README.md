@@ -39,6 +39,7 @@ page.
 | [response-store.yaml](configs/ai/openai/responses/response-store.yaml) | Persists non-streaming Responses API responses to a database and serves stored data via GET endpoints and handles DELETE /v1/responses/{id} locally |
 | [responses-routing.yaml](configs/ai/openai/responses/responses-routing.yaml) | Routes Responses API traffic by detected mode |
 | [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Injects system messages into OpenAI-compatible chat completion requests before forwarding to the upstream provider |
+| [token-usage-headers.yaml](configs/ai/token-usage-headers.yaml) | Inject Praxis-Token-Input, Praxis-Token-Output, and Praxis-Token-Total headers into downstream responses when token counts are available in filter metadata |
 
 ### Branching
 

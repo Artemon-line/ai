@@ -112,7 +112,7 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
         CsrfFilter, ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter,
         JsonRpcFilter, McpFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
-        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
+        StaticResponseFilter, TimeoutFilter, TokenUsageHeadersFilter, UrlRewriteFilter,
     };
 
     register_http(factories, "a2a", A2aFilter::from_config);
@@ -139,6 +139,7 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "router", crate::RouterFilter::from_config);
     register_http(factories, "static_response", StaticResponseFilter::from_config);
     register_http(factories, "timeout", TimeoutFilter::from_config);
+    register_http(factories, "token_usage_headers", TokenUsageHeadersFilter::from_config);
     register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
@@ -305,6 +306,10 @@ mod tests {
             "tcp_load_balancer should be registered"
         );
         assert!(names.contains(&"timeout"), "timeout should be registered");
+        assert!(
+            names.contains(&"token_usage_headers"),
+            "token_usage_headers should be registered"
+        );
         assert!(names.contains(&"url_rewrite"), "url_rewrite should be registered");
         assert!(
             names.contains(&"json_body_field"),
