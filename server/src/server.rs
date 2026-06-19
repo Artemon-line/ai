@@ -46,7 +46,8 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 // Server
 // -----------------------------------------------------------------------------
 
-/// Build filter pipelines using the built-in registry, register protocols and run the server.
+/// Build filter pipelines using built-in and auto-discovered external filters, register
+/// protocols and run the server.
 ///
 /// # Security: Root Check
 ///
@@ -58,7 +59,7 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
-    run_server_with_registry(config, FilterRegistry::with_builtins(), config_path)
+    run_server_with_registry(config, crate::build_full_registry(), config_path)
 }
 
 /// Build filter pipelines from the given registry, register protocols and run the server.

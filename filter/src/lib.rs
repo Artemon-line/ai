@@ -109,6 +109,60 @@ macro_rules! register_filters {
 }
 
 // -----------------------------------------------------------------------------
+// External Filter Export
+// -----------------------------------------------------------------------------
+
+/// Macro for exporting filters from an external crate for build-time
+/// auto-discovery.
+///
+/// External filter crates use this macro to declare which filters they
+/// provide. The generated `register_filters` function is called
+/// automatically by the Praxis server when the crate is listed as a
+/// dependency with a `[package.metadata.praxis-filters]` marker in
+/// its `Cargo.toml`.
+///
+/// ```ignore
+/// use praxis_filter::export_filters;
+///
+/// export_filters! {
+///     http "my_auth" => MyAuthFilter::from_config,
+///     tcp  "my_tcp_logger" => MyTcpLogger::from_config,
+/// }
+/// ```
+///
+/// The external crate's `Cargo.toml` must also include:
+///
+/// ```toml
+/// [package.metadata.praxis-filters]
+/// ```
+///
+/// With these two pieces in place, adding the crate as a dependency
+/// to the Praxis server is sufficient to make the filters available
+/// in YAML configuration.
+#[macro_export]
+macro_rules! export_filters {
+    ( $( $kind:ident $name:expr => $factory:expr ),* $(,)? ) => {
+        /// Register this crate's filters into a Praxis [`FilterRegistry`].
+        ///
+        /// Called automatically by the Praxis build-time filter discovery
+        /// system. Can also be called manually for testing or custom
+        /// server builds.
+        ///
+        /// # Panics
+        ///
+        /// Panics if any filter name collides with an already-registered
+        /// filter (built-in or from another external crate).
+        ///
+        /// [`FilterRegistry`]: $crate::FilterRegistry
+        pub fn register_filters(registry: &mut $crate::FilterRegistry) {
+            $(
+                $crate::register_filters!(@register registry, $kind $name => $factory);
+            )*
+        }
+    };
+}
+
+// -----------------------------------------------------------------------------
 // Macro Tests
 // -----------------------------------------------------------------------------
 
@@ -204,6 +258,79 @@ mod macro_tests {
     fn macro_panics_on_builtin_collision() {
         let mut registry = crate::FilterRegistry::with_builtins();
         register_filters!(@register registry, http "router" => DummyHttpFilter::from_config);
+    }
+
+    // -------------------------------------------------------------------------
+    // export_filters! tests
+    // -------------------------------------------------------------------------
+
+    mod export_test {
+        use super::*;
+
+        export_filters! {
+            http "exported_http" => DummyHttpFilter::from_config,
+            tcp  "exported_tcp"  => DummyTcpFilter::from_config,
+        }
+    }
+
+    #[test]
+    fn export_filters_registers_http() {
+        let mut registry = crate::FilterRegistry::with_builtins();
+        export_test::register_filters(&mut registry);
+        assert!(
+            registry.available_filters().contains(&"exported_http"),
+            "exported HTTP filter should be registered"
+        );
+    }
+
+    #[test]
+    fn export_filters_registers_tcp() {
+        let mut registry = crate::FilterRegistry::with_builtins();
+        export_test::register_filters(&mut registry);
+        assert!(
+            registry.available_filters().contains(&"exported_tcp"),
+            "exported TCP filter should be registered"
+        );
+    }
+
+    #[test]
+    fn export_filters_preserves_builtins() {
+        let mut registry = crate::FilterRegistry::with_builtins();
+        export_test::register_filters(&mut registry);
+        assert!(
+            registry.available_filters().contains(&"router"),
+            "built-in router should still be registered"
+        );
+    }
+
+    #[test]
+    fn export_filters_creates_http_filter_successfully() {
+        let mut registry = crate::FilterRegistry::with_builtins();
+        export_test::register_filters(&mut registry);
+        let result = registry.create("exported_http", &serde_yaml::Value::Null);
+        assert!(result.is_ok(), "exported HTTP filter should instantiate without error");
+    }
+
+    #[test]
+    fn export_filters_creates_tcp_filter_successfully() {
+        let mut registry = crate::FilterRegistry::with_builtins();
+        export_test::register_filters(&mut registry);
+        let result = registry.create("exported_tcp", &serde_yaml::Value::Null);
+        assert!(result.is_ok(), "exported TCP filter should instantiate without error");
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate filter name: 'router'")]
+    fn export_filters_panics_on_builtin_collision() {
+        mod collision {
+            use super::*;
+
+            export_filters! {
+                http "router" => DummyHttpFilter::from_config,
+            }
+        }
+        let mut registry = crate::FilterRegistry::with_builtins();
+        collision::register_filters(&mut registry);
     }
 
     // -----------------------------------------------------------------------------
