@@ -10,6 +10,7 @@ Built-in filters organized by protocol and category.
 | Filter | Feature | Description |
 |--------|---------|-------------|
 | [`a2a`](http/ai/a2a.md) | - | Extracts A2A protocol metadata from JSON-RPC request bodies and promotes method, family, task ID, streaming detection, and version to request headers, filter results, and durable metadata for routing. |
+| [`ai_guardrails`](http/ai/ai_guardrails.md) | `ai-inference` | Calls an external AI guardrail provider to evaluate request (and eventually response) bodies. The provider determines whether content should be passed, blocked, or redacted. |
 | [`anthropic_messages_format`](http/ai/anthropic_messages_format.md) | `ai-inference` | Classifies Anthropic Messages API requests and promotes routing facts to headers, metadata, and filter results. |
 | [`anthropic_messages_protocol`](http/ai/anthropic_messages_protocol.md) | `ai-inference` | Normalizes Anthropic Messages protocol headers for native backends. |
 | [`anthropic_stream_events`](http/ai/anthropic_stream_events.md) | `ai-inference` | Transforms streaming SSE responses between `OpenAI` and Anthropic formats, processing each chunk as it arrives. |
