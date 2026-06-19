@@ -18,6 +18,8 @@ use super::load_example_config;
 
 const CHAT_COMPLETIONS_RESPONSE: &str = r#"{"id":"chatcmpl-test","model":"gpt-4","choices":[{"message":{"role":"assistant","content":"Hello from a Chat Completions backend."},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#;
 
+const CHAT_COMPLETIONS_SSE_RESPONSE: &str = "data: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}]}\n\ndata: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"index\":0}]}\n\ndata: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -137,6 +139,40 @@ fn anthropic_to_openai_transforms_response_body() {
     assert_eq!(
         transformed["usage"]["input_tokens"], 11,
         "prompt tokens should map to input tokens"
+    );
+}
+
+#[test]
+fn anthropic_to_openai_transforms_streaming_response_body() {
+    let backend_guard = Backend::fixed(CHAT_COMPLETIONS_SSE_RESPONSE)
+        .header("content-type", "text/event-stream")
+        .start_with_shutdown();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/messages-to-openai.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body =
+        r#"{"model":"claude-opus-4-8","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello"}]}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+    let transformed = parse_body(&raw);
+
+    assert_eq!(parse_status(&raw), 200, "stream transformation should return 200");
+    assert!(
+        transformed.contains("event: message_start"),
+        "stream should include Anthropic message_start"
+    );
+    assert!(
+        transformed.contains("text_delta") && transformed.contains("Hello"),
+        "Chat Completions delta should map to Anthropic text_delta"
+    );
+    assert!(
+        transformed.contains("event: message_stop"),
+        "stream should include Anthropic message_stop"
     );
 }
 

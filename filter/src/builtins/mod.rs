@@ -11,6 +11,8 @@ pub use http::AnthropicMessagesFormatFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::AnthropicMessagesProtocolFilter;
 #[cfg(feature = "ai-inference")]
+pub use http::AnthropicStreamEventsFilter;
+#[cfg(feature = "ai-inference")]
 pub use http::AnthropicToOpenaiFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::AnthropicValidateFilter;

@@ -158,6 +158,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
+        "anthropic_stream_events",
+        crate::builtins::AnthropicStreamEventsFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
         "anthropic_to_openai",
         crate::builtins::AnthropicToOpenaiFilter::from_config,
     );
@@ -322,6 +328,11 @@ mod tests {
         assert!(
             names.contains(&"anthropic_messages_protocol"),
             "anthropic_messages_protocol should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_stream_events"),
+            "anthropic_stream_events should be registered"
         );
         #[cfg(feature = "ai-inference")]
         assert!(

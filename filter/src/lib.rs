@@ -30,6 +30,8 @@ pub use builtins::AnthropicMessagesFormatFilter;
 #[cfg(feature = "ai-inference")]
 pub use builtins::AnthropicMessagesProtocolFilter;
 #[cfg(feature = "ai-inference")]
+pub use builtins::AnthropicStreamEventsFilter;
+#[cfg(feature = "ai-inference")]
 pub use builtins::AnthropicToOpenaiFilter;
 #[cfg(feature = "ai-inference")]
 pub use builtins::AnthropicValidateFilter;

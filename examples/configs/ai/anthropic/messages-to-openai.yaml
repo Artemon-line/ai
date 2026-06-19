@@ -9,7 +9,8 @@
 #
 # Request: system hoisting, content block flattening, tool mapping.
 # Response: content blocks, stop_reason, usage mapping back to
-# Anthropic format.
+# Anthropic format. Streaming responses are converted by
+# `anthropic_stream_events`.
 
 listeners:
   - name: anthropic-gateway
@@ -24,6 +25,12 @@ filter_chains:
 
       - filter: anthropic_to_openai
         max_body_bytes: 1048576
+
+      - filter: anthropic_stream_events
+        response_conditions:
+          - when:
+              headers:
+                content-type: "text/event-stream"
 
       - filter: path_rewrite
         replace:
