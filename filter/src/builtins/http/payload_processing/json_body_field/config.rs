@@ -6,9 +6,7 @@
 use serde::Deserialize;
 
 use crate::{
-    FilterError,
-    body::DEFAULT_JSON_BODY_MAX_BYTES,
-    builtins::http::ai::config_validation::validate_max_body_bytes,
+    FilterError, body::DEFAULT_JSON_BODY_MAX_BYTES, builtins::http::ai::config_validation::validate_max_body_bytes,
 };
 
 // -----------------------------------------------------------------------------

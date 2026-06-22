@@ -5,8 +5,10 @@
 
 use http::HeaderMap;
 
-use super::super::origin_matcher::{OriginMatcher, build_origin_matcher};
-use super::super::origin_normalize::normalize_origin;
+use super::super::{
+    origin_matcher::{OriginMatcher, build_origin_matcher},
+    origin_normalize::normalize_origin,
+};
 
 // ---------------------------------------------------------------------------
 // TrustedOrigins

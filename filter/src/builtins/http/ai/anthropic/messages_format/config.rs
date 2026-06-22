@@ -130,4 +130,3 @@ pub(crate) fn build_config(cfg: AnthropicMessagesFormatConfig) -> Result<Anthrop
 
     Ok(cfg)
 }
-

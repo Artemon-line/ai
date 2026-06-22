@@ -191,4 +191,3 @@ pub(crate) fn build_config(cfg: McpConfig) -> Result<McpConfig, FilterError> {
     validate_header_name("mcp", "session_present", cfg.headers.session_present.as_deref())?;
     Ok(cfg)
 }
-

@@ -268,7 +268,6 @@ fn default_max_body_bytes() -> usize {
 // -----------------------------------------------------------------------------
 
 /// Validate and build the final configuration.
-#[expect(clippy::too_many_lines, reason = "sequential validation of config fields")]
 pub(crate) fn build_config(cfg: A2aConfig) -> Result<A2aConfig, FilterError> {
     validate_max_body_bytes("a2a", cfg.max_body_bytes)?;
 
@@ -306,7 +305,11 @@ fn validate_task_routing(tr: &TaskRoutingConfig) -> Result<(), FilterError> {
 
     validate_max_body_bytes("a2a: task_routing", tr.max_response_body_bytes)?;
 
-    validate_header_name("a2a", "task_routing.route_cluster_header", Some(&tr.route_cluster_header))?;
+    validate_header_name(
+        "a2a",
+        "task_routing.route_cluster_header",
+        Some(&tr.route_cluster_header),
+    )?;
 
     // The route header must use the reserved x-praxis-a2a- prefix so that
     // the protocol layer's reserved-header rejection guard prevents clients

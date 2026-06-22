@@ -17,11 +17,7 @@ use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
 ///
 /// [`FilterError`]: crate::FilterError
 /// [`http::HeaderName::from_bytes`]: http::HeaderName::from_bytes
-pub(crate) fn validate_header_name(
-    filter: &str,
-    field: &str,
-    header_name: Option<&str>,
-) -> Result<(), FilterError> {
+pub(crate) fn validate_header_name(filter: &str, field: &str, header_name: Option<&str>) -> Result<(), FilterError> {
     let Some(name) = header_name else {
         return Ok(());
     };
@@ -31,9 +27,7 @@ pub(crate) fn validate_header_name(
     }
 
     if http::HeaderName::from_bytes(name.as_bytes()).is_err() {
-        return Err(
-            format!("{filter}: {field} header name is not a valid HTTP header name").into(),
-        );
+        return Err(format!("{filter}: {field} header name is not a valid HTTP header name").into());
     }
 
     Ok(())
@@ -46,25 +40,16 @@ pub(crate) fn validate_header_name(
 /// Validate `max_body_bytes` is non-zero and within the ceiling.
 ///
 /// Returns a [`FilterError`] when the value is zero or exceeds
-/// [`MAX_JSON_BODY_BYTES`].
+/// the `MAX_JSON_BODY_BYTES` ceiling (64 MiB).
 ///
 /// [`FilterError`]: crate::FilterError
-/// [`MAX_JSON_BODY_BYTES`]: crate::body::limits::MAX_JSON_BODY_BYTES
-pub(crate) fn validate_max_body_bytes(
-    filter: &str,
-    value: usize,
-) -> Result<(), FilterError> {
+pub(crate) fn validate_max_body_bytes(filter: &str, value: usize) -> Result<(), FilterError> {
     if value == 0 {
-        return Err(
-            format!("{filter}: 'max_body_bytes' must be greater than 0").into(),
-        );
+        return Err(format!("{filter}: 'max_body_bytes' must be greater than 0").into());
     }
 
     if value > MAX_JSON_BODY_BYTES {
-        return Err(format!(
-            "{filter}: max_body_bytes ({value}) exceeds maximum ({MAX_JSON_BODY_BYTES})"
-        )
-        .into());
+        return Err(format!("{filter}: max_body_bytes ({value}) exceeds maximum ({MAX_JSON_BODY_BYTES})").into());
     }
 
     Ok(())

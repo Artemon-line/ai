@@ -15,7 +15,7 @@ use crate::{FilterError, builtins::http::ai::config_validation::validate_max_bod
 ///
 /// Validation only needs the top-level JSON envelope, so the
 /// default stays below the shared JSON inspection ceiling. Users
-/// can raise it up to [`MAX_JSON_BODY_BYTES`] when they need to
+/// can raise it up to `MAX_JSON_BODY_BYTES` (64 MiB) when they need to
 /// accept larger Anthropic request bodies.
 const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576; // 1 MiB
 

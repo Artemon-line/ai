@@ -10,8 +10,7 @@ use super::{
     config::{BatchPolicy, JsonRpcHeaders},
     envelope::{JsonRpcIdKind, JsonRpcKind, parse_json_rpc_envelope},
 };
-use crate::builtins::http::ai::OnInvalidBehavior;
-use crate::{FilterAction, filter::HttpFilter as _};
+use crate::{FilterAction, builtins::http::ai::OnInvalidBehavior, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Config Tests

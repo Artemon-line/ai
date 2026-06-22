@@ -53,8 +53,7 @@ impl OriginMatcher {
                 wildcard_suffixes,
             } => {
                 let normalized = normalize_origin(origin);
-                exact.contains(normalized.as_str())
-                    || match_wildcard_subdomain(&normalized, wildcard_suffixes)
+                exact.contains(normalized.as_str()) || match_wildcard_subdomain(&normalized, wildcard_suffixes)
             },
         }
     }

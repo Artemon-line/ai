@@ -144,4 +144,3 @@ pub(crate) fn build_config(cfg: ResponsesFormatConfig) -> Result<ResponsesFormat
 
     Ok(cfg)
 }
-

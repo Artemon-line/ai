@@ -6,4 +6,6 @@
 //!
 //! [`OriginMatcher`]: super::super::origin_matcher::OriginMatcher
 
-pub(super) use super::super::origin_matcher::{OriginMatcher as OriginPolicy, build_origin_matcher as build_origin_policy};
+pub(super) use super::super::origin_matcher::{
+    OriginMatcher as OriginPolicy, build_origin_matcher as build_origin_policy,
+};

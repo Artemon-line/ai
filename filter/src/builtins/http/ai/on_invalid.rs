@@ -13,9 +13,7 @@ use serde::Deserialize;
 ///
 /// Used by classifier filters (JSON-RPC, A2A, MCP, Anthropic Messages,
 /// OpenAI Responses) to control what happens when parsing fails.
-///
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OnInvalidBehavior {
     /// Continue processing without classifier metadata.
@@ -39,5 +37,4 @@ impl OnInvalidBehavior {
     pub(crate) const fn default_reject() -> Self {
         Self::Reject
     }
-
 }
