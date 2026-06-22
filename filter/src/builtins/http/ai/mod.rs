@@ -25,6 +25,10 @@ pub(crate) mod token_usage;
 
 mod token_usage_headers;
 
+mod on_invalid;
+
+pub(crate) use on_invalid::OnInvalidBehavior;
+
 pub use agentic::{A2aFilter, JsonRpcFilter, McpFilter};
 #[cfg(feature = "ai-inference")]
 pub use anthropic::AnthropicMessagesFormatFilter;

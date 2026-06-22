@@ -29,9 +29,10 @@ use bytes::Bytes;
 use tracing::{trace, warn};
 
 use self::{
-    config::{InvalidMcpBehavior, McpConfig, MismatchBehavior, MissingHeaderBehavior, build_config},
+    config::{McpConfig, MismatchBehavior, MissingHeaderBehavior, build_config},
     envelope::{McpEnvelope, extract_mcp_envelope},
 };
+use super::super::OnInvalidBehavior;
 use super::{
     MAX_DYNAMIC_VALUE_LEN,
     json_rpc::{config::JsonRpcConfig, envelope::parse_json_rpc_value},
@@ -205,7 +206,7 @@ impl HttpFilter for McpFilter {
 
 /// Build a `JsonRpcConfig` for the shared parser with MCP-appropriate defaults.
 fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
-    use super::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
+    use super::json_rpc::config::{BatchPolicy, JsonRpcHeaders};
 
     JsonRpcConfig {
         batch_policy: BatchPolicy::Reject,
@@ -215,7 +216,7 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
             method: None,
         },
         max_body_bytes,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
+        on_invalid: OnInvalidBehavior::Continue,
     }
 }
 
@@ -241,8 +242,10 @@ fn handle_parse_error(
 )]
 fn handle_non_mcp(config: &McpConfig) -> Result<FilterAction, FilterError> {
     match config.on_invalid {
-        InvalidMcpBehavior::Continue => Ok(FilterAction::Continue),
-        InvalidMcpBehavior::Reject => Ok(FilterAction::Reject(Rejection::status(400))),
+        OnInvalidBehavior::Continue => Ok(FilterAction::Continue),
+        OnInvalidBehavior::Reject | OnInvalidBehavior::Error => {
+            Ok(FilterAction::Reject(Rejection::status(400)))
+        },
     }
 }
 
@@ -255,8 +258,10 @@ fn reject_missing_required_selector(
     let requires = mcp.method.requires_name() || mcp.method.requires_uri();
     if requires && mcp.name.is_none() {
         match config.on_invalid {
-            InvalidMcpBehavior::Reject => Some(mcp_invalid_params_rejection(envelope)),
-            InvalidMcpBehavior::Continue => Some(FilterAction::Continue),
+            OnInvalidBehavior::Reject | OnInvalidBehavior::Error => {
+                Some(mcp_invalid_params_rejection(envelope))
+            },
+            OnInvalidBehavior::Continue => Some(FilterAction::Continue),
         }
     } else {
         None

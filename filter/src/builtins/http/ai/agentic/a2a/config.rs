@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
+use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES, builtins::http::ai::OnInvalidBehavior};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -31,18 +31,6 @@ const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 65_536;
 // -----------------------------------------------------------------------------
 // Behavior Enums
 // -----------------------------------------------------------------------------
-
-/// Invalid A2A message handling.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum InvalidA2aBehavior {
-    /// Reject non-A2A input with HTTP 400.
-    #[default]
-    Reject,
-
-    /// Continue processing without A2A metadata.
-    Continue,
-}
 
 /// Task route lookup miss behavior.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -256,8 +244,8 @@ pub(crate) struct A2aConfig {
     pub method_aliases: BTreeMap<String, String>,
 
     /// Invalid input handling behavior.
-    #[serde(default)]
-    pub on_invalid: InvalidA2aBehavior,
+    #[serde(default = "OnInvalidBehavior::default_reject")]
+    pub on_invalid: OnInvalidBehavior,
 
     /// Task-ownership routing configuration.
     #[serde(default)]

@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
+use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES, builtins::http::ai::OnInvalidBehavior};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -23,17 +23,6 @@ const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576; // 1 MiB
 // Behavior Enums
 // -----------------------------------------------------------------------------
 
-/// Behavior when the request body is not a recognized AI API format.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum OnInvalidBehavior {
-    /// Continue processing.
-    #[default]
-    Continue,
-
-    /// Reject the request with HTTP 400.
-    Reject,
-}
 
 // -----------------------------------------------------------------------------
 // AnthropicMessagesFormatHeaders
@@ -104,7 +93,7 @@ fn default_stream_header() -> Option<String> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct AnthropicMessagesFormatConfig {
     /// Behavior when the body cannot be classified.
-    #[serde(default)]
+    #[serde(default = "OnInvalidBehavior::default_continue")]
     pub on_invalid: OnInvalidBehavior,
 
     /// Maximum body size in bytes for `StreamBuffer` mode.

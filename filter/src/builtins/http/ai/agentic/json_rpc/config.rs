@@ -5,6 +5,7 @@
 
 use serde::Deserialize;
 
+use crate::builtins::http::ai::OnInvalidBehavior;
 use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
 
 // -----------------------------------------------------------------------------
@@ -27,23 +28,6 @@ pub(crate) enum BatchPolicy {
     Reject,
     /// Use the first valid request/notification in the batch for routing.
     First,
-}
-
-// -----------------------------------------------------------------------------
-// InvalidJsonRpcBehavior
-// -----------------------------------------------------------------------------
-
-/// Invalid JSON or non-JSON-RPC input handling.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum InvalidJsonRpcBehavior {
-    /// Continue processing (default proxy behavior).
-    #[default]
-    Continue,
-    /// Reject with HTTP 400.
-    Reject,
-    /// Return filter error (pipeline failure).
-    Error,
 }
 
 // -----------------------------------------------------------------------------
@@ -95,8 +79,8 @@ pub(crate) struct JsonRpcConfig {
     pub max_body_bytes: usize,
 
     /// Invalid input handling behavior.
-    #[serde(default)]
-    pub on_invalid: InvalidJsonRpcBehavior,
+    #[serde(default = "OnInvalidBehavior::default_continue")]
+    pub on_invalid: OnInvalidBehavior,
 }
 
 /// Default max body bytes.

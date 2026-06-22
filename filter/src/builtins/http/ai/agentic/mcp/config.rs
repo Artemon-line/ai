@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::MAX_JSON_BODY_BYTES};
+use crate::{FilterError, body::MAX_JSON_BODY_BYTES, builtins::http::ai::OnInvalidBehavior};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -42,16 +42,6 @@ pub(crate) enum MissingHeaderBehavior {
     Reject,
 }
 
-/// Invalid MCP message handling.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum InvalidMcpBehavior {
-    /// Reject non-MCP input with HTTP 400.
-    #[default]
-    Reject,
-    /// Continue processing without MCP metadata.
-    Continue,
-}
 
 // -----------------------------------------------------------------------------
 // HeaderValidation
@@ -172,8 +162,8 @@ pub(crate) struct McpConfig {
     pub max_body_bytes: usize,
 
     /// Invalid input handling behavior.
-    #[serde(default)]
-    pub on_invalid: InvalidMcpBehavior,
+    #[serde(default = "OnInvalidBehavior::default_reject")]
+    pub on_invalid: OnInvalidBehavior,
 }
 
 /// Default max body bytes.

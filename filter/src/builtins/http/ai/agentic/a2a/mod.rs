@@ -29,10 +29,11 @@ use bytes::Bytes;
 use tracing::{debug, trace};
 
 use self::{
-    config::{A2aConfig, InvalidA2aBehavior, build_config},
+    config::{A2aConfig, build_config},
     envelope::{A2aEnvelope, extract_a2a_envelope},
     task_routing::LocalTaskRouteStore,
 };
+use super::super::OnInvalidBehavior;
 use super::MAX_DYNAMIC_VALUE_LEN;
 use crate::{
     FilterAction, FilterError, Rejection,
@@ -622,12 +623,9 @@ fn is_event_stream_content_type(ct: &str) -> bool {
 
 /// Build a `JsonRpcConfig` for the shared parser with A2A-appropriate defaults.
 fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
-    use crate::builtins::http::ai::agentic::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
+    use crate::builtins::http::ai::agentic::json_rpc::config::{BatchPolicy, JsonRpcHeaders};
 
     JsonRpcConfig {
-        // A2A classification produces one static routing decision per request.
-        // JSON-RPC batches can mix methods, task IDs, and streaming semantics,
-        // so reject them instead of routing by an arbitrary batch element.
         batch_policy: BatchPolicy::Reject,
         headers: JsonRpcHeaders {
             id: None,
@@ -635,7 +633,7 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
             method: None,
         },
         max_body_bytes,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
+        on_invalid: OnInvalidBehavior::Continue,
     }
 }
 
@@ -661,8 +659,10 @@ fn handle_parse_error(
 )]
 fn handle_non_a2a(config: &A2aConfig) -> Result<FilterAction, FilterError> {
     match config.on_invalid {
-        InvalidA2aBehavior::Continue => Ok(FilterAction::Continue),
-        InvalidA2aBehavior::Reject => Ok(FilterAction::Reject(Rejection::status(400))),
+        OnInvalidBehavior::Continue => Ok(FilterAction::Continue),
+        OnInvalidBehavior::Reject | OnInvalidBehavior::Error => {
+            Ok(FilterAction::Reject(Rejection::status(400)))
+        },
     }
 }
 
