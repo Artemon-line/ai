@@ -1223,7 +1223,7 @@ fn task_routing_rejects_zero_max_response_body_bytes() {
     let err = A2aFilter::from_config(&yaml).err().expect("should fail");
     assert!(
         err.to_string()
-            .contains("max_response_body_bytes must be greater than 0"),
+            .contains("'max_body_bytes' must be greater than 0"),
         "zero max_response_body_bytes should be rejected: {err}"
     );
 }

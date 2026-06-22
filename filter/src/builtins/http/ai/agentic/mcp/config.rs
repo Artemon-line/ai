@@ -5,7 +5,13 @@
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::MAX_JSON_BODY_BYTES, builtins::http::ai::OnInvalidBehavior};
+use crate::{
+    FilterError,
+    builtins::http::ai::{
+        OnInvalidBehavior,
+        config_validation::{validate_header_name, validate_max_body_bytes},
+    },
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -177,34 +183,12 @@ fn default_max_body_bytes() -> usize {
 
 /// Validate and build the final configuration.
 pub(crate) fn build_config(cfg: McpConfig) -> Result<McpConfig, FilterError> {
-    if cfg.max_body_bytes == 0 {
-        return Err("mcp: 'max_body_bytes' must be greater than 0".into());
-    }
-    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
-        return Err(format!(
-            "mcp: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
-            cfg.max_body_bytes
-        )
-        .into());
-    }
-    validate_header_name("method", cfg.headers.method.as_deref())?;
-    validate_header_name("name", cfg.headers.name.as_deref())?;
-    validate_header_name("kind", cfg.headers.kind.as_deref())?;
-    validate_header_name("protocol_version", cfg.headers.protocol_version.as_deref())?;
-    validate_header_name("session_present", cfg.headers.session_present.as_deref())?;
+    validate_max_body_bytes("mcp", cfg.max_body_bytes)?;
+    validate_header_name("mcp", "method", cfg.headers.method.as_deref())?;
+    validate_header_name("mcp", "name", cfg.headers.name.as_deref())?;
+    validate_header_name("mcp", "kind", cfg.headers.kind.as_deref())?;
+    validate_header_name("mcp", "protocol_version", cfg.headers.protocol_version.as_deref())?;
+    validate_header_name("mcp", "session_present", cfg.headers.session_present.as_deref())?;
     Ok(cfg)
 }
 
-/// Validate configured header names using the HTTP header-name parser.
-fn validate_header_name(field: &str, header_name: Option<&str>) -> Result<(), FilterError> {
-    let Some(header_name) = header_name else {
-        return Ok(());
-    };
-    if header_name.is_empty() {
-        return Err(format!("mcp: {field} header name must not be empty").into());
-    }
-    if http::HeaderName::from_bytes(header_name.as_bytes()).is_err() {
-        return Err(format!("mcp: {field} header name is not a valid HTTP header name").into());
-    }
-    Ok(())
-}

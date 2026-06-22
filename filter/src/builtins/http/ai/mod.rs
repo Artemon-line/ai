@@ -25,6 +25,7 @@ pub(crate) mod token_usage;
 
 mod token_usage_headers;
 
+pub(crate) mod config_validation;
 mod on_invalid;
 
 pub(crate) use on_invalid::OnInvalidBehavior;

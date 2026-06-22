@@ -5,8 +5,13 @@
 
 use serde::Deserialize;
 
-use crate::builtins::http::ai::OnInvalidBehavior;
-use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
+use crate::{
+    FilterError,
+    builtins::http::ai::{
+        OnInvalidBehavior,
+        config_validation::{validate_header_name, validate_max_body_bytes},
+    },
+};
 
 // -----------------------------------------------------------------------------
 // Body Constants
@@ -94,38 +99,10 @@ fn default_max_body_bytes() -> usize {
 
 /// Validate and build the final configuration.
 pub(crate) fn build_config(cfg: JsonRpcConfig) -> Result<(usize, JsonRpcConfig), FilterError> {
-    if cfg.max_body_bytes == 0 {
-        return Err("json_rpc: 'max_body_bytes' must be greater than 0".into());
-    }
-
-    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
-        return Err(format!(
-            "json_rpc: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
-            cfg.max_body_bytes
-        )
-        .into());
-    }
-
-    validate_header_name("method", cfg.headers.method.as_deref())?;
-    validate_header_name("id", cfg.headers.id.as_deref())?;
-    validate_header_name("kind", cfg.headers.kind.as_deref())?;
+    validate_max_body_bytes("json_rpc", cfg.max_body_bytes)?;
+    validate_header_name("json_rpc", "method", cfg.headers.method.as_deref())?;
+    validate_header_name("json_rpc", "id", cfg.headers.id.as_deref())?;
+    validate_header_name("json_rpc", "kind", cfg.headers.kind.as_deref())?;
 
     Ok((cfg.max_body_bytes, cfg))
-}
-
-/// Validate configured header names using the HTTP header-name parser.
-fn validate_header_name(field: &str, header_name: Option<&str>) -> Result<(), FilterError> {
-    let Some(header_name) = header_name else {
-        return Ok(());
-    };
-
-    if header_name.is_empty() {
-        return Err(format!("json_rpc: {field} header name must not be empty").into());
-    }
-
-    if http::HeaderName::from_bytes(header_name.as_bytes()).is_err() {
-        return Err(format!("json_rpc: {field} header name is not a valid HTTP header name").into());
-    }
-
-    Ok(())
 }
