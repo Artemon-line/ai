@@ -21,8 +21,9 @@ mod config;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on modules")]
 #[allow(
     dead_code,
-    reason = "store utilities for GET (#458) and DELETE (#459) response endpoints"
+    reason = "state infrastructure for upcoming Responses API filter consumers (#354)"
 )]
+pub(crate) mod state;
 pub(crate) mod store;
 
 pub use store::ResponseStoreFilter;
