@@ -239,12 +239,12 @@ impl ResponseStoreFilter {
         &self,
         ctx: &HttpFilterContext<'_>,
         body: &'a Option<Bytes>,
-    ) -> Option<(Arc<dyn ResponseStore>, &'a Bytes)> {
+    ) -> Option<(&dyn ResponseStore, &'a Bytes)> {
         if should_skip_persist(ctx) {
             return None;
         }
 
-        let store = self.store.get().and_then(Option::clone)?;
+        let store = self.store.get().and_then(Option::as_deref)?;
         let bytes = body.as_ref().filter(|b| !b.is_empty())?;
 
         Some((store, bytes))
@@ -569,7 +569,7 @@ fn parse_response_record(
 /// before the upsert completes.
 ///
 /// [`block_in_place`]: tokio::task::block_in_place
-fn persist_response_blocking(store: &Arc<dyn ResponseStore>, record: &ResponseRecord) -> Result<(), FilterError> {
+fn persist_response_blocking(store: &dyn ResponseStore, record: &ResponseRecord) -> Result<(), FilterError> {
     debug!(
         id = %record.id,
         model = %record.model,
@@ -729,7 +729,7 @@ impl HttpFilter for ResponseStoreFilter {
             return Ok(FilterAction::Continue);
         };
 
-        persist_response_blocking(&store, &record)?;
+        persist_response_blocking(store, &record)?;
         Ok(FilterAction::Continue)
     }
 }
