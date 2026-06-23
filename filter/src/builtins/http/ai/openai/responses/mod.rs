@@ -18,6 +18,8 @@
 //! to validate parameter combinations and extract additional fields.
 
 mod config;
+#[cfg(feature = "ai-inference")]
+pub(crate) mod model_rewrite;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on modules")]
 #[allow(
     dead_code,
@@ -26,6 +28,8 @@ mod config;
 pub(crate) mod state;
 pub(crate) mod store;
 
+#[cfg(feature = "ai-inference")]
+pub use model_rewrite::ModelRewriteFilter;
 pub use store::ResponseStoreFilter;
 
 #[cfg(test)]
