@@ -57,7 +57,7 @@ pub(crate) struct ClassifiedRequest {
     pub has_conversation: bool,
     /// Whether `previous_response_id` is present and non-null.
     pub has_previous_response_id: bool,
-    /// Whether `prompt.prompt_id` is present and non-null.
+    /// Whether `prompt.id` is present and non-null.
     pub has_prompt_id: bool,
     /// Whether `tools` is a non-empty array.
     pub has_tools: bool,
@@ -139,7 +139,7 @@ pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
         has_prompt_id: obj
             .get("prompt")
             .and_then(serde_json::Value::as_object)
-            .and_then(|prompt| prompt.get("prompt_id"))
+            .and_then(|prompt| prompt.get("id"))
             .is_some_and(|v| !v.is_null()),
         has_tools: obj
             .get("tools")
@@ -584,10 +584,10 @@ mod tests {
 
     #[test]
     fn prompt_id_nested_detected() {
-        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"prompt_id":"pmpt_123"}}"#;
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"id":"pmpt_123"}}"#;
         let result = classify_request_body(body);
 
-        assert!(result.has_prompt_id, "nested prompt.prompt_id should be detected");
+        assert!(result.has_prompt_id, "nested prompt.id should be detected");
     }
 
     #[test]
@@ -600,10 +600,10 @@ mod tests {
 
     #[test]
     fn prompt_id_null_not_detected() {
-        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"prompt_id":null}}"#;
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"id":null}}"#;
         let result = classify_request_body(body);
 
-        assert!(!result.has_prompt_id, "null prompt_id should not be detected");
+        assert!(!result.has_prompt_id, "null prompt.id should not be detected");
     }
 
     #[test]
@@ -619,12 +619,12 @@ mod tests {
 
     #[test]
     fn prompt_object_prompt_id_field_detected() {
-        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"prompt_id":"pmpt_123"}}"#;
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"id":"pmpt_123"}}"#;
         let result = classify_request_body(body);
 
         assert!(
             result.has_prompt_id,
-            "prompt.prompt_id should be detected as the prompt identifier"
+            "prompt.id should be detected as the prompt identifier"
         );
     }
 
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn prompt_object_classifies_as_responses() {
-        let body = br#"{"model":"gpt-4.1","prompt":{"prompt_id":"pmpt_123","variables":{"city":"SF"}}}"#;
+        let body = br#"{"model":"gpt-4.1","prompt":{"id":"pmpt_123","variables":{"city":"SF"}}}"#;
         let result = classify_request_body(body);
 
         assert_eq!(
@@ -649,7 +649,7 @@ mod tests {
             AiRequestFormat::Responses,
             "prompt object should classify as responses even without input"
         );
-        assert!(result.has_prompt_id, "prompt_id should be detected");
+        assert!(result.has_prompt_id, "prompt.id should be detected");
     }
 
     #[test]

@@ -90,7 +90,7 @@ pub(crate) const DEFAULT_TENANT_ID: &str = "default";
 ///
 /// Routing mode for Responses API: `stateful` when the request contains
 /// `previous_response_id`, non-empty `tools`, `store=true` (default when
-/// omitted), `background=true`, `conversation`, or `prompt_id`;
+/// omitted), `background=true`, `conversation`, or `prompt.id`;
 /// `stateless` when `store=false` with no other stateful markers.
 ///
 /// Use with branch chains to route stateful and stateless requests to
