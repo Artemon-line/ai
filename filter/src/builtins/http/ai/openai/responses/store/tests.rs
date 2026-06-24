@@ -397,7 +397,7 @@ async fn on_request_registers_store_in_response_stores() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let registry = ResponseStoreRegistry::new();
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
 
     let action = filter.on_request(&mut ctx).await.unwrap();
@@ -431,7 +431,7 @@ async fn on_request_body_registers_store_for_previous_response_id_even_when_stor
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let registry = ResponseStoreRegistry::new();
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
     ctx.set_metadata("openai_responses_format.store", "false");
     ctx.set_metadata("openai_responses_format.has_previous_response_id", "true");
@@ -1180,7 +1180,9 @@ async fn pipeline_persists_rehydrated_messages_when_response_omits_input() {
 
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = pipeline.response_stores();
+    if let Some(stores) = pipeline.response_stores() {
+        ctx.extensions.insert(stores.clone());
+    }
 
     let request_json = json!({
         "model": "gpt-4.1",
