@@ -1175,8 +1175,7 @@ async fn pipeline_persists_rehydrated_messages_when_response_omits_input() {
     ))
     .unwrap();
     let registry = FilterRegistry::with_builtins();
-    let mut pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    pipeline.set_response_stores(ResponseStoreRegistry::new());
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
 
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
