@@ -47,18 +47,7 @@ pub fn resolve_pipelines(
         }
 
         let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains)?;
-        pipeline.apply_body_limits(
-            config.body_limits.max_request_bytes,
-            config.body_limits.max_response_bytes,
-            config.insecure_options.allow_unbounded_body,
-        )?;
-        if !health_registry.is_empty() {
-            pipeline.set_health_registry(Arc::clone(health_registry));
-        }
-        if !kv_stores.is_empty() {
-            pipeline.set_kv_stores(kv_stores.clone());
-        }
-        pipeline.apply_insecure_options(&config.insecure_options);
+        configure_pipeline(&mut pipeline, config, health_registry, kv_stores)?;
 
         let skip = config.insecure_options.skip_pipeline_validation;
         let allow_open_security = config.insecure_options.allow_open_security_filters;
@@ -68,6 +57,29 @@ pub fn resolve_pipelines(
     }
 
     Ok(ListenerPipelines::new(pipelines))
+}
+
+/// Apply body limits, health registry, KV stores, and insecure options to a
+/// pipeline.
+fn configure_pipeline(
+    pipeline: &mut FilterPipeline,
+    config: &Config,
+    health_registry: &praxis_core::health::HealthRegistry,
+    kv_stores: &praxis_core::kv::KvStoreRegistry,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pipeline.apply_body_limits(
+        config.body_limits.max_request_bytes,
+        config.body_limits.max_response_bytes,
+        config.insecure_options.allow_unbounded_body,
+    )?;
+    if !health_registry.is_empty() {
+        pipeline.set_health_registry(Arc::clone(health_registry));
+    }
+    if !kv_stores.is_empty() {
+        pipeline.set_kv_stores(kv_stores.clone());
+    }
+    pipeline.apply_insecure_options(&config.insecure_options);
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
