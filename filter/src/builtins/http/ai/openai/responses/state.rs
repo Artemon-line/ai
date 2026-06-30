@@ -62,7 +62,8 @@ pub(crate) struct ResponsesState {
     /// `previous_response_id` is set, `rehydrate` prepends stored
     /// history. `tool_dispatch` appends tool results during agentic
     /// loops. `responses_proxy` reads this as the authoritative
-    /// conversation to send to the backend.
+    /// conversation to send to the backend. Output-only metadata
+    /// items must be omitted from this field.
     pub messages: Vec<serde_json::Value>,
 
     /// Output items accumulated across the current response.
@@ -72,11 +73,24 @@ pub(crate) struct ResponsesState {
     /// iteration. Defaults to `true` per the API spec.
     pub parallel_tool_calls: bool,
 
+    /// Full message history to persist for future rehydration.
+    ///
+    /// This may include output-only metadata items omitted from
+    /// [`Self::messages`] because it is not forwarded to backend
+    /// inference.
+    pub persisted_messages: Vec<serde_json::Value>,
+
     /// ID of a previous response to continue from.
     ///
     /// When set, `rehydrate` fetches the stored conversation
     /// history for this response and prepends it to `messages`.
     pub previous_response_id: Option<String>,
+
+    /// MCP tool listings recovered from the previous response.
+    pub previous_tools: Vec<serde_json::Value>,
+
+    /// Token usage reported by the previous response.
+    pub previous_usage: Option<serde_json::Value>,
 
     /// Parsed request body as received from the client.
     pub request_body: serde_json::Value,
@@ -110,10 +124,13 @@ impl ResponsesState {
     /// Create initial state from a parsed request body.
     pub(crate) fn from_request_body(body: serde_json::Value) -> Self {
         let messages = normalize_input(&body);
+        let persisted_messages = messages.clone();
         let tool_choice = body
             .get("tool_choice")
             .cloned()
             .unwrap_or_else(|| serde_json::Value::String("auto".to_owned()));
+
+        let tools = extract_array_field(&body, "tools");
 
         Self {
             context_management: body.get("context_management").cloned(),
@@ -125,13 +142,16 @@ impl ResponsesState {
             messages,
             output_items: Vec::new(),
             parallel_tool_calls: extract_bool_or(&body, "parallel_tool_calls", true),
+            persisted_messages,
             previous_response_id: extract_string(&body, "previous_response_id"),
+            previous_tools: Vec::new(),
+            previous_usage: None,
+            request_body: body,
             response_object: serde_json::Value::Null,
             tool_calls: Vec::new(),
             tool_choice,
-            tools: extract_array_field(&body, "tools"),
+            tools,
             usage: serde_json::Value::Null,
-            request_body: body,
         }
     }
 }
@@ -268,6 +288,10 @@ mod tests {
         assert_eq!(
             state.input, state.messages,
             "input and messages should be identical at construction"
+        );
+        assert_eq!(
+            state.input, state.persisted_messages,
+            "input and persisted_messages should be identical at construction"
         );
     }
 
