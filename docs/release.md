@@ -2,10 +2,10 @@
 
 ## Versioning
 
-Praxis uses [Semantic Versioning][semver]. The workspace
-version is the single source of truth, defined in
-`workspace.package.version` in the root `Cargo.toml`. All
-workspace crates inherit this version.
+Praxis AI uses [Semantic Versioning][semver]. The
+workspace version is the single source of truth, defined
+in `workspace.package.version` in the root `Cargo.toml`.
+All workspace crates inherit this version.
 
 [semver]: https://semver.org/
 
@@ -16,7 +16,8 @@ Before tagging a release:
 - [ ] Lints are clean (`make lint`)
 - [ ] All tests pass locally (`make test`)
 - [ ] Dependency audit passes (`make audit`)
-- [ ] Benchmarks have been run; performance is similar or better than the previous release
+- [ ] Benchmarks have been run; performance is similar
+      or better than the previous release
 - [ ] Version in root `Cargo.toml` is bumped
 - [ ] `Cargo.lock` is regenerated with the new version
 - [ ] `SECURITY.md` lists the new minor version
@@ -34,15 +35,16 @@ git push origin v0.1.0
 
 ## Publishing Container Images
 
-Container images are published to [GitHub Container Registry][ghcr] (GHCR).
+Container images are published to
+[GitHub Container Registry][ghcr] (GHCR).
 
 After pushing a tag, manually trigger the **Publish**
 workflow via the GitHub Actions UI
 (`workflow_dispatch`). The workflow builds a multi-stage
 Alpine image from the `Containerfile` and pushes it to
-`ghcr.io/praxis-proxy/praxis`.
+`ghcr.io/praxis-proxy/ai`.
 
-[ghcr]: https://ghcr.io/praxis-proxy/praxis
+[ghcr]: https://ghcr.io/praxis-proxy/ai
 
 ### Image Tags
 
@@ -60,13 +62,13 @@ against a semver git tag.
 
 ## Changelog
 
-Praxis uses [GitHub Releases][gh-releases] for
+Praxis AI uses [GitHub Releases][gh-releases] for
 changelogs. Each release is created through the GitHub
 UI after pushing a tag. Use GitHub's "Generate release
 notes" feature to auto-populate from merged PRs, then
 edit for clarity. There is no separate CHANGELOG file.
 
-[gh-releases]: https://github.com/praxis-proxy/praxis/releases
+[gh-releases]: https://github.com/praxis-proxy/ai/releases
 
 ## Release Branches
 
@@ -82,10 +84,12 @@ triggered as usual.
 
 The production image is a minimal Alpine container:
 
-- Static musl build with LTO, single codegen unit, and stripped symbols
-- Runs as non-root user (`praxis`)
+- Static musl build with LTO, single codegen unit,
+  and stripped symbols
+- Runs as non-root user (`praxis-ai`)
 - Exposes ports `8080` (proxy) and `9901` (admin)
-- Built-in health check at `http://127.0.0.1:9901/healthy`
-- Config directory: `/etc/praxis`
+- Built-in health check at
+  `http://127.0.0.1:9901/healthy`
+- Config directory: `/etc/praxis-ai`
 
 > **Note**: This is subject to change.

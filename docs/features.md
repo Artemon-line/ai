@@ -1,216 +1,18 @@
 # Features
 
-## Core Architecture
+Praxis AI extends the [Praxis proxy framework][praxis]
+with AI-specific filters for inference routing, provider
+APIs, token counting, guardrails, agentic protocols,
+response storage, and prompt enrichment.
 
-- **Extensible proxy framework** - use one of the
-  general-purpose provided builds, or extend your own
-  custom proxy server using the Praxis framework.
-  Implement the `HttpFilter` or `TcpFilter` trait in your
-  own crate and compile for native execution of your
-  extensions.
-- **Filter pipeline** - configurable chains of filters
-  applied to requests and responses
-- **Conditional filters** - `when`/`unless` gates on both
-  request and response phases (path prefix, methods,
-  headers, status codes)
+For base proxy features (TLS, HTTP/2, TCP, WebSocket,
+load balancing, rate limiting, compression, CORS,
+health checks, etc.), see the
+[Praxis core documentation][praxis].
 
-## Traffic Management
-
-- **Path, host, and header routing** - prefix-based
-  routing with optional `Host` header and request header
-  matching; longest prefix wins
-- **Load balancing** - round-robin, least-connections,
-  consistent-hash, weighted endpoints
-- **Static responses** - return fixed status, headers,
-  and body without upstream
-- **Rate limiting** - token bucket rate limiter with
-  per-IP and global modes, burst allowance, 429
-  responses with `Retry-After`, and `X-RateLimit-*`
-  headers
-- **Active health checks** - HTTP and TCP health check
-  probes with configurable thresholds; unhealthy hosts
-  are automatically removed from load balancer rotation
-- **Passive health checks** - track upstream failures
-  inline; endpoints that exceed a consecutive failure
-  threshold are marked unhealthy without dedicated
-  probe traffic
-- **Circuit breaker** - per-cluster circuit breaker that
-  short-circuits requests to failing upstreams with 503,
-  then gradually recovers via a half-open probe window
-- **Redirect** - return 3xx redirects without upstream;
-  supports `${path}` and `${query}` template placeholders
-- **Timeout enforcement** - 504 rejection when upstream
-  response exceeds a configured latency SLA
-- **Connection tuning** - per-cluster connection, read,
-  write, idle, and total connection (TLS handshake)
-  timeouts
-
-## Payload Processing
-
-- **Streaming payload processing**: zero-copy streaming
-  by default, opt-in buffered or stream-buffered payload
-  access with configurable size limits.
-  Stream mode passes chunks through as they arrive
-  (lowest latency). StreamBuffer delivers chunks to
-  filters
-  incrementally but defers upstream forwarding until
-  release. See [Payload Processing][payload-processing]
-  in the architecture docs.
-- **StreamBuffer (peek-then-stream)**: a differentiated
-  body access pattern that inspects incoming chunks
-  while deferring upstream forwarding until content is
-  validated. Filters receive chunks incrementally for
-  low-latency inspection, then release the accumulated
-  buffer to the upstream. This is the enabling primitive
-  for AI inference (model routing from the first few
-  KB of the request body), agentic protocol parsing
-  (JSON-RPC envelope extraction), and security systems
-  (guardrails payload scanning, content classification).
-  See the [payload processing][payload-processing]
-  docs for the full body access model.
-- **Body-based routing**: the built-in `json_body_field`
-  filter extracts top-level fields from JSON request
-  bodies and promotes values to request headers, enabling
-  AI inference model routing, content-based cluster
-  selection, and request classification.
-- **Prompt enrichment**: inject system or user messages
-  into OpenAI-compatible chat completion request bodies
-  at the proxy layer. Static configured messages are
-  prepended or appended to the `messages` array before
-  forwarding upstream.
-- **Response compression**: gzip, brotli, and zstd
-  response compression with per-algorithm levels,
-  content type filtering, and minimum size thresholds.
-- **Payload size limits**: global hard ceilings on
-  request and response payload size.
-
-[payload-processing]:./architecture/payload-processing.md
-
-## Security
-
-Security is a primary design constraint. Praxis ships
-with secure defaults and fails closed on ambiguous
-configuration. See the
-[Security Hardening Guide](operating/security-hardening.md) for
-deployment guidance.
-
-**Build-level guarantees:**
-
-- `unsafe_code = "deny"` in workspace lints
-- Rustls (no OpenSSL, no C FFI in the TLS path)
-- Supply chain auditing via `cargo audit` and
-  `cargo deny`
-- Root execution rejected by default
-
-**Configuration-level protections:**
-
-- Listeners default to localhost binding
-- Admin endpoints reject public interfaces
-- TLS paths reject directory traversal (`..`)
-- Health check targets validated against SSRF
-  (loopback, link-local, and cloud metadata blocked)
-- Upstream TLS verification enabled by default
-- Insecure overrides require explicit opt-in and
-  emit warnings
-
-**Runtime filters:**
-
-- **CORS**: spec-compliant CORS filter with preflight
-  handling, origin validation, wildcard subdomain
-  matching, credential support, and Private Network
-  Access
-- **IP ACL**: allow/deny by source IP/CIDR
-- **Guardrails**: reject requests matching header or
-  body content via string or regex rules; supports
-  negated matching
-- **CSRF protection**: origin-based CSRF validation
-  with gradual enforcement rollout, `Sec-Fetch-Site`
-  support, wildcard subdomains, and log-only mode
-- **Forwarded headers**: X-Forwarded-For/Proto/Host
-  injection with trusted proxy CIDR support
-
-## Observability
-
-- **Request ID** - generate or propagate correlation IDs
-  (X-Request-ID by default); echoed in responses
-- **Access logging** - structured request/response logging
-  via `tracing`
-- **Prometheus metrics** - `/metrics` on the admin
-  listener exposes request counts and duration
-  histograms in Prometheus text exposition format
-- **Admin health endpoints** - `/ready` and `/healthy`
-  on a dedicated admin listener. `/ready` returns
-  per-cluster health status with healthy/unhealthy/total
-  counts when active health checks are configured, and
-  returns 503 when any cluster has zero healthy
-  endpoints
-
-## Request/Response Transformation
-
-- **Header manipulation** - add, set, and remove headers
-  on requests and responses
-- **Path rewrite** - strip prefix, add prefix, or regex
-  replace on request paths; query strings preserved
-- **URL rewrite** - regex-based path transformation and
-  query string manipulation with ordered operations
-
-## Operations
-
-- **Dynamic configuration reload** - filter pipelines,
-  routes, endpoints, health checks, and rate limits
-  are swapped atomically at runtime when the config
-  file changes. In-flight requests complete on the old
-  pipeline; invalid configs are rejected and logged.
-  Changes that require a restart (listener topology,
-  TLS toggle, protocol type) are detected and logged
-  as warnings.
-- **Graceful shutdown** - configurable drain timeout
-- **Max connections** - per-listener connection limit
-  via semaphore; HTTP returns 503 with `Retry-After`,
-  TCP closes immediately
-- **Runtime tuning** - thread pool sizing and
-  work-stealing toggle
-- **Runtime key-value stores** - in-memory runtime caches
-  created dynamically by filters. Admin API
-  (GET/PUT/DELETE) and exact/prefix/suffix/regex match
-  types. Pluggable `KvBackend` trait for alternative
-  backends. Accessible from all filter contexts. Designed
-  for operational overrides (routing tables, feature
-  flags), not durable storage.
-
-## Protocols
-
-- **HTTP**: standard HTTP proxying with multiplexing;
-  transparent passthrough supports SSE streaming and
-  gRPC workloads.
-  See [HTTP Connection Lifecycle][http-lifecycle].
-- **TLS**:
-  - **Termination**: HTTPS on the listener, plain HTTP
-    upstream.
-  - **Re-encryption**: TLS to upstream with configurable
-    SNI.
-  - See [TLS documentation][tls-docs].
-- **TCP/L4**: bidirectional forwarding with optional TLS
-  and idle timeout. See
-  [TCP Connection Lifecycle][tcp-lifecycle].
-- **Mixed protocols**: HTTP and TCP listeners on a single
-  server instance. See
-  [Protocol Abstraction][protocol-abstraction].
-
-[http-lifecycle]:./architecture/connection-lifecycle.md#http-connection-lifecycle
-[tcp-lifecycle]:./architecture/connection-lifecycle.md#tcp-connection-lifecycle
-[protocol-abstraction]:./architecture/overview.md#protocol-adapters
-[tls-docs]:./operating/tls.md
+[praxis]: https://github.com/praxis-proxy/praxis
 
 ## AI Inference
-
-Praxis is designed as an AI-native proxy. AI inference
-capabilities are built on the [filter pipeline][filters]
-and [StreamBuffer][payload-processing] body access
-pattern, making them composable with all other filters
-rather than bolted-on external processors.
-
-### Current
 
 - **Model-based routing** (`model_to_header`): extracts
   the `model` field from JSON request bodies and
@@ -229,6 +31,9 @@ rather than bolted-on external processors.
   completion request bodies at the proxy layer. Static
   configured messages are prepended or appended to the
   `messages` array before forwarding upstream.
+
+## OpenAI Responses API
+
 - **Responses API classification**
   (`openai_responses_format`): classifies OpenAI
   Responses API and Chat Completions API requests by
@@ -243,96 +48,74 @@ rather than bolted-on external processors.
   IDs, and generates cryptographically random response
   and conversation IDs with `resp_` and `conv_`
   prefixes.
+- **Model rewrite**
+  (`openai_responses_model_rewrite`): rewrites the
+  `model` field in Responses API request bodies.
+- **Response rehydration**
+  (`openai_responses_rehydrate`): validates
+  `previous_response_id` by fetching the stored
+  response, confirming its status is `"completed"`,
+  and populating `ResponsesState` with the full
+  conversation history.
+- **Response store** (`openai_response_store`):
+  persists non-streaming Responses API responses to a
+  configured storage backend (SQLite, PostgreSQL).
+- **Conversation management**
+  (`openai_conversations`): handles all
+  `/v1/conversations` endpoints locally.
+- **Responses proxy** (`responses_proxy`): rebuilds
+  the request body from `ResponsesState` when present.
 
-### Planned
+## Anthropic Messages API
 
-The following capabilities are on the roadmap. Each
-builds on the StreamBuffer body access pattern and the
-filter pipeline.
-
-- **Token counting**: input/output token counts from
-  request and response bodies
-- **Provider routing**: unified routing across LLM
-  providers with API translation
-- **Provider failover**: ordered failover chains with
-  automatic API translation on failure
-- **Token-based rate limiting**: per-client token quotas
-  with sliding window or token bucket
-- **Cost attribution**: token counting mapped to user,
-  session, model, and endpoint
-- **SSE streaming inspection**: per-event filter hooks
-  for streaming responses
-- **Semantic caching**: prompt deduplication via vector
-  similarity search
-
-### StreamBuffer as AI Primitive
-
-StreamBuffer is the key differentiator for AI inference
-workloads. Traditional proxies operate on headers only,
-requiring external processors for body inspection.
-Praxis inspects request bodies inline:
-
-1. Buffer the first N bytes (typically the JSON
-   envelope containing the model name, parameters,
-   and prompt prefix).
-2. Extract routing signals (model, provider, token
-   budget, tool name).
-3. Select the upstream based on body content.
-4. Forward the buffered prefix, then stream the
-   remainder with zero additional buffering latency.
-
-This peek-then-stream pattern avoids the latency and
-operational complexity of external processor
-architectures while providing full body visibility
-where it matters.
+- **Messages classification**
+  (`anthropic_messages_format`): classifies Anthropic
+  Messages API requests and promotes routing facts to
+  headers, metadata, and filter results.
+- **Messages protocol**
+  (`anthropic_messages_protocol`): normalizes Anthropic
+  Messages protocol headers for native backends.
+- **Stream event translation**
+  (`anthropic_stream_events`): transforms streaming SSE
+  responses between OpenAI and Anthropic formats,
+  processing each chunk as it arrives.
+- **API translation** (`anthropic_to_openai`):
+  transforms Anthropic Messages API requests to Chat
+  Completions-compatible request bodies and transforms
+  compatible responses back.
+- **Request validation** (`anthropic_validate`):
+  validates Anthropic Messages request bodies for
+  proxy-owned JSON envelope requirements.
 
 ## AI Agentic
-
-Praxis targets first-class support for AI agent
-protocols, positioning MCP and A2A as headline
-capabilities alongside HTTP and TCP proxying.
-
-### Current
 
 - **JSON-RPC 2.0 foundation** (`json_rpc`): request
   envelope parsing and method/id extraction for HTTP
   POST bodies, enabling method-based routing for
-  MCP/A2A-style traffic
+  MCP/A2A-style traffic.
 - **MCP proxying** (`mcp`): Model Context Protocol
   broker with tool discovery and routing via the
-  filter pipeline
+  filter pipeline.
 - **A2A proxying** (`a2a`): Agent-to-Agent protocol
-  support with task routing via the filter pipeline
-- **gRPC detection** (`grpc_detection`): classifies
-  gRPC requests by content-type variant (protobuf,
-  JSON, other codec) and promotes the classification
-  to metadata and filter results for branch-based
-  routing
+  support with task routing via the filter pipeline.
 
-### Planned
+## Security and Observability
 
-- **Stateful agent sessions**: shared session storage,
-  affinity, and lifecycle hooks for MCP and A2A
-
-## Build Features
-
-AI filters are controlled via Cargo features (enabled
-by default):
-
-- `ai-inference`: model routing, prompt enrichment,
-  Responses API classification and validation
-- `ai-agentic`: MCP, A2A, JSON-RPC, gRPC detection
-
-To disable AI features:
-
-```console
-cargo build -p praxis-proxy --no-default-features
-```
+- **AI guardrails** (`ai_guardrails`): calls an
+  external AI guardrail provider to evaluate request
+  bodies. The provider determines whether content
+  should be passed, blocked, or redacted.
+- **Token usage headers** (`token_usage_headers`):
+  injects `Praxis-Token-Input`, `Praxis-Token-Output`,
+  and `Praxis-Token-Total` headers into downstream
+  responses when token usage data is present in filter
+  metadata.
 
 ## Extensions
 
 - **Rust extensions**: compile-time custom filters with
-  zero overhead via the `HttpFilter`/`TcpFilter` traits
-  and `register_filters!` macro.
-
-[filters]:./filters/README.md
+  zero overhead via the `HttpFilter` trait from
+  `praxis-filter` and `register_filters!` macro.
+- **Auto-discovery**: external filter crates
+  self-register at build time via
+  `[package.metadata.praxis-filters]`.

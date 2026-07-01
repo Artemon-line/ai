@@ -25,14 +25,14 @@ body:
     attributes:
       label: Area
       options:
-        - AI / Inference
-        - Core / Config
-        - Filter Pipeline
-        - Observability
-        - Protocol
-        - Security / TLS
-        - Traffic Management
-        - Transformation
+        - AI Inference
+        - Agentic Protocols (MCP/A2A)
+        - Provider APIs (OpenAI/Anthropic)
+        - Response Store
+        - AI Guardrails
+        - Token Usage
+        - Prompt Enrichment
+        - Server / Build
         - Other
   - type: input
     id: parent-epic

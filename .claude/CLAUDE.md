@@ -8,104 +8,66 @@ repository.
 
 - Rust stable 1.96+
 - Rust nightly (for `rustfmt`)
-- CMake 3.31+
+- CMake 3.31+ (for Pingora build via praxis dep)
 - Docker 29.3.0+ or Podman (for container builds)
+- Praxis core repo at `../praxis` (path dependency)
 
 ## Quick Reference
 
 ```console
-make setup-hooks    # install git pre-commit hook (fmt + lint)
-make build          # workspace build (includes benches)
-make test           # all tests (downloads h2spec if needed)
+make setup-hooks    # install git pre-commit hook
+make build          # workspace build
+make test           # all tests
 make fmt            # format with nightly rustfmt
-make lint           # clippy + nightly fmt check + xtask lint-deps
-make doc            # rustdoc with -D warnings, including private items
+make lint           # clippy + nightly fmt check
+make doc            # rustdoc with -D warnings
 make audit          # cargo audit + cargo deny check
-make coverage-check # fail if line coverage < 95%
-make container      # container image build
-cargo run -p praxis-proxy # run the proxy
+make container      # build praxis-ai container image
 ```
 
 Run a single test:
 
 ```console
-cargo test -p praxis-tests-integration --test suite -- test_name
-make test-integration V=1   # with --nocapture
+cargo test -p praxis-ai-apis -- test_name
+cargo test -p praxis-ai-filters -- test_name
+cargo test -p praxis-ai-proxy -- test_name
 ```
-
-Individual test suites:
-
-```console
-make test-unit          # core, filter, protocol, server
-make test-schema        # config parsing + example validation
-make test-integration   # end-to-end filter and proxy tests
-make test-conformance   # RFC conformance (h2spec, HTTP semantics)
-make test-security      # request smuggling, header injection
-make test-resilience    # load, failure recovery, throughput
-```
-
-See `docs/developing/getting-started.md` for the full
-command reference and dev tool usage.
 
 ## Architecture
-
-See `docs/architecture/overview.md` for the full design.
 
 **Crate dependency flow:**
 
 ```text
-server -> protocol -> filter -> core -> tls
+server (praxis-ai-proxy)
+  -> filters (praxis-ai-filters)
+  -> apis (praxis-ai-apis)
+  -> praxis-filter (core, from ../praxis)
 ```
 
-- **server** (`praxis`): binary entry point, config
-  loading, pipeline resolution, hot-reload watcher
-- **core** (`praxis-core`): YAML config (serde),
-  validation, error types, health state, KV store
-  registry, `PingoraServerRuntime`
-- **filter** (`praxis-filter`): `HttpFilter` and
-  `TcpFilter` traits, pipeline engine, condition
-  evaluation, body access/buffering, all built-in
-  filter implementations, `FilterRegistry`
-- **protocol** (`praxis-protocol`): `Protocol` trait,
-  Pingora HTTP/TCP adapters, health check probes,
-  admin endpoints
-- **tls** (`praxis-tls`): TLS config types, SNI
-  resolution (including wildcards), cert loading
-- **proto** (`praxis-proto`): vendored Envoy ext_proc
-  protobuf definitions
-- **ext-proc** (`praxis-ext-proc`): Envoy ext_proc
-  filter (anti-pattern; opt-in `ext-proc` feature,
-  default-on for migration compatibility)
+- **server** (`praxis-ai-proxy`): binary entry point,
+  registers AI filters on top of core builtins,
+  injects `ResponseStoreRegistry` as pipeline extension
+- **apis** (`praxis-ai-apis`): provider-specific API
+  types (OpenAI, Anthropic), request classification,
+  response storage backends (SQLite, PostgreSQL),
+  token usage extraction, SSE parsing
+- **filters** (`praxis-ai-filters`): cross-cutting AI
+  filter implementations (A2A, MCP, guardrails,
+  inference routing, prompt enrichment, token usage
+  header injection)
 
-**Test crates** (under `tests/`):
-
-- `tests/utils`: shared test harness (`free_port`,
-  `start_backend`, `start_proxy_with_registry`)
-- `tests/schema`: config parsing and example validation
-- `tests/integration`: end-to-end filter and proxy tests
-- `tests/conformance`: RFC conformance (h2spec)
-- `tests/security`: request smuggling, header injection
-- `tests/resilience`: load, failure recovery
+**Dependencies on Praxis core** (path deps to
+`../praxis`): `praxis-filter` for `HttpFilter` trait,
+pipeline, registry; `praxis-core` for config types;
+`praxis-protocol` for HTTP/TCP adapters;
+`praxis-tls` for TLS.
 
 ## Conventions
 
+Follows the same conventions as
+[praxis core](https://github.com/praxis-proxy/praxis).
 See `docs/developing/conventions.md` for the full
-coding style guide. Praxis-specific additions beyond
-the user-level Rust Baseline:
-
-- Prefer `Option`/`Result` combinator chains
-  (`strip_prefix()`, `filter()`, `map()`) over
-  `if/else` blocks when the logic is a linear
-  transform
-- Pre-computed numeric literals with trailing
-  comments for human-readable meaning
-  (e.g. `10_485_760; // 10 MiB`)
-- Use enums, not strings, for fixed value sets
-  in config; `#[serde(deny_unknown_fields)]` on
-  config structs; `#[serde(try_from)]` for
-  constrained numerics; `#[serde(default)]`
-  instead of `Option<T>` with `unwrap_or`.
-  See `docs/developing/type-design.md`.
+coding style guide.
 
 ## Test Requirements
 
@@ -115,154 +77,57 @@ New capabilities require:
 2. Integration tests
 3. Example config in `examples/configs/`
 4. Functional integration test for the example config
-   in `tests/integration/tests/suite/examples/`
-5. Run `cargo xtask sync-example-readme --fix` to
-   regenerate `examples/README.md`
-
-Example configs must use this header comment format
-so the README generator can extract descriptions:
-
-```yaml
-# Title
-#
-# One-line or multi-line description used in the
-# README table (first sentence is taken).
-#
-# Usage:
-#   cargo run -p praxis-proxy -- -c examples/configs/...
-```
-
-Example config tests must exercise the actual
-functionality end-to-end (e.g. a WebSocket config
-must perform a real WebSocket handshake and message
-exchange). Parse-only validation is not sufficient;
-every example must prove its feature works with all
-configured variants.
 
 ## Adding a Filter
 
-See `docs/filters/extensions.md` for the full guide.
-
-1. Create module under
-   `filter/src/builtins/<protocol>/<category>/`
-2. Implement `HttpFilter` or `TcpFilter` with a
-   `from_config` factory (`fn(&serde_yaml::Value)
-   -> Result<Box<dyn HttpFilter>, FilterError>`)
-3. Register in `filter/src/registry.rs`
+1. Create module under `filters/src/` or `apis/src/`
+2. Implement `HttpFilter` from `praxis-filter`
+3. Register in `server/src/lib.rs` via
+   `register_filters!` macro
 4. Add unit tests and doctests
-5. Add example config in `examples/configs/<category>/`
-6. Add functional integration test in
-   `tests/integration/tests/suite/examples/`
-7. Run `cargo xtask sync-example-readme --fix`
-
-For AI inference filters, follow
-`docs/developing/adding-filters.md#ai-inference-validation`:
-validate only fields needed for local proxy behavior and
-leave backend-owned API semantics to the inference backend.
-
-## Adding a Protocol
-
-1. Implement `Protocol` trait under `protocol/src/`
-2. Add variant to `ProtocolKind` in
-   `core/src/config/listener.rs`
-3. Wire in `server/src/server.rs`
-
-## Branch Chains
-
-Conditional branching in filter pipelines based on
-filter results. Key files:
-
-- `core/src/config/branch_chain.rs`: config types
-- `core/src/config/chain_ref.rs`: `ChainRef` enum
-- `core/src/config/validate/branch_chain.rs`: validation
-- `filter/src/results.rs`: `FilterResultSet` type
-- `filter/src/pipeline/filter.rs`: `PipelineFilter`
-- `filter/src/pipeline/branch.rs`: runtime types
-- `filter/src/pipeline/build_branch.rs`: resolution
-- `filter/src/pipeline/evaluate.rs`: execution
-
-Filters write results to `FilterResultSet` without
-knowing about branches. The pipeline executor reads
-results to evaluate branch conditions and dispatch.
-Branches rejoin at configurable points (next,
-terminal, named filter, re-entrance with iteration
-limits).
-
-## Terminology: Routing vs Pipelining
-
-These two concepts are distinct, take care to not conflate them.
-
-- **Routing** (runtime): the `router` filter selects
-  an upstream cluster at request time based on path,
-  host, and headers. This decides *where* a request
-  goes.
-- **Pipelining** (config-time): the operator composes
-  named filter chains per listener; chains are
-  resolved and concatenated into a single
-  `FilterPipeline` at startup. This decides *what
-  processing* a request receives. Branch chains add
-  conditional paths within a pipeline.
+5. Add example config in `examples/configs/`
 
 ## Key Patterns
 
 - **Classify → route → branch**: classifier filters
   promote facts to internal headers
   (`x-praxis-ai-*`) and the router matches those
-  headers to select clusters (routing). Branch
-  chains split pipelines (pipelining). See
-  `examples/configs/ai/openai/responses/format-routing.yaml`.
-- **Branch on filter results**: branch chains split
-  or rejoin request-phase pipelines based on filter
-  results (`on_result`). See
-  `examples/configs/pipeline/branch-chains.yaml`
-  and `tests/integration/tests/suite/responses_format.rs`.
-  Branch sub-chains only run `on_request`;
-  `on_request_body` and `on_response_body` are not
-  executed for filters inside branch chains.
-  Body-transforming filters must be in the main
-  pipeline path or gated with normal filter
-  conditions.
-- **Prefer existing routing mechanisms**: use
-  classifier-promoted headers, router matches,
-  filter conditions, and branch chains before
-  adding new routing or capability mechanisms.
+  headers to select clusters.
 - **Do not buffer full streaming responses**:
   streaming and SSE filters should use
   `BodyMode::Stream` and process chunks
-  incrementally unless the feature explicitly
-  requires buffering.
+  incrementally.
 - **Validate only proxy-needed fields**: let the
   backend handle parameter ranges, model
   availability, and role ordering.
-- **Use dedicated rewrite filters for URL/path
-  translation**: use `path_rewrite` or `url_rewrite`;
-  provider and protocol filters should not set
-  `ctx.rewritten_path` directly.
 
 ## Filter Organization
 
-Filters live under
-`filter/src/builtins/<protocol>/<category>/`.
-See `docs/filters/README.md` for the filter system
-documentation and `docs/filters/reference.md`
-for built-in filter configurations.
-
-Categories: `ai`, `observability`,
-`payload_processing`, `security`,
-`traffic_management`, `transformation` (HTTP);
-`observability`, `traffic_management` (TCP).
-
-Example configs: `examples/configs/<category>/`.
+- `apis/src/anthropic/` — Anthropic Messages API
+- `apis/src/openai/` — OpenAI Responses, Conversations,
+  SSE, model rewrite, store, rehydrate, validate, proxy
+- `apis/src/classifier/` — AI request format detection
+- `apis/src/store/` — ResponseStore trait, SQLite/Postgres
+- `apis/src/token_usage/` — Multi-provider token counting
+- `filters/src/agentic/` — A2A, MCP protocol filters
+- `filters/src/guardrails/` — AI content safety (NeMo)
+- `filters/src/inference/` — Model-to-header routing
+- `filters/src/prompt_enrich/` — Prompt injection
+- `filters/src/token_usage_headers.rs` — Token headers
 
 ## Dynamic Config Reload
 
 Praxis swaps filter pipelines at runtime without
-restarting. Each handler holds
-`Arc<ArcSwap<FilterPipeline>>`; a file watcher
-(500ms debounce) monitors the config file, validates,
-rebuilds pipelines, and swaps atomically. Listener
-topology, protocol type, and TLS toggle changes
-cannot be applied dynamically (logged as warnings).
+restarting. The AI server inherits this from
+praxis-protocol. The `ResponseStoreRegistry` is
+injected as a `PipelineExtension` and created fresh
+per pipeline build.
+
+## Pingora Boundary
+
+See praxis core documentation. Pingora handles:
+request smuggling prevention, H2 backpressure,
+connection pool safety, HTTP/1.1 upgrade detection.
 
 ## CI Workflows
 
@@ -270,17 +135,3 @@ CI workflows that post PR comments must use the
 `praxis-bot-app` GitHub App token (via
 `actions/create-github-app-token`), not the default
 `github.token`.
-
-## Pingora Boundary
-
-See `docs/operating/security-hardening.md` for details.
-
-Pingora handles: request smuggling prevention, H2
-backpressure, connection pool safety, HTTP/1.1
-upgrade detection and bidirectional forwarding
-(WebSocket, etc.).
-
-Praxis handles: hop-by-hop header stripping (with
-conditional preservation for upgrade requests),
-Host validation, X-Forwarded-* injection, retry
-logic.

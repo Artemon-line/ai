@@ -24,7 +24,7 @@ use crate::dump;
 pub(crate) fn load_and_validate_for_cli(
     explicit: Option<&str>,
 ) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {
-    let config = praxis::load_config(explicit)?;
+    let config = praxis_ai::load_config(explicit)?;
     validate_config_for_startup(&config)?;
     Ok(config)
 }
@@ -32,10 +32,10 @@ pub(crate) fn load_and_validate_for_cli(
 /// Validate a parsed configuration by building filter pipelines.
 pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     praxis_core::logging::validate_log_overrides(config)?;
-    let registry = praxis::build_full_registry();
+    let registry = praxis_ai::build_full_registry();
     let health_registry = praxis_core::health::build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    praxis::resolve_pipelines(config, &registry, &health_registry, &kv_stores)?;
+    praxis_ai::resolve_pipelines(config, &registry, &health_registry, &kv_stores)?;
     Ok(())
 }
 

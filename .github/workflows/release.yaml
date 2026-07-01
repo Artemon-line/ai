@@ -74,9 +74,6 @@ jobs:
             ${{ runner.os }}-rust-1.96.0-cargo-
           save-always: true
 
-      - name: Install h2spec
-        run: make target/praxis-binutils/h2spec
-
       - name: Run all tests
         run: make test
 

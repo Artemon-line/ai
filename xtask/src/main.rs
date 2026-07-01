@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Development tasks for the Praxis proxy.
+//! Development tasks for Praxis AI.
 
 #![allow(
     clippy::exit,
@@ -14,11 +14,8 @@
 )]
 #![allow(let_underscore_drop, reason = "development tooling")]
 
-mod benchmark;
 mod debug;
 mod echo;
-mod filter_docs;
-mod lint_ai_isolation;
 mod lint_deps;
 mod lint_example_tests;
 mod port;
@@ -32,7 +29,7 @@ use clap::{Parser, Subcommand};
 
 /// Top-level CLI for xtask development commands.
 #[derive(Parser)]
-#[command(name = "xtask", about = "Praxis development tasks")]
+#[command(name = "xtask", about = "Praxis AI development tasks")]
 struct Cli {
     /// The subcommand to run.
     #[command(subcommand)]
@@ -46,17 +43,9 @@ enum Command {
     /// response to every request.
     Echo(echo::Args),
 
-    /// Run praxis with development settings.
+    /// Run praxis-ai with development settings.
     /// Runs single-threaded by default.
     Debug(debug::Args),
-
-    /// Run proxy benchmarks and generate reports.
-    Benchmark(Box<benchmark::Args>),
-
-    /// Check that AI-specific code stays inside
-    /// `filter/src/builtins/` and does not leak into
-    /// infrastructure layers.
-    LintAiIsolation(lint_ai_isolation::Args),
 
     /// Check that workspace dependency versions use
     /// three-component semver.
@@ -69,12 +58,6 @@ enum Command {
     /// Verify or regenerate the `examples/README.md` table
     /// from YAML config header comments.
     SyncExampleReadme(sync_example_readme::Args),
-
-    /// Generate per-filter documentation under `docs/filters/`.
-    GenerateFilterDocs(filter_docs::GenerateArgs),
-
-    /// Check that filter doc files are up to date.
-    LintFilterDocs(filter_docs::LintArgs),
 }
 
 // -----------------------------------------------------------------------------
@@ -87,13 +70,9 @@ fn main() {
     match cli.command {
         Command::Echo(args) => echo::run(args),
         Command::Debug(args) => debug::run(&args),
-        Command::Benchmark(args) => benchmark::run(*args),
-        Command::LintAiIsolation(args) => lint_ai_isolation::run(args),
         Command::LintDeps(args) => lint_deps::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
         Command::SyncExampleReadme(args) => sync_example_readme::run(&args),
-        Command::GenerateFilterDocs(args) => filter_docs::generate(args),
-        Command::LintFilterDocs(args) => filter_docs::lint(args),
     }
 }
 

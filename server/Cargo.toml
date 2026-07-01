@@ -1,20 +1,20 @@
 [package]
-name = "praxis-proxy"
+name = "praxis-ai-proxy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "Cloud and AI-native proxy server"
+description = "AI-native proxy server built on Praxis"
 license.workspace = true
 repository.workspace = true
 readme = "../README.md"
 
 [lib]
-name = "praxis"
+name = "praxis_ai"
 path = "src/lib.rs"
 
 [[bin]]
-name = "praxis"
+name = "praxis-ai"
 path = "src/main.rs"
 
 [lints]
@@ -23,6 +23,8 @@ workspace = true
 [dependencies]
 clap = { workspace = true }
 notify = { workspace = true }
+praxis-ai-filters = { workspace = true }
+praxis-ai-apis = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-protocol = { workspace = true }
@@ -37,13 +39,7 @@ nix = { workspace = true }
 tikv-jemallocator = { workspace = true }
 
 [build-dependencies]
-cargo_metadata = "0.23.1"
+cargo_metadata = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-
-[features]
-default = ["ai-inference"]
-ai-inference = ["praxis-filter/ai-inference", "praxis-protocol/response-store"]
-ext-proc = ["praxis-filter/ext-proc"]
-cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]

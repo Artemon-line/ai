@@ -37,7 +37,7 @@ pub(crate) fn run(args: &Args) {
     crate::init_tracing("debug");
 
     let config_path = args.config.as_deref().unwrap_or("<default>");
-    let mut config = praxis::load_config(args.config.as_deref()).unwrap_or_else(|e| {
+    let mut config = praxis_ai::load_config(args.config.as_deref()).unwrap_or_else(|e| {
         eprintln!("fatal: failed to load config from {config_path}: {e}");
         std::process::exit(1);
     });
@@ -51,5 +51,5 @@ pub(crate) fn run(args: &Args) {
         config.admin.address = Some("127.0.0.1:9090".to_owned());
     }
 
-    praxis::run_server(config, None)
+    praxis_ai::run_server(config, None)
 }

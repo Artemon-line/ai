@@ -6,10 +6,10 @@ Build the release binary:
 make release
 ```
 
-Start Praxis:
+Start Praxis AI:
 
 ```console
-./target/release/praxis
+./target/release/praxis-ai
 ```
 
 The server starts on `127.0.0.1:8080` with a built-in
@@ -20,51 +20,57 @@ curl http://127.0.0.1:8080/
 ```
 
 ```json
-{"status": "ok", "server": "praxis"}
+{"status": "ok", "server": "praxis-ai"}
 ```
 
-## Proxy to a backend
+## Route to an AI backend
 
-Create `praxis.yaml`:
+Create `praxis-ai.yaml`:
 
 ```yaml
 listeners:
-  - name: web
+  - name: ai
     address: "127.0.0.1:8080"
-    filter_chains: [main]
+    filter_chains: [openai]
 
 filter_chains:
-  - name: main
+  - name: openai
     filters:
+      - filter: openai_responses_format
       - filter: router
         routes:
-          - path_prefix: "/"
-            cluster: backend
+          - path_prefix: "/v1"
+            cluster: openai_backend
       - filter: load_balancer
         clusters:
-          - name: backend
+          - name: openai_backend
             endpoints:
-              - "127.0.0.1:3000"
+              - "api.openai.com:443"
+            tls:
+              sni: "api.openai.com"
 ```
 
-Start Praxis with your config:
+Start Praxis AI with your config:
 
 ```console
-./target/release/praxis -c praxis.yaml
+./target/release/praxis-ai -c praxis-ai.yaml
 ```
 
-Requests to port 8080 are now forwarded to your backend
-on port 3000:
+Requests to port 8080 are now forwarded to the OpenAI
+API:
 
 ```console
-curl http://127.0.0.1:8080/
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model": "gpt-4o", "input": "Hello"}'
 ```
 
 ## Next steps
 
 - [Configuration](operating/configuration.md): filter
-  chains, routing, load balancing, TLS, and all options.
+  chains, routing, load balancing, and all options.
 - [Example configs](../examples/configs/): working YAML
   for every feature.
-- [Filters](filters/README.md): built-in filters and
-  how to write your own.
+- [Filters](filters/README.md): AI filters and how to
+  write your own.

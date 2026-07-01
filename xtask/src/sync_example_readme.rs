@@ -18,7 +18,7 @@ use clap::Parser;
 /// Title overrides for category directories whose display name cannot be
 /// derived by simple title-casing. All other directories are converted
 /// automatically (e.g. `"traffic-management"` → `"Traffic Management"`).
-const TITLE_OVERRIDES: &[(&str, &str)] = &[("ai", "AI / Inference")];
+const TITLE_OVERRIDES: &[(&str, &str)] = &[("openai", "OpenAI")];
 
 /// Comment-line prefixes that begin a non-description block. Paragraphs
 /// whose first line starts with any of these are skipped during description
@@ -519,7 +519,7 @@ listeners:
 
     #[test]
     fn title_override_applied() {
-        assert_eq!(category_title("ai"), "AI / Inference");
+        assert_eq!(category_title("openai"), "OpenAI");
     }
 
     #[test]
@@ -543,13 +543,9 @@ listeners:
         let root = workspace_root();
         let categories = discover_categories(&root.join("examples/configs"));
         assert!(
-            categories.len() > 5,
-            "expected 5+ categories, found {}",
+            categories.len() >= 2,
+            "expected 2+ categories, found {}",
             categories.len()
-        );
-        assert!(
-            categories.iter().any(|(d, _)| d == "ai"),
-            "ai category should be discovered"
         );
     }
 
@@ -558,8 +554,8 @@ listeners:
         let root = workspace_root();
         let entries = collect_entries(&root.join("examples/configs"));
         assert!(
-            entries.values().map(Vec::len).sum::<usize>() > 50,
-            "expected 50+ configs"
+            entries.values().map(Vec::len).sum::<usize>() > 10,
+            "expected 10+ configs"
         );
     }
 }

@@ -1,15 +1,18 @@
 # Extensions
 
-Praxis is designed to be extended. The core library provides
-the building blocks for building bespoke proxy servers.
-Multiple extension mechanisms are provided to support a
-variety of needs.
+Praxis AI inherits the full extension system from
+[Praxis core][praxis]. Custom filters implement
+`HttpFilter` or `TcpFilter` from `praxis-filter` and
+register into the shared `FilterRegistry`.
+
+[praxis]: https://github.com/praxis-proxy/praxis
 
 ## Auto-Discovery (Recommended)
 
-External filter crates can self-register into Praxis at
-build time. The operator adds a `Cargo.toml` dependency
-and writes YAML config with zero Rust code changes to Praxis.
+External filter crates can self-register into Praxis AI
+at build time. The operator adds a `Cargo.toml`
+dependency and writes YAML config with zero Rust code
+changes.
 
 ### How It Works
 
@@ -17,10 +20,11 @@ and writes YAML config with zero Rust code changes to Praxis.
    its filters
 2. The crate's `Cargo.toml` carries a
    `[package.metadata.praxis-filters]` marker
-3. The Praxis server's `build.rs` runs `cargo metadata`,
-   discovers marked crates, and generates registration code
-4. At startup, discovered filters are registered alongside
-   built-ins
+3. The Praxis AI server's `build.rs` runs
+   `cargo metadata`, discovers marked crates, and
+   generates registration code
+4. At startup, discovered filters are registered
+   alongside built-ins and AI filters
 
 ### External Crate Setup
 
@@ -28,11 +32,11 @@ In the external crate's `Cargo.toml`:
 
 ```toml
 [package]
-name = "my-auth-filters"
+name = "my-token-quota"
 version = "0.1.0"
 
-# Empty marker: tells the Praxis build script this crate exports filters.
-# The actual filter names and factories are declared in export_filters!.
+# Marker: tells the build script this crate exports
+# filters.
 [package.metadata.praxis-filters]
 
 [dependencies]
@@ -51,11 +55,11 @@ use praxis_filter::{
     HttpFilterContext, export_filters,
 };
 
-pub struct MyAuthFilter { /* ... */ }
+pub struct TokenQuotaFilter { /* ... */ }
 
 #[async_trait]
-impl HttpFilter for MyAuthFilter {
-    fn name(&self) -> &'static str { "my_auth" }
+impl HttpFilter for TokenQuotaFilter {
+    fn name(&self) -> &'static str { "token_quota" }
 
     async fn on_request(
         &self, _ctx: &mut HttpFilterContext<'_>,
@@ -64,7 +68,7 @@ impl HttpFilter for MyAuthFilter {
     }
 }
 
-impl MyAuthFilter {
+impl TokenQuotaFilter {
     pub fn from_config(
         config: &serde_yaml::Value,
     ) -> Result<Box<dyn HttpFilter>, FilterError> {
@@ -74,17 +78,17 @@ impl MyAuthFilter {
 }
 
 export_filters! {
-    http "my_auth" => MyAuthFilter::from_config,
+    http "token_quota" => TokenQuotaFilter::from_config,
 }
 ```
 
 ### Operator Usage
 
-Add the crate to the Praxis server's `Cargo.toml`:
+Add the crate to the Praxis AI server's `Cargo.toml`:
 
 ```toml
 [dependencies]
-my-auth-filters = "0.1"
+my-token-quota = "0.1"
 ```
 
 Then reference the filter by name in YAML:
@@ -93,30 +97,29 @@ Then reference the filter by name in YAML:
 filter_chains:
   - name: main
     filters:
-      - filter: my_auth
-        some_option: "value"
+      - filter: token_quota
+        max_tokens_per_minute: 100000
 ```
 
 Rebuild and run — no other changes needed.
 
 ### Duplicate Detection
 
-If an external filter name collides with a built-in or
-another external filter, the server panics at startup
+If an external filter name collides with a built-in, AI,
+or another external filter, the server panics at startup
 with a clear error message. Filter names must be unique
 across all sources.
 
 ## Rust Extensions (Manual Registration)
 
 Compile-time extensions with zero overhead. Implement
-`HttpFilter` or `TcpFilter` in your own crate, register it,
-and reference it in YAML config. Use this approach when
-building a custom Praxis binary with inline filters that
-don't need to be shared as a separate crate.
+`HttpFilter` from `praxis-filter`, register it, and
+reference it in YAML config. Use this approach when
+building a custom Praxis AI binary with inline filters
+that don't need to be shared as a separate crate.
 
 1. Implement `HttpFilter` (`on_request`, `on_response`,
-   body hooks) or `TcpFilter` (`on_connect`,
-   `on_disconnect`)
+   body hooks)
 2. Register with `register_filters!`
 3. Reference by name in YAML filter chains
 
@@ -126,233 +129,58 @@ don't need to be shared as a separate crate.
 use async_trait::async_trait;
 use serde::Deserialize;
 use praxis_filter::{
-    FilterAction, FilterError, HttpFilter,
-    HttpFilterContext, Rejection, register_filters,
+    BodyAccess, BodyMode, FilterAction, FilterError,
+    HttpFilter, HttpFilterContext, Rejection,
+    register_filters,
 };
 
-struct MaxBodyGuard {
-    max_content_length: u64,
-    reject_status: u16,
+struct ModelBlocklist {
+    blocked: Vec<String>,
 }
 
-impl MaxBodyGuard {
+impl ModelBlocklist {
     pub fn from_config(
         config: &serde_yaml::Value,
     ) -> Result<Box<dyn HttpFilter>, FilterError> {
         #[derive(Deserialize)]
         struct Cfg {
-            max_content_length: u64,
-            #[serde(default = "default_status")]
-            reject_status: u16,
+            blocked_models: Vec<String>,
         }
-        fn default_status() -> u16 { 413 }
 
         let cfg: Cfg =
             serde_yaml::from_value(config.clone())?;
         Ok(Box::new(Self {
-            max_content_length: cfg.max_content_length,
-            reject_status: cfg.reject_status,
+            blocked: cfg.blocked_models,
         }))
     }
 }
 
 #[async_trait]
-impl HttpFilter for MaxBodyGuard {
-    fn name(&self) -> &'static str { "max_body_guard" }
+impl HttpFilter for ModelBlocklist {
+    fn name(&self) -> &'static str {
+        "model_blocklist"
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer { max_bytes: Some(8_192) }
+    }
 
     async fn on_request(
         &self, ctx: &mut HttpFilterContext<'_>,
     ) -> Result<FilterAction, FilterError> {
-        let too_large = ctx.request.headers
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .is_some_and(|len| {
-                len > self.max_content_length
-            });
-
-        if too_large {
-            return Ok(FilterAction::Reject(
-                Rejection::status(self.reject_status),
-            ));
-        }
         Ok(FilterAction::Continue)
     }
 }
 
 // In your binary:
 register_filters! {
-    http "max_body_guard" => MaxBodyGuard::from_config,
+    http "model_blocklist" => ModelBlocklist::from_config,
 }
 ```
-
-### TCP Filter
-
-TCP custom filters implement `TcpFilter` and register with
-the `tcp` keyword:
-
-```rust
-use async_trait::async_trait;
-use praxis_filter::{
-    FilterAction, FilterError, TcpFilter, TcpFilterContext,
-};
-
-struct ConnectionCounter { /* ... */ }
-
-#[async_trait]
-impl TcpFilter for ConnectionCounter {
-    fn name(&self) -> &'static str {
-        "connection_counter"
-    }
-
-    async fn on_connect(
-        &self, ctx: &mut TcpFilterContext<'_>,
-    ) -> Result<FilterAction, FilterError> {
-        // Track connection metrics
-        Ok(FilterAction::Continue)
-    }
-}
-```
-
-### Custom Load Balancer
-
-Load balancers are ordinary HTTP filters. The contract:
-read `ctx.cluster` (set by the router), select an
-endpoint, and set `ctx.upstream`. If your algorithm
-tracks in-flight requests, use `on_response` to release
-counters.
-
-```rust
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
-
-use async_trait::async_trait;
-use praxis_core::connectivity::{ConnectionOptions, Upstream};
-use praxis_filter::{
-    FilterAction, FilterError, HttpFilter, HttpFilterContext,
-};
-
-/// Picks the endpoint that has handled the fewest
-/// total requests (lifetime, not in-flight).
-pub struct FewestServedFilter {
-    clusters: HashMap<String, Vec<EndpointCounter>>,
-}
-
-struct EndpointCounter {
-    address: Arc<str>,
-    served: AtomicUsize,
-}
-
-impl FewestServedFilter {
-    pub fn from_config(
-        config: &serde_yaml::Value,
-    ) -> Result<Box<dyn HttpFilter>, FilterError> {
-        #[derive(serde::Deserialize)]
-        struct ClusterCfg {
-            name: String,
-            endpoints: Vec<String>,
-        }
-
-        let cfgs: Vec<ClusterCfg> = serde_yaml::from_value(
-            config
-                .get("clusters")
-                .cloned()
-                .unwrap_or_default(),
-        )?;
-
-        let clusters = cfgs
-            .into_iter()
-            .map(|c| {
-                let counters = c
-                    .endpoints
-                    .into_iter()
-                    .map(|addr| EndpointCounter {
-                        address: Arc::from(addr.as_str()),
-                        served: AtomicUsize::new(0),
-                    })
-                    .collect();
-                (c.name, counters)
-            })
-            .collect();
-
-        Ok(Box::new(Self { clusters }))
-    }
-}
-
-#[async_trait]
-impl HttpFilter for FewestServedFilter {
-    fn name(&self) -> &'static str { "fewest_served" }
-
-    async fn on_request(
-        &self,
-        ctx: &mut HttpFilterContext<'_>,
-    ) -> Result<FilterAction, FilterError> {
-        let cluster = ctx.cluster.as_deref().ok_or(
-            "fewest_served: no cluster set",
-        )?;
-        let endpoints =
-            self.clusters.get(cluster).ok_or_else(|| {
-                format!("fewest_served: unknown cluster \
-                         '{cluster}'")
-            })?;
-
-        // Pick endpoint with lowest lifetime count.
-        let pick = endpoints
-            .iter()
-            .min_by_key(|e| e.served.load(Ordering::Relaxed))
-            .expect("cluster must have endpoints");
-
-        pick.served.fetch_add(1, Ordering::Relaxed);
-
-        ctx.upstream = Some(Upstream {
-            address: Arc::clone(&pick.address),
-            tls: None,
-            connection: Arc::new(ConnectionOptions::default()),
-        });
-
-        Ok(FilterAction::Continue)
-    }
-}
-
-// Register alongside the built-in filters:
-register_filters! {
-    http "fewest_served" => FewestServedFilter::from_config,
-}
-```
-
-Then use it in config:
-
-```yaml
-filter_chains:
-  - name: main
-    filters:
-      - filter: router
-        routes:
-          - path_prefix: "/"
-            cluster: backend
-
-      - filter: fewest_served
-        clusters:
-          - name: backend
-            endpoints:
-              - "127.0.0.1:3001"
-              - "127.0.0.1:3002"
-```
-
-Key points:
-
-- The router runs first and sets `ctx.cluster`.
-- Your filter reads the cluster name, selects an endpoint,
-  and writes `ctx.upstream`.
-- The protocol layer connects to whatever `Upstream` you
-  set (address, TLS, SNI, timeouts).
-- For stateful algorithms, override `on_response` to
-  update counters when a request completes.
 
 ### Registration
 
@@ -361,49 +189,44 @@ syntax:
 
 ```rust
 register_filters! {
-    http "max_body_guard" => MaxBodyGuard::from_config,
+    http "model_blocklist" => ModelBlocklist::from_config,
 }
 ```
 
-TCP filters would use `tcp "name" => factory` syntax.
-
 The macro generates a `custom_registry()` function that
-returns a `FilterRegistry` with both built-in and custom
+returns a `FilterRegistry` with built-in, AI, and custom
 filters. Use it with the test utilities
 (`start_proxy_with_registry`) or build your own server
 bootstrap from the workspace crates (`praxis-core`,
-`praxis-filter`, `praxis-protocol`).
+`praxis-filter`, `praxis-ai-apis`, `praxis-ai-filters`).
 
 ### YAML Config
 
 Any keys placed alongside `filter:` in the filter chain
-entry are passed to `from_config` as a `serde_yaml::Value`:
+entry are passed to `from_config` as a
+`serde_yaml::Value`:
 
 ```yaml
 filter_chains:
-  - name: security
+  - name: ai
     filters:
-      - filter: max_body_guard
-        max_content_length: 1048576   # 1 MiB
-        reject_status: 413
+      - filter: model_blocklist
+        blocked_models:
+          - "gpt-3.5-turbo"
+          - "claude-2"
         conditions:
           - when:
-              methods: ["POST", "PUT", "PATCH"]
+              methods: ["POST"]
 ```
 
-Custom filters participate identically to built-ins: same
-ordering, context access, and short-circuit capability.
+Custom filters participate identically to built-ins:
+same ordering, context access, and short-circuit
+capability.
 
-See the [filter system documentation](README.md) for the
-full API reference.
+See the [filter system documentation](README.md) for
+the AI filter overview.
 
 ## Best Practices
-
-### Header trust boundaries
-
-Never blindly trust `X-Forwarded-For` or
-`X-Forwarded-Proto`. Attackers spoof these unless trusted
-upstream sources are explicitly defined.
 
 ### Keep filters stateless when possible
 
@@ -440,60 +263,11 @@ chunks in place.
 - `StreamBuffer`: chunks flow through filters
   incrementally but forwarding to upstream is deferred
   until `Release` or end-of-stream. Use when body
-  content influences routing, when you need the complete
-  body (e.g. signature verification), or when you need
-  to inspect the full body before upstream selection.
-  Set `max_bytes` to avoid unbounded memory growth.
-
-Two patterns for declaring `StreamBuffer`:
-
-**Static declaration** (filter always needs the body):
-
-```rust
-fn request_body_mode(&self) -> BodyMode {
-    BodyMode::StreamBuffer { max_bytes: Some(1_048_576) }
-}
-```
-
-**Per-request upgrade** (conditional buffering):
-
-```rust
-async fn on_request(
-    &self, ctx: &mut HttpFilterContext<'_>,
-) -> Result<FilterAction, FilterError> {
-    if needs_body_inspection(ctx) {
-        ctx.set_request_body_mode(
-            BodyMode::StreamBuffer {
-                max_bytes: Some(1_048_576),
-            },
-        );
-    }
-    Ok(FilterAction::Continue)
-}
-```
-
-### `on_response_body` is synchronous
-
-Pingora's response body callback is not async. Do not
-block the thread with `block_on` or heavy computation.
-If you need async I/O during response payload processing,
-spawn a background task and communicate via a channel.
-
-### Use conditions instead of internal checks
-
-Rather than writing `if req.method != "POST" { return
-Continue }` inside your filter, declare conditions in
-YAML:
-
-```yaml
-- filter: my_filter
-  conditions:
-    - when:
-        methods: ["POST", "PUT"]
-```
-
-This keeps filter logic focused and lets operators
-adjust gating without code changes.
+  content influences routing (e.g. model field
+  extraction), when you need the complete body (e.g.
+  guardrail scanning), or when you need to inspect the
+  full body before upstream selection. Set `max_bytes`
+  to avoid unbounded memory growth.
 
 ### Use `extra_request_headers` for metadata
 
@@ -502,46 +276,6 @@ computes derived data, promote it to a request header
 via `ctx.extra_request_headers`. This makes the value
 visible to downstream filters (e.g. the router) without
 coupling filters to each other.
-
-### Access KV stores for runtime mappings
-
-Use `ctx.kv_stores` with `get_or_create` to access
-runtime-updatable key-value data without restarting
-the proxy. Stores are created on demand:
-
-```rust
-async fn on_request(
-    &self,
-    ctx: &mut HttpFilterContext<'_>,
-) -> Result<FilterAction, FilterError> {
-    if let Some(registry) = ctx.kv_stores {
-        let store = registry.get_or_create("routing_overrides");
-        if let Some(cluster) = store.get("preferred_cluster") {
-            ctx.cluster = Some(Arc::from(cluster.as_ref()));
-        }
-    }
-    Ok(FilterAction::Continue)
-}
-```
-
-Operators update stores at runtime via the admin API
-without config reloads:
-
-```console
-curl -X PUT http://127.0.0.1:9901/api/kv/routing_overrides/preferred_cluster \
-     -d 'us-east-cluster'
-```
-
-### Handle missing `ctx.cluster` gracefully
-
-If your filter depends on a cluster being set (like a
-load balancer), return a clear error when
-`ctx.cluster` is `None` rather than panicking:
-
-```rust
-let cluster = ctx.cluster.as_deref()
-    .ok_or("my_filter: no cluster set")?;
-```
 
 ### Provide `from_config` validation
 

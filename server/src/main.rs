@@ -4,9 +4,9 @@
 //! Praxis server entry point.
 //!
 //! Loads configuration, initializes tracing (with optional JSON output and
-//! per-module log level overrides), and delegates to [`praxis::run_server`].
+//! per-module log level overrides), and delegates to [`praxis_ai::run_server`].
 //!
-//! [`praxis::run_server`]: praxis::run_server
+//! [`praxis_ai::run_server`]: praxis_ai::run_server
 
 /// Jemalloc global allocator is used by default on unix platforms.
 ///
@@ -25,9 +25,9 @@ use tracing::info;
 // CLI
 // -----------------------------------------------------------------------------
 
-/// Cloud and AI-native proxy server.
+/// AI-native proxy server built on Praxis.
 #[derive(Parser)]
-#[command(name = "praxis")]
+#[command(name = "praxis-ai")]
 struct Cli {
     /// Path to the YAML configuration file.
     #[arg(short = 'c', long = "config")]
@@ -68,11 +68,11 @@ fn main() {
         return;
     }
 
-    let config_path = praxis::resolve_config_path(explicit.as_deref());
-    let config = praxis::load_config(explicit.as_deref()).unwrap_or_else(|e| praxis::fatal(&e));
-    praxis::init_tracing(&config).unwrap_or_else(|e| praxis::fatal(&e));
+    let config_path = praxis_ai::resolve_config_path(explicit.as_deref());
+    let config = praxis_ai::load_config(explicit.as_deref()).unwrap_or_else(|e| praxis_ai::fatal(&e));
+    praxis_ai::init_tracing(&config).unwrap_or_else(|e| praxis_ai::fatal(&e));
     info!("starting server");
-    praxis::run_server(config, config_path)
+    praxis_ai::run_server(config, config_path)
 }
 
 // -----------------------------------------------------------------------------

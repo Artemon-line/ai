@@ -14,46 +14,30 @@ use clap::Parser;
 /// requirement. Each entry must have a justification. Shrink this list over
 /// time by adding tests.
 const SKIP: &[&str] = &[
-    // --- AI: tested via model_to_header module without load_example_config ---
-    "ai/model-to-header-routing.yaml",
-    // --- Observability: TCP access log not yet integration-tested ---
-    "observability/tcp-access-log.yaml",
-    // --- Operations: runtime/container configs that don't exercise filters ---
-    "operations/container-default.yaml",
-    "operations/hot-reload.yaml",
-    "operations/log-overrides.yaml",
-    "operations/multi-listener.yaml",
-    // --- Payload processing ---
-    "payload-processing/compression.yaml",
-    "payload-processing/stream-buffer.yaml",
-    // --- Pipeline ---
-    "pipeline/composed-chains.yaml",
-    "pipeline/failure-mode.yaml",
-    // --- Protocols: TLS/mTLS variants requiring cert infrastructure ---
-    "protocols/mixed-protocol.yaml",
-    "protocols/tcp-proxy.yaml",
-    "protocols/tcp-timeouts.yaml",
-    "protocols/tcp-tls-mtls.yaml",
-    "protocols/tcp-tls-termination.yaml",
-    "protocols/tls-cipher-suites.yaml",
-    "protocols/tls-http-reencrypt.yaml",
-    "protocols/tls-mtls-both.yaml",
-    "protocols/tls-mtls-listener-request.yaml",
-    "protocols/tls-mtls-listener.yaml",
-    "protocols/tls-mtls-upstream.yaml",
-    "protocols/tls-multi-cert.yaml",
-    "protocols/tls-termination.yaml",
-    "protocols/tls-verify-disabled.yaml",
-    "protocols/tls-version-constraint.yaml",
-    "protocols/upstream-ca-file.yaml",
-    "protocols/upstream-tls.yaml",
-    // --- Security: configs needing specialized test harness ---
-    "security/cors.yaml",
-    "security/downstream-read-timeout.yaml",
-    "security/forwarded-headers.yaml",
-    // --- Traffic management ---
-    "traffic-management/rate-limiting.yaml",
-    "traffic-management/timeout.yaml",
+    // TODO(migration): add integration tests for all AI example configs.
+    // All configs are skipped until tests/integration is re-enabled.
+    "a2a-classifier-routing.yaml",
+    "a2a-task-routing.yaml",
+    "ai-inference-body-based-routing.yaml",
+    "anthropic/messages-protocol.yaml",
+    "anthropic/messages-to-openai.yaml",
+    "anthropic/request-validate.yaml",
+    "anthropic/unified-gateway.yaml",
+    "credential-injection.yaml",
+    "json-rpc-routing.yaml",
+    "mcp-classifier-routing.yaml",
+    "model-to-header-routing.yaml",
+    "openai/conversations/conversations.yaml",
+    "openai/responses/format-routing.yaml",
+    "openai/responses/full-flow.yaml",
+    "openai/responses/model-rewrite.yaml",
+    "openai/responses/rehydrate.yaml",
+    "openai/responses/request-validate.yaml",
+    "openai/responses/response-store.yaml",
+    "openai/responses/responses-proxy.yaml",
+    "openai/responses/responses-routing.yaml",
+    "prompt-enrichment.yaml",
+    "token-usage-headers.yaml",
 ];
 
 // ---------------------------------------------------------------------------
@@ -204,12 +188,12 @@ mod tests {
         let root = workspace_root();
         let configs = collect_yaml_files(&root.join("examples/configs"));
         assert!(
-            configs.len() > 50,
-            "expected 50+ example configs, found {}",
+            configs.len() > 10,
+            "expected 10+ example configs, found {}",
             configs.len()
         );
         assert!(
-            configs.contains(&"traffic-management/basic-reverse-proxy.yaml".to_owned()),
+            configs.contains(&"prompt-enrichment.yaml".to_owned()),
             "basic-reverse-proxy.yaml should be in the config list"
         );
     }

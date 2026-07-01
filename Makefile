@@ -3,97 +3,26 @@
 # -------------------------------------------------------------------
 
 VERSION          ?= $(shell perl -ne 'print $$1 if /^version\s*=\s*"(.+)"/' Cargo.toml)
-IMAGE            ?= praxis
+IMAGE            ?= praxis-ai
 CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
-NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/actions/install-nightly-rust/action.yml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')
 V                ?=
-
-UNAME_S := $(shell uname -s | tr A-Z a-z)
-UNAME_M := $(shell uname -m)
-
-# -------------------------------------------------------------------
-# All
-# -------------------------------------------------------------------
-
-all: build fmt lint test audit container
-
-# -------------------------------------------------------------------
-# Prerequisites
-# -------------------------------------------------------------------
-
-REQUIRED_CMDS := cargo
-RUST_TARGETS := all build release check \
-	test test-unit \
-	test-schema test-integration test-conformance \
-	test-security test-security-suite test-resilience \
-	test-config-validation test-config \
-	bench \
-	lint fmt doc audit coverage coverage-check \
-	run-echo run-debug
-NIGHTLY_FMT_TARGETS  := lint fmt
-CMAKE_TARGETS := all build release check \
-	test test-unit \
-	test-schema test-integration test-conformance \
-	test-security test-security-suite test-resilience \
-	test-config-validation test-config \
-	bench \
-	lint doc coverage coverage-check \
-	run-echo run-debug
 
 ifneq ($(V),)
   _NOCAPTURE := -- --nocapture
 endif
 
 .PHONY: all build release check clean \
-	test test-unit \
-	test-schema test-integration test-conformance \
-	test-security test-security-suite test-resilience \
-	bench \
-	lint generate-filter-docs fmt doc audit semver coverage coverage-check \
-	fuzz fuzz-build \
+	test test-unit test-integration \
+	lint fmt doc audit \
 	require-container-engine \
 	container container-run \
-	test-container test-container-run \
-	run-echo run-debug \
-	tools clean-tools \
-	check-prereqs \
-	check-prereqs-cmake \
-	check-prereqs-nightly \
-	check-prereqs-nightly-toolchain \
-	setup-hooks \
-	help
+	setup-hooks help
 
-# Uses --version rather than command -v so we catch broken installs.
-check-prereqs:
-	@for cmd in $(REQUIRED_CMDS); do \
-		$$cmd --version >/dev/null 2>&1 || { \
-			echo "\"$$cmd\" is not installed or broken — install/reinstall it before running make (see docs/development.md)" >&2; \
-			exit 1; \
-		}; \
-	done
-check-prereqs-cmake: check-prereqs
-	@cmake --version >/dev/null 2>&1 || { \
-		echo "\"cmake\" is not installed or broken — install/reinstall it before running make (see docs/development.md)" >&2; \
-		exit 1; \
-	}
-check-prereqs-nightly-toolchain: check-prereqs
-	@test -n "$(NIGHTLY_VERSION)" || { \
-		echo "Could not determine NIGHTLY_VERSION from .github/actions/install-nightly-rust/action.yml" >&2; \
-		exit 1; \
-	}
-	@cargo +$(NIGHTLY_VERSION) --version >/dev/null 2>&1 || { \
-		echo "Rust $(NIGHTLY_VERSION) is not installed — run \"rustup toolchain install $(NIGHTLY_VERSION)\" (see docs/development.md)" >&2; \
-		exit 1; \
-	}
-check-prereqs-nightly: check-prereqs-nightly-toolchain
-	@cargo +$(NIGHTLY_VERSION) fmt --version >/dev/null 2>&1 || { \
-		echo "rustfmt is not installed for $(NIGHTLY_VERSION) — run \"rustup component add --toolchain $(NIGHTLY_VERSION) rustfmt\"" >&2; \
-		exit 1; \
-	}
+# -------------------------------------------------------------------
+# All
+# -------------------------------------------------------------------
 
-$(RUST_TARGETS): check-prereqs
-$(CMAKE_TARGETS): check-prereqs-cmake
-$(NIGHTLY_FMT_TARGETS): check-prereqs-nightly
+all: build fmt lint test audit
 
 # -------------------------------------------------------------------
 # Build
@@ -101,7 +30,6 @@ $(NIGHTLY_FMT_TARGETS): check-prereqs-nightly
 
 build:
 	cargo build --workspace
-	cargo build --workspace --benches
 
 release:
 	cargo build --workspace --release
@@ -122,7 +50,7 @@ ifndef CONTAINER_ENGINE
 endif
 
 container: | require-container-engine
-	$(CONTAINER_ENGINE) build -t $(IMAGE):$(VERSION) -f Containerfile .
+	$(CONTAINER_ENGINE) build -t $(IMAGE):$(VERSION) -f Containerfile ..
 
 container-run: | require-container-engine
 	$(CONTAINER_ENGINE) run --rm --network=host $(IMAGE):$(VERSION) 2>&1
@@ -131,77 +59,29 @@ container-run: | require-container-engine
 # Test
 # -------------------------------------------------------------------
 
-test: $(H2SPEC)
-	PATH="$(BINUTILS_PATH):$(PATH)" cargo test --workspace $(_NOCAPTURE)
+test:
+	cargo test --workspace $(_NOCAPTURE)
 
 test-unit:
-	cargo test -p praxis-proxy-core $(_NOCAPTURE)
-	cargo test -p praxis-proxy-filter $(_NOCAPTURE)
-	cargo test -p praxis-proxy-protocol $(_NOCAPTURE)
-	cargo test -p praxis-proxy $(_NOCAPTURE)
-
-test-schema:
-	cargo test -p praxis-tests-schema $(_NOCAPTURE)
+	cargo test -p praxis-ai-apis $(_NOCAPTURE)
+	cargo test -p praxis-ai-filters $(_NOCAPTURE)
+	cargo test -p praxis-ai-proxy $(_NOCAPTURE)
 
 test-integration:
-	cargo test -p praxis-tests-integration $(_NOCAPTURE)
-
-test-conformance: $(H2SPEC)
-	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-conformance $(_NOCAPTURE)
-
-test-security: test-security-suite
-
-test-security-suite:
-	cargo test -p praxis-tests-security $(_NOCAPTURE)
-
-test-resilience:
-	cargo test -p praxis-tests-resilience $(_NOCAPTURE)
-
-test-config-validation: test-schema
-
-test-config: test-schema
-
-# -------------------------------------------------------------------
-# Test Container
-# -------------------------------------------------------------------
-
-test-container: | require-container-engine
-	$(CONTAINER_ENGINE) build -t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
-
-test-container-run: test-container
-	$(CONTAINER_ENGINE) run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
-		$(IMAGE)-test:$(VERSION) 2>&1
-
-# -------------------------------------------------------------------
-# Bench
-# -------------------------------------------------------------------
-
-bench: $(VEGETA) $(FORTIO_DEP)
-	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p benchmarks
+	cargo test -p praxis-ai-tests-integration $(_NOCAPTURE)
 
 # -------------------------------------------------------------------
 # Quality
 # -------------------------------------------------------------------
 
+AI_PKGS := -p praxis-ai-proxy -p praxis-ai-filters -p praxis-ai-apis -p xtask
+
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
-	cargo clippy -p praxis-proxy-protocol --no-default-features --all-targets -- -D warnings
-	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
-	cargo machete
-	cargo xtask lint-deps
-	cargo xtask lint-example-tests
-	cargo xtask lint-ai-isolation
-	cargo xtask sync-example-readme
-	cargo xtask lint-filter-docs
-
-generate-filter-docs:
-	cargo xtask generate-filter-docs
-
-semver:
-	cargo semver-checks
+	cargo +nightly fmt $(AI_PKGS) -- --check
 
 fmt:
-	cargo +$(NIGHTLY_VERSION) fmt --all
+	cargo +nightly fmt $(AI_PKGS)
 
 doc:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
@@ -210,23 +90,6 @@ audit:
 	cargo audit
 	cargo deny check
 
-coverage:
-	cargo llvm-cov --workspace --html --output-dir target/coverage \
-		--exclude benchmarks \
-		--exclude praxis-tests-conformance \
-		--exclude xtask \
-		--ignore-filename-regex '(target/|tests/)' \
-		--fail-under-lines 95
-
-coverage-check:
-	cargo llvm-cov --workspace --json \
-		--exclude benchmarks \
-		--exclude praxis-tests-conformance \
-		--exclude xtask \
-		--ignore-filename-regex '(target/|tests/)' \
-		--fail-under-lines 95 \
-		--output-path coverage.json
-
 # -------------------------------------------------------------------
 # Dev Setup
 # -------------------------------------------------------------------
@@ -234,107 +97,6 @@ coverage-check:
 setup-hooks:
 	ln -sf ../../.hooks/pre-commit .git/hooks/pre-commit
 	@echo "Git hooks installed."
-
-# -------------------------------------------------------------------
-# Dev tools
-# -------------------------------------------------------------------
-
-run-echo:
-	cargo xtask echo
-
-run-debug:
-	cargo xtask debug
-
-# -------------------------------------------------------------------
-# Binutils
-# -------------------------------------------------------------------
-
-BINUTILS_DIR   ?= target/praxis-binutils
-BINUTILS_PATH  := $(abspath $(BINUTILS_DIR))
-
-H2SPEC_VERSION := 2.6.0
-VEGETA_VERSION := 12.13.0
-FORTIO_VERSION := 1.75.1
-
-H2SPEC := $(BINUTILS_DIR)/h2spec
-VEGETA := $(BINUTILS_DIR)/vegeta
-FORTIO := $(BINUTILS_DIR)/fortio
-
-# The MacOS / OSX sha256 command does not support the needed options.
-# On Mac, `brew install coreutils` provides gsha256sum.
-SHA256SUM := sha256sum
-ifeq ($(UNAME_S),darwin)
-  SHA256SUM := gsha256sum
-endif
-
-
-# Map architecture names
-ifeq ($(UNAME_M),x86_64)
-  ARCH_GO := amd64
-else ifeq ($(UNAME_M),aarch64)
-  ARCH_GO := arm64
-else
-  ARCH_GO := $(UNAME_M)
-endif
-
-$(BINUTILS_DIR):
-	mkdir -p $(BINUTILS_DIR)
-
-H2SPEC_SHA256_linux_amd64  := 157ee0de702e01ad40e752dbf074b366027e550c8e7504f9450da2809e279318
-H2SPEC_SHA256_darwin_amd64 := 981cb9f90a6f5e36300063022bd4eb7438d3dcf66d63a146a8541359697d1601
-
-# h2spec has no arm64 builds; fall back to amd64.
-ifeq ($(ARCH_GO),arm64)
-  H2SPEC_ARCH := amd64
-else
-  H2SPEC_ARCH := $(ARCH_GO)
-endif
-
-H2SPEC_SHA256 := $(H2SPEC_SHA256_$(UNAME_S)_$(H2SPEC_ARCH))
-
-$(H2SPEC): | $(BINUTILS_DIR)
-	curl -sSfL -o $(BINUTILS_DIR)/h2spec.tar.gz \
-		https://github.com/summerwind/h2spec/releases/download/v$(H2SPEC_VERSION)/h2spec_$(UNAME_S)_$(H2SPEC_ARCH).tar.gz
-	$(if $(H2SPEC_SHA256),echo "$(H2SPEC_SHA256)  $(BINUTILS_DIR)/h2spec.tar.gz" | $(SHA256SUM) -c,)
-	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/h2spec.tar.gz h2spec
-	rm -f $(BINUTILS_DIR)/h2spec.tar.gz
-
-VEGETA_SHA256_linux_amd64  := e8759ce45c14e18374bdccd3ba6068197bc3a9f9b7e484db3837f701b9d12e61
-VEGETA_SHA256_linux_arm64  := 950381173a5575e25e8e086f36fc03bf65d61a2433329b48e41e1cb5e4133bba
-VEGETA_SHA256_darwin_amd64 := 4e912c83ce07db4e1e394e1cbb657f2396dff2f7ed90f03869a184cc17d0f994
-VEGETA_SHA256_darwin_arm64 := fc408e242c4f4839e6fe536dbf1130bb02f430134827f6d831bf367a0929a799
-VEGETA_SHA256 := $(VEGETA_SHA256_$(UNAME_S)_$(ARCH_GO))
-
-$(VEGETA): | $(BINUTILS_DIR)
-	curl -sSfL -o $(BINUTILS_DIR)/vegeta.tar.gz \
-		https://github.com/tsenart/vegeta/releases/download/v$(VEGETA_VERSION)/vegeta_$(VEGETA_VERSION)_$(UNAME_S)_$(ARCH_GO).tar.gz
-	$(if $(VEGETA_SHA256),echo "$(VEGETA_SHA256)  $(BINUTILS_DIR)/vegeta.tar.gz" | $(SHA256SUM) -c,)
-	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/vegeta.tar.gz vegeta
-	rm -f $(BINUTILS_DIR)/vegeta.tar.gz
-
-FORTIO_SHA256_linux_amd64  := 92da34238dee258191a9dc6691c8bc75305b308951e934e2c3b4e658db0d77d1
-FORTIO_SHA256_linux_arm64  := f66275a56ef41e9a5afb2ea8181eb53ca36b34c6d19a201b58aec17dbe95a853
-FORTIO_SHA256 := $(FORTIO_SHA256_$(UNAME_S)_$(ARCH_GO))
-
-$(FORTIO): | $(BINUTILS_DIR)
-	curl -sSfL -o $(BINUTILS_DIR)/fortio.tgz \
-		https://github.com/fortio/fortio/releases/download/v$(FORTIO_VERSION)/fortio-$(UNAME_S)_$(ARCH_GO)-$(FORTIO_VERSION).tgz
-	$(if $(FORTIO_SHA256),echo "$(FORTIO_SHA256)  $(BINUTILS_DIR)/fortio.tgz" | $(SHA256SUM) -c,)
-	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/fortio.tgz usr/bin/fortio --strip-components=2
-	rm -f $(BINUTILS_DIR)/fortio.tgz
-
-# Fortio builds are not available on GitHub for Darwin (Mac OSX).
-# On Mac, use `brew install fortio` so it is on $PATH at bench time.
-ifeq ($(UNAME_S),darwin)
-  FORTIO_DEP :=
-else
-  FORTIO_DEP := $(FORTIO)
-endif
-
-tools: $(H2SPEC) $(VEGETA) $(FORTIO_DEP)
-
-clean-tools:
-	rm -rf $(BINUTILS_DIR)
 
 # -------------------------------------------------------------------
 # Help
@@ -355,41 +117,15 @@ help:
 	@echo ""
 	@echo "Test:"
 	@echo "  test                 run all tests"
-	@echo "  test-unit            unit tests (core, filter, protocol, praxis)"
-	@echo "  test-schema   config validation + example tests"
-	@echo "  test-integration     integration tests only"
-	@echo "  test-conformance     conformance tests only"
-	@echo "  test-security        security test suite"
-	@echo "  test-security-suite  security tests only"
-	@echo "  test-resilience      resilience tests only"
-	@echo "  test-config-validation  alias for test-schema"
-	@echo "  test-config          alias for test-schema"
-	@echo "  test-smoke           smoke tests only"
-	@echo ""
-	@echo "Bench:"
-	@echo "  bench                Criterion micro-benchmarks"
+	@echo "  test-unit            unit tests (providers, filters, server)"
+	@echo "  test-integration     integration tests"
 	@echo ""
 	@echo "Quality:"
-	@echo "  lint                 clippy + rustfmt check + filter docs"
-	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
+	@echo "  lint                 clippy + rustfmt check"
 	@echo "  fmt                  format with nightly rustfmt"
+	@echo "  doc                  rustdoc with warnings"
 	@echo "  audit                cargo audit + cargo deny"
-	@echo "  coverage             HTML coverage report"
-	@echo "  coverage-check       fail if line coverage < 95%%"
 	@echo ""
 	@echo "Container:"
-	@echo "  container            build container image"
+	@echo "  container            build praxis-ai container image"
 	@echo "  container-run        run container in foreground (host network)"
-	@echo "  test-container       build test container image"
-	@echo "  test-container-run   build and run test suite in container"
-	@echo ""
-	@echo "Binutils (target/praxis-binutils/):"
-	@echo "  tools                download all external CLI tools"
-	@echo "  clean-tools          remove downloaded tools"
-	@echo ""
-	@echo "Dev Setup:"
-	@echo "  setup-hooks          install git pre-commit hook (fmt + lint)"
-	@echo ""
-	@echo "Dev tools:"
-	@echo "  run-echo             start echo server (xtask)"
-	@echo "  run-debug            start debug server (xtask)"

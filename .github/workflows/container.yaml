@@ -23,15 +23,15 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Build container image
-        run: docker build -t praxis:ci -f Containerfile .
+        run: docker build -t praxis-ai:ci -f Containerfile .
 
       - name: Run container
-        run: docker run -d --name praxis praxis:ci
+        run: docker run -d --name praxis-ai praxis-ai:ci
 
       - name: Wait for healthy
         run: |
           for i in $(seq 1 30); do
-            status=$(docker inspect --format='{{.State.Health.Status}}' praxis 2>/dev/null || echo "starting")
+            status=$(docker inspect --format='{{.State.Health.Status}}' praxis-ai 2>/dev/null || echo "starting")
             if [ "${status}" = "healthy" ]; then
               echo "Container is healthy"
               exit 0
@@ -39,10 +39,10 @@ jobs:
             sleep 2
           done
           echo "Container failed to become healthy"
-          docker inspect --format='{{json .State.Health}}' praxis
-          docker logs praxis
+          docker inspect --format='{{json .State.Health}}' praxis-ai
+          docker logs praxis-ai
           exit 1
 
       - name: Stop container
         if: always()
-        run: docker rm -f praxis
+        run: docker rm -f praxis-ai

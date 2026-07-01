@@ -19,65 +19,75 @@ WORKDIR /src
 # Cache dependency builds: copy only manifests first, then
 # create stub source files so `cargo build` resolves and
 # compiles all dependencies without the real source code.
-# See: https://shaneutt.com/blog/rust-fast-small-docker-image-builds/
+#
+# Build context is the monorepo root so we can reach both
+# ai/ and praxis/ (the AI workspace has path deps into
+# ../praxis/).
 
-COPY Cargo.toml Cargo.lock ./
-COPY core/Cargo.toml core/Cargo.toml
-COPY filter/Cargo.toml filter/Cargo.toml
-COPY filter/proto/Cargo.toml filter/proto/Cargo.toml
-COPY protocol/Cargo.toml protocol/Cargo.toml
-COPY tls/Cargo.toml tls/Cargo.toml
-COPY server/Cargo.toml server/Cargo.toml
-
-# The proto crate has a build.rs that compiles vendored .proto files,
-# so we need the full proto/ directory (not just a stub) for the
-# cache-build stage to succeed.
-COPY filter/proto/build.rs filter/proto/build.rs
-COPY filter/proto/proto filter/proto/proto
+# AI workspace manifests
+COPY ai/Cargo.toml ai/Cargo.lock ./ai/
+COPY ai/apis/Cargo.toml ./ai/apis/Cargo.toml
+COPY ai/filters/Cargo.toml ./ai/filters/Cargo.toml
+COPY ai/server/Cargo.toml ./ai/server/Cargo.toml
 
 # The server crate has a build.rs that discovers external filter
 # crates via cargo metadata for build-time auto-registration.
-COPY server/build.rs server/build.rs
+COPY ai/server/build.rs ./ai/server/build.rs
 
-# Strip workspace members not needed for the praxis binary
-# so we don't need their Cargo.toml files.
-RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d; /filter\/ext-proc/d' Cargo.toml
-RUN mkdir -p core/src \
-    filter/src \
-    filter/proto/src \
-    protocol/src \
-    tls/src \
-    server/src \
-    && echo '//! stub' > core/src/lib.rs \
-    && echo '//! stub' > filter/src/lib.rs \
-    && echo '//! stub' > filter/proto/src/lib.rs \
-    && echo '//! stub' > protocol/src/lib.rs \
-    && echo '//! stub' > tls/src/lib.rs \
-    && echo '//! stub' > server/src/lib.rs \
-    && printf '//! stub\nfn main() {}\n' > server/src/main.rs
+# Praxis dependency manifests (path deps in ../praxis/)
+COPY praxis/Cargo.toml praxis/Cargo.lock ./praxis/
+COPY praxis/core/Cargo.toml ./praxis/core/Cargo.toml
+COPY praxis/filter/Cargo.toml ./praxis/filter/Cargo.toml
+COPY praxis/filter/proto/Cargo.toml ./praxis/filter/proto/Cargo.toml
+COPY praxis/protocol/Cargo.toml ./praxis/protocol/Cargo.toml
+COPY praxis/tls/Cargo.toml ./praxis/tls/Cargo.toml
+
+# The proto crate has a build.rs that compiles vendored .proto files.
+COPY praxis/filter/proto/build.rs ./praxis/filter/proto/build.rs
+COPY praxis/filter/proto/proto ./praxis/filter/proto/proto
+
+# Strip workspace members not needed for the binary.
+RUN sed -i '/xtask/d; /tests\//d' ai/Cargo.toml
+RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d; /filter\/ext-proc/d; /server/d' praxis/Cargo.toml
+
+# Create stub source files for all crates.
+RUN mkdir -p ai/apis/src ai/filters/src ai/server/src \
+    praxis/core/src praxis/filter/src praxis/filter/proto/src \
+    praxis/protocol/src praxis/tls/src \
+    && echo '//! stub' > ai/apis/src/lib.rs \
+    && echo '//! stub' > ai/filters/src/lib.rs \
+    && echo '//! stub' > ai/server/src/lib.rs \
+    && printf '//! stub\nfn main() {}\n' > ai/server/src/main.rs \
+    && echo '//! stub' > praxis/core/src/lib.rs \
+    && echo '//! stub' > praxis/filter/src/lib.rs \
+    && echo '//! stub' > praxis/filter/proto/src/lib.rs \
+    && echo '//! stub' > praxis/protocol/src/lib.rs \
+    && echo '//! stub' > praxis/tls/src/lib.rs
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release -p praxis-proxy
+    --mount=type=cache,target=/src/ai/target \
+    cd ai && cargo build --release -p praxis-ai-proxy
 
 # ------------------------------------------------------------------------------
 # Cache Tricks
 # ------------------------------------------------------------------------------
 
-# Replace stubs with real source, then rebuild. Only the
-# project crates recompile; all dependencies are cached.
-COPY core/src core/src
-COPY filter/src filter/src
-COPY filter/proto/src filter/proto/src
-COPY protocol/src protocol/src
-COPY tls/src tls/src
-COPY server/src server/src
-COPY examples examples
+# Replace stubs with real source for both AI and praxis crates,
+# then rebuild. Only the project crates recompile; all external
+# dependencies are cached.
+COPY ai/apis/src ./ai/apis/src
+COPY ai/filters/src ./ai/filters/src
+COPY ai/server/src ./ai/server/src
+COPY ai/examples ./ai/examples
+COPY praxis/core/src ./praxis/core/src
+COPY praxis/filter/src ./praxis/filter/src
+COPY praxis/filter/proto/src ./praxis/filter/proto/src
+COPY praxis/protocol/src ./praxis/protocol/src
+COPY praxis/tls/src ./praxis/tls/src
 
-# Touch the lib/main files so cargo sees them as newer than
-# the cached stub artifacts.
-RUN find core/src filter/src filter/proto/src \
-    protocol/src tls/src server/src \
+RUN find ai/apis/src ai/filters/src ai/server/src \
+    praxis/core/src praxis/filter/src praxis/filter/proto/src \
+    praxis/protocol/src praxis/tls/src \
     -name '*.rs' -exec touch {} +
 
 # ------------------------------------------------------------------------------
@@ -85,9 +95,9 @@ RUN find core/src filter/src filter/proto/src \
 # ------------------------------------------------------------------------------
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release -p praxis-proxy \
-    && cp target/release/praxis /usr/local/bin/praxis
+    --mount=type=cache,target=/src/ai/target \
+    cd ai && cargo build --release -p praxis-ai-proxy \
+    && cp target/release/praxis-ai /usr/local/bin/praxis-ai
 
 # ------------------------------------------------------------------------------
 # Stage 2: Runtime
@@ -95,8 +105,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM alpine:3.23
 
-LABEL org.opencontainers.image.source="https://github.com/praxis-proxy/praxis" \
-    org.opencontainers.image.description="Praxis proxy server" \
+LABEL org.opencontainers.image.source="https://github.com/praxis-proxy/ai" \
+    org.opencontainers.image.description="Praxis AI proxy server" \
     org.opencontainers.image.licenses="MIT"
 
 RUN apk add --no-cache ca-certificates \
@@ -105,11 +115,7 @@ RUN apk add --no-cache ca-certificates \
     && mkdir -p /etc/praxis
 
 COPY --from=builder --chown=root:root --chmod=0555 \
-    /usr/local/bin/praxis /usr/local/bin/praxis
-
-COPY --chown=praxis:praxis --chmod=0444 \
-    examples/configs/operations/container-default.yaml \
-    /etc/praxis/config.yaml
+    /usr/local/bin/praxis-ai /usr/local/bin/praxis-ai
 
 USER praxis:praxis
 
@@ -120,4 +126,4 @@ EXPOSE 8080 9901
 HEALTHCHECK --interval=5s --timeout=3s --start-period=2s \
     CMD wget -qO- http://127.0.0.1:9901/healthy || exit 1
 
-ENTRYPOINT ["praxis", "-c", "/etc/praxis/config.yaml"]
+ENTRYPOINT ["praxis-ai"]

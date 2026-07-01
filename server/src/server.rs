@@ -31,7 +31,7 @@ use crate::pipelines::resolve_pipelines;
 /// built-in default (no file to watch).
 ///
 /// ```
-/// let path = praxis::resolve_config_path(None);
+/// let path = praxis_ai::resolve_config_path(None);
 /// // Returns None if ./praxis.yaml doesn't exist.
 /// ```
 pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
@@ -267,13 +267,13 @@ fn insecure_warn(active: bool, msg: &str) {
 /// Returns an error message when the effective UID is 0 and `allow_root` is `false`.
 ///
 /// ```
-/// let msg = praxis::check_root_privilege(false, 0);
+/// let msg = praxis_ai::check_root_privilege(false, 0);
 /// assert!(msg.is_some());
 ///
-/// let msg = praxis::check_root_privilege(true, 0);
+/// let msg = praxis_ai::check_root_privilege(true, 0);
 /// assert!(msg.is_none());
 ///
-/// let msg = praxis::check_root_privilege(false, 1000);
+/// let msg = praxis_ai::check_root_privilege(false, 1000);
 /// assert!(msg.is_none());
 /// ```
 pub fn check_root_privilege(allow_root: bool, euid: u32) -> Option<String> {

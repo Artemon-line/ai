@@ -78,6 +78,7 @@ fn configure_pipeline(
     if !kv_stores.is_empty() {
         pipeline.set_kv_stores(kv_stores.clone());
     }
+    pipeline.add_pipeline_extension(Box::new(praxis_ai_apis::store::ResponseStoreRegistry::new()));
     pipeline.apply_insecure_options(&config.insecure_options);
     Ok(())
 }

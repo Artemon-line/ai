@@ -75,8 +75,8 @@ fn active_features() -> ActiveFeatures {
     let package = metadata
         .packages
         .iter()
-        .find(|pkg| pkg.name == "praxis-proxy")
-        .expect("praxis package not found in metadata");
+        .find(|pkg| pkg.name == "praxis-ai-proxy")
+        .expect("praxis-ai package not found in metadata");
 
     let feature_names_by_env: HashMap<String, String> = package
         .features

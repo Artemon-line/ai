@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
-//! Server bootstrap for the Praxis proxy.
+//! Server bootstrap for Praxis AI.
 
 pub(crate) mod pipelines;
 pub(crate) mod reload;
@@ -18,19 +18,110 @@ pub use server::{check_root_privilege, fatal, resolve_config_path, run_server, r
 // Provides: fn register_external_filters(&mut FilterRegistry)
 include!(concat!(env!("OUT_DIR"), "/external_filters.rs"));
 
-/// Build a [`FilterRegistry`] with built-in and auto-discovered external
-/// filters.
-///
-/// External filter crates are discovered at build time via
-/// `[package.metadata.praxis-filters]` markers in their `Cargo.toml`.
-/// This is the standard registry used by the `praxis` binary; callers
-/// that need a custom registry should use [`run_server_with_registry`]
-/// instead.
+/// Build a [`FilterRegistry`] with core builtins, AI filters, and
+/// auto-discovered external filters.
 ///
 /// [`FilterRegistry`]: praxis_filter::FilterRegistry
 #[must_use]
 pub fn build_full_registry() -> praxis_filter::FilterRegistry {
     let mut registry = praxis_filter::FilterRegistry::with_builtins();
+    register_ai_filters(&mut registry);
     register_external_filters(&mut registry);
     registry
+}
+
+/// Register all AI filters into the registry.
+fn register_ai_filters(registry: &mut praxis_filter::FilterRegistry) {
+    register_agentic_filters(registry);
+    register_general_ai_filters(registry);
+    register_anthropic_filters(registry);
+    register_openai_filters(registry);
+}
+
+/// Register agentic protocol filters (A2A, MCP).
+fn register_agentic_filters(registry: &mut praxis_filter::FilterRegistry) {
+    praxis_filter::register_filters!(
+        @register registry,
+        http "a2a" => praxis_ai_filters::A2aFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "mcp" => praxis_ai_filters::McpFilter::from_config
+    );
+}
+
+/// Register general-purpose AI filters.
+fn register_general_ai_filters(registry: &mut praxis_filter::FilterRegistry) {
+    praxis_filter::register_filters!(
+        @register registry,
+        http "ai_guardrails" => praxis_ai_filters::AiGuardrailsFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "model_to_header" => praxis_ai_filters::ModelToHeaderFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "prompt_enrich" => praxis_ai_filters::PromptEnrichFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "token_usage_headers" => praxis_ai_filters::TokenUsageHeadersFilter::from_config
+    );
+}
+
+/// Register Anthropic-specific filters.
+fn register_anthropic_filters(registry: &mut praxis_filter::FilterRegistry) {
+    praxis_filter::register_filters!(
+        @register registry,
+        http "anthropic_messages_format" => praxis_ai_apis::anthropic::AnthropicMessagesFormatFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "anthropic_messages_protocol" => praxis_ai_apis::anthropic::AnthropicMessagesProtocolFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "anthropic_stream_events" => praxis_ai_apis::anthropic::AnthropicStreamEventsFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "anthropic_to_openai" => praxis_ai_apis::anthropic::AnthropicToOpenaiFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "anthropic_validate" => praxis_ai_apis::anthropic::AnthropicValidateFilter::from_config
+    );
+}
+
+/// Register OpenAI-specific filters.
+fn register_openai_filters(registry: &mut praxis_filter::FilterRegistry) {
+    praxis_filter::register_filters!(
+        @register registry,
+        http "openai_responses_format" => praxis_ai_apis::openai::ResponsesFormatFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "openai_responses_model_rewrite" => praxis_ai_apis::openai::ModelRewriteFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "openai_responses_validate" => praxis_ai_apis::openai::OpenaiResponsesValidateFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "openai_conversations" => praxis_ai_apis::openai::OpenaiConversationsFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "openai_response_store" => praxis_ai_apis::openai::ResponseStoreFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "openai_responses_rehydrate" => praxis_ai_apis::openai::RehydrateFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "responses_proxy" => praxis_ai_apis::openai::ResponsesProxyFilter::from_config
+    );
 }
