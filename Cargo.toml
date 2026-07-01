@@ -63,7 +63,7 @@ praxis-ai-apis = { version = "0.1.0", path = "apis" }
 pingora-core = { version = "0.8.2", package = "quixotic-plecostomus-core", features = ["rustls"] }
 pingora-http = { version = "0.8.2", package = "quixotic-plecostomus-http" }
 pingora-proxy = { version = "0.8.2", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
-arc-swap = "1.9.1"
+arc-swap = "1.9.2"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 cargo_metadata = "0.23.1"
