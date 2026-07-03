@@ -317,7 +317,16 @@ fn input_items_from_string_input() {
     let page = list_input_items(&record, &ListParams::default()).expect("list should succeed");
 
     assert_eq!(page.data.len(), 1, "string input should yield 1 item");
-    assert_eq!(page.data[0], json!("Hello, world!"), "item should be the string");
+    assert_eq!(
+        page.data[0],
+        json!({
+            "id": "msg_resp_1_input_0",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Hello, world!"}]
+        }),
+        "string input should be normalized to a message resource"
+    );
 }
 
 #[test]
