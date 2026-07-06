@@ -34,6 +34,7 @@ use tracing::{debug, trace};
 
 use self::rules::validate_request;
 use super::error::responses_error_rejection;
+use crate::is_event_stream_content_type;
 
 // -----------------------------------------------------------------------------
 // OpenaiResponsesValidateFilter
@@ -174,13 +175,7 @@ fn should_reformat_error(ctx: &HttpFilterContext<'_>) -> bool {
             .headers
             .get(http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| {
-                ct.split(';')
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .eq_ignore_ascii_case("text/event-stream")
-            });
+            .is_some_and(is_event_stream_content_type);
         is_error && !already_sse
     })
 }
