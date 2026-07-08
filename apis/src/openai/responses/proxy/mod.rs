@@ -109,14 +109,7 @@ impl ResponsesProxyFilter {
         state: &ResponsesState,
         streaming: bool,
     ) -> Result<Result<Vec<u8>, FilterAction>, FilterError> {
-        let mut outbound = state.request_body.clone();
-        if let Some(obj) = outbound.as_object_mut() {
-            obj.insert("input".to_owned(), serde_json::Value::Array(state.messages.clone()));
-            if obj.remove("previous_response_id").is_some() {
-                debug!("stripped previous_response_id from outbound body");
-            }
-        }
-
+        let outbound = rebuild_outbound_body(state);
         let serialized =
             serde_json::to_vec(&outbound).map_err(|e| -> FilterError { format!("responses_proxy: {e}").into() })?;
         if serialized.len() > self.config.max_body_bytes {
@@ -175,6 +168,7 @@ impl HttpFilter for ResponsesProxyFilter {
         }
 
         let Some(state) = ctx.extensions.get::<ResponsesState>() else {
+            strip_conversation_field(body);
             debug!("no ResponsesState in extensions, passthrough");
             return Ok(FilterAction::Continue);
         };
@@ -195,4 +189,43 @@ impl HttpFilter for ResponsesProxyFilter {
 
         Ok(FilterAction::Continue)
     }
+}
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+
+/// Defensively strip `conversation` from a passthrough body so it never
+/// leaks to the backend even when no [`ResponsesState`] was produced.
+fn strip_conversation_field(body: &mut Option<Bytes>) {
+    let Some(bytes) = body.as_ref() else {
+        return;
+    };
+    let Ok(mut parsed) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return;
+    };
+    if parsed
+        .as_object_mut()
+        .is_some_and(|obj| obj.remove("conversation").is_some())
+    {
+        debug!("stripped conversation from passthrough body");
+        if let Ok(serialized) = serde_json::to_vec(&parsed) {
+            *body = Some(Bytes::from(serialized));
+        }
+    }
+}
+
+/// Build the outbound JSON body from conversation state.
+fn rebuild_outbound_body(state: &ResponsesState) -> serde_json::Value {
+    let mut outbound = state.request_body.clone();
+    if let Some(obj) = outbound.as_object_mut() {
+        obj.insert("input".to_owned(), serde_json::Value::Array(state.messages.clone()));
+        if obj.remove("previous_response_id").is_some() {
+            debug!("stripped previous_response_id from outbound body");
+        }
+        if obj.remove("conversation").is_some() {
+            debug!("stripped conversation from outbound body");
+        }
+    }
+    outbound
 }
