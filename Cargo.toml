@@ -56,13 +56,13 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 wiremock = "0.6.5"
 zeroize = "1.9.0"
 
-# Praxis core dependencies (path for development, version for release)
-praxis-core = { version = "0.4.0", path = "../praxis/core", package = "praxis-proxy-core" }
-praxis-filter = { version = "0.4.0", path = "../praxis/filter", package = "praxis-proxy-filter" }
-praxis-protocol = { version = "0.4.0", path = "../praxis/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.4.0", path = "../praxis/tls", package = "praxis-proxy-tls" }
+# Praxis core dependencies
+praxis-core = { version = "0.4.0", package = "praxis-proxy-core" }
+praxis-filter = { version = "0.4.0", package = "praxis-proxy-filter" }
+praxis-protocol = { version = "0.4.0", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.4.0", package = "praxis-proxy-tls" }
+praxis = { version = "0.4.0", package = "praxis-proxy" }
 praxis-test-utils = { path = "tests/utils" }
-praxis = { path = "../praxis/server", package = "praxis-proxy" }
 
 # Praxis AI workspace dependencies
 praxis-ai-proxy = { version = "0.1.0", path = "server" }

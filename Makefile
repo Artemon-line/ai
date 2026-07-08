@@ -50,7 +50,7 @@ ifndef CONTAINER_ENGINE
 endif
 
 container: | require-container-engine
-	$(CONTAINER_ENGINE) build -t $(IMAGE):$(VERSION) -f Containerfile ..
+	$(CONTAINER_ENGINE) build -t $(IMAGE):$(VERSION) -f Containerfile .
 
 container-run: | require-container-engine
 	$(CONTAINER_ENGINE) run --rm --network=host $(IMAGE):$(VERSION) 2>&1
