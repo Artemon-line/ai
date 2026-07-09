@@ -3,7 +3,7 @@
 
 //! Unit tests for token usage extraction.
 
-use super::{TokenUsageProvider, extract_token_usage, set_token_usage};
+use super::{TokenUsageProvider, extract_token_usage, set_token_usage, streaming::extract_streaming_tokens};
 
 // -----------------------------------------------------------------------------
 // set_token_usage Tests
@@ -274,4 +274,230 @@ fn error_response_returns_none() {
     let result = extract_token_usage(TokenUsageProvider::OpenAi, json);
 
     assert!(result.is_none(), "error response should return None");
+}
+
+// -----------------------------------------------------------------------------
+// Streaming Token Extraction Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn anthropic_message_start_yields_input_tokens() {
+    let event = br#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"usage":{"input_tokens":25}}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, event);
+
+    assert_eq!(result, (Some(25), None), "message_start should yield input tokens only");
+}
+
+#[test]
+fn anthropic_message_start_with_caching() {
+    let event = br#"{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":500}}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, event);
+
+    assert_eq!(
+        result,
+        (Some(610), None),
+        "message_start should sum all input token types: 10 + 100 + 500"
+    );
+}
+
+#[test]
+fn anthropic_message_delta_yields_output_tokens() {
+    let event = br#"{"type":"message_delta","usage":{"output_tokens":42}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, event);
+
+    assert_eq!(
+        result,
+        (None, Some(42)),
+        "message_delta should yield output tokens only"
+    );
+}
+
+#[test]
+fn anthropic_content_block_delta_returns_none() {
+    let event = br#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, event);
+
+    assert_eq!(result, (None, None), "content_block_delta has no token data");
+}
+
+#[test]
+fn openai_streaming_returns_none() {
+    let event = br#"{"id":"chatcmpl-abc","choices":[{"delta":{"content":"Hi"}}]}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::OpenAi, event);
+
+    assert_eq!(
+        result,
+        (None, None),
+        "OpenAI streaming returns no data (handled by extract_token_usage)"
+    );
+}
+
+#[test]
+fn azure_streaming_returns_none() {
+    let event = br#"{"id":"chatcmpl-abc","choices":[{"delta":{"content":"Hi"}}]}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Azure, event);
+
+    assert_eq!(
+        result,
+        (None, None),
+        "Azure streaming returns no data (handled by extract_token_usage)"
+    );
+}
+
+#[test]
+fn google_streaming_returns_none() {
+    let event = br#"{"candidates":[{"content":{"parts":[{"text":"Hi"}]}}]}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Google, event);
+
+    assert_eq!(
+        result,
+        (None, None),
+        "Google streaming returns no data (handled by extract_token_usage)"
+    );
+}
+
+#[test]
+fn bedrock_converse_stream_metadata_yields_both() {
+    let event = br#"{"metadata":{"usage":{"inputTokens":15,"outputTokens":42}}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Bedrock, event);
+
+    assert_eq!(
+        result,
+        (Some(15), Some(42)),
+        "Bedrock metadata event should yield both input and output"
+    );
+}
+
+#[test]
+fn bedrock_content_block_returns_none() {
+    let event = br#"{"contentBlockDelta":{"delta":{"text":"Hi"},"contentBlockIndex":0}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Bedrock, event);
+
+    assert_eq!(result, (None, None), "Bedrock content delta has no token metadata");
+}
+
+#[test]
+fn streaming_invalid_json_returns_none() {
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, b"not json");
+
+    assert_eq!(
+        result,
+        (None, None),
+        "invalid JSON should return no data for streaming extraction"
+    );
+}
+
+#[test]
+fn streaming_empty_returns_none() {
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, b"");
+
+    assert_eq!(
+        result,
+        (None, None),
+        "empty input should return no data for streaming extraction"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// TokenUsageProvider Deserialization Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn provider_deserializes_lowercase() {
+    let providers = [
+        ("\"openai\"", TokenUsageProvider::OpenAi),
+        ("\"open_ai\"", TokenUsageProvider::OpenAi),
+        ("\"anthropic\"", TokenUsageProvider::Anthropic),
+        ("\"google\"", TokenUsageProvider::Google),
+        ("\"bedrock\"", TokenUsageProvider::Bedrock),
+        ("\"azure\"", TokenUsageProvider::Azure),
+    ];
+
+    for (json, expected) in providers {
+        let result: TokenUsageProvider =
+            serde_json::from_str(json).unwrap_or_else(|_| panic!("should deserialize {json}"));
+        assert_eq!(result, expected, "deserializing {json} should yield {expected:?}");
+    }
+}
+
+#[test]
+fn provider_rejects_unknown() {
+    let result = serde_json::from_str::<TokenUsageProvider>("\"unknown\"");
+
+    assert!(result.is_err(), "unknown provider should fail to deserialize");
+}
+
+// -----------------------------------------------------------------------------
+// Streaming Edge Cases: Missing / Mismatched Type Field
+// -----------------------------------------------------------------------------
+
+#[test]
+fn anthropic_missing_type_field_returns_none() {
+    let event = br#"{"message":{"usage":{"input_tokens":25}}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, event);
+
+    assert_eq!(
+        result,
+        (None, None),
+        "missing type field should not match message_start"
+    );
+}
+
+#[test]
+fn anthropic_wrong_type_with_usage_returns_none() {
+    let event = br#"{"type":"message_stop","message":{"usage":{"input_tokens":25}}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, event);
+
+    assert_eq!(result, (None, None), "wrong type should not match message_start");
+}
+
+#[test]
+fn anthropic_message_start_with_null_message() {
+    let event = br#"{"type":"message_start","message":null}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, event);
+
+    assert_eq!(result, (None, None), "null message should not yield tokens");
+}
+
+#[test]
+fn anthropic_message_start_with_null_usage() {
+    let event = br#"{"type":"message_start","message":{"usage":null}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Anthropic, event);
+
+    assert_eq!(result, (None, None), "null usage should not yield tokens");
+}
+
+#[test]
+fn bedrock_null_metadata() {
+    let event = br#"{"metadata":null}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Bedrock, event);
+
+    assert_eq!(result, (None, None), "null metadata should not yield tokens");
+}
+
+#[test]
+fn bedrock_null_usage_inside_metadata() {
+    let event = br#"{"metadata":{"usage":null}}"#;
+
+    let result = extract_streaming_tokens(TokenUsageProvider::Bedrock, event);
+
+    assert_eq!(
+        result,
+        (None, None),
+        "null usage inside metadata should not yield tokens"
+    );
 }
