@@ -79,7 +79,7 @@ pub(crate) struct TaskRoutingConfig {
     )]
     pub on_lookup_miss: OnLookupMiss,
 
-    /// Internal header name injected on task route hit.
+    /// Internal header name injected on task or context route hit.
     #[serde(default = "default_route_cluster_header")]
     pub route_cluster_header: String,
 
