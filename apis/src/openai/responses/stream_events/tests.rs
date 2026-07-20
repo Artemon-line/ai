@@ -193,7 +193,7 @@ async fn terminal_event_writes_response_object() {
 
     let state = ctx.extensions.get::<ResponsesState>().unwrap();
     assert_eq!(state.response_object["id"], "resp_123");
-    assert_eq!(state.output_items.len(), 1);
+    assert_eq!(state.output_items().len(), 1);
     assert_eq!(state.usage["total_tokens"], 15);
     assert_eq!(ctx.get_metadata("responses.status"), Some("completed"),);
 }
@@ -210,8 +210,8 @@ async fn output_item_added_accumulates_incrementally() {
     filter.on_response_body(&mut ctx, &mut body, false).unwrap();
 
     let state = ctx.extensions.get::<ResponsesState>().unwrap();
-    assert_eq!(state.output_items.len(), 1);
-    assert_eq!(state.output_items[0]["id"], "item_1");
+    assert_eq!(state.output_items().len(), 1);
+    assert_eq!(state.output_items()[0]["id"], "item_1");
 }
 
 #[tokio::test]
@@ -222,7 +222,7 @@ async fn terminal_event_overwrites_incremental_output() {
     let item = json!({"item": {"type": "message", "id": "item_1"}});
     let mut body1 = Some(make_sse_chunk("response.output_item.added", &item));
     filter.on_response_body(&mut ctx, &mut body1, false).unwrap();
-    assert_eq!(ctx.extensions.get::<ResponsesState>().unwrap().output_items.len(), 1);
+    assert_eq!(ctx.extensions.get::<ResponsesState>().unwrap().output_items().len(), 1);
 
     let completed = json!({
         "id": "resp_123",
@@ -240,11 +240,11 @@ async fn terminal_event_overwrites_incremental_output() {
 
     let state = ctx.extensions.get::<ResponsesState>().unwrap();
     assert_eq!(
-        state.output_items.len(),
+        state.output_items().len(),
         2,
         "terminal event should overwrite incremental output"
     );
-    assert_eq!(state.output_items[0]["id"], "item_final_1");
+    assert_eq!(state.output_items()[0]["id"], "item_final_1");
 }
 
 #[tokio::test]
@@ -289,7 +289,7 @@ async fn function_call_accumulation() {
     assert_eq!(state.tool_calls[0]["name"], "get_weather");
     assert_eq!(state.tool_calls[0]["arguments"], "{\"city\":\"NYC\"}");
     assert_eq!(state.tool_calls[0]["status"], "completed");
-    assert_eq!(state.output_items[0]["arguments"], "{\"city\":\"NYC\"}");
+    assert_eq!(state.output_items()[0]["arguments"], "{\"city\":\"NYC\"}");
 }
 
 #[tokio::test]
@@ -427,9 +427,9 @@ async fn output_item_done_replaces_by_index() {
     filter.on_response_body(&mut ctx, &mut b2, false).unwrap();
 
     let state = ctx.extensions.get::<ResponsesState>().unwrap();
-    assert_eq!(state.output_items.len(), 1, "should replace, not append");
+    assert_eq!(state.output_items().len(), 1, "should replace, not append");
     assert!(
-        state.output_items[0]["content"][0]["text"] == "final",
+        state.output_items()[0]["content"][0]["text"] == "final",
         "should have updated content"
     );
 }
@@ -453,7 +453,7 @@ async fn terminal_incomplete_sets_status() {
 
     let state = ctx.extensions.get::<ResponsesState>().unwrap();
     assert_eq!(state.response_object["id"], "resp_inc");
-    assert_eq!(state.output_items.len(), 1);
+    assert_eq!(state.output_items().len(), 1);
     assert_eq!(ctx.get_metadata("responses.status"), Some("incomplete"));
 }
 
@@ -476,7 +476,7 @@ async fn terminal_failed_sets_status() {
 
     let state = ctx.extensions.get::<ResponsesState>().unwrap();
     assert_eq!(state.response_object["id"], "resp_fail");
-    assert_eq!(state.output_items.len(), 0);
+    assert_eq!(state.output_items().len(), 0);
     assert_eq!(ctx.get_metadata("responses.status"), Some("failed"));
 }
 
@@ -496,8 +496,8 @@ async fn output_item_done_replaces_by_id() {
     filter.on_response_body(&mut ctx, &mut b2, false).unwrap();
 
     let state = ctx.extensions.get::<ResponsesState>().unwrap();
-    assert_eq!(state.output_items.len(), 1, "should replace by id, not append");
-    assert_eq!(state.output_items[0]["content"][0]["text"], "replaced");
+    assert_eq!(state.output_items().len(), 1, "should replace by id, not append");
+    assert_eq!(state.output_items()[0]["content"][0]["text"], "replaced");
 }
 
 #[tokio::test]
