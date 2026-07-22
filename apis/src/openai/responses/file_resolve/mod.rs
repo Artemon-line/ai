@@ -88,11 +88,16 @@ use crate::{
 /// part. This filter does not extract documents into backend-specific
 /// representations such as `input_text`.
 ///
+/// This filter resolves references inside Responses requests; it does
+/// not proxy client-facing Files API operations. Route `/v1/files` and
+/// its subresources to the configured Files API with the standard
+/// `router` and `load_balancer` filters.
+///
 /// # YAML
 ///
 /// ```yaml
 /// filter: openai_file_resolve
-/// files_api_url: "http://ogx:8321"
+/// files_api_url: "http://files-api:8321"
 /// allow_private_files_api_url: true
 /// allow_pre_security_callout: true
 /// ```
@@ -101,7 +106,7 @@ use crate::{
 ///
 /// ```yaml
 /// filter: openai_file_resolve
-/// files_api_url: "http://ogx:8321"
+/// files_api_url: "http://files-api:8321"
 /// allow_private_files_api_url: true
 /// allow_pre_security_callout: true
 /// forward_headers:
