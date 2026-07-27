@@ -64,12 +64,12 @@ server (praxis-ai-proxy)
   injects `ResponseStoreRegistry` as pipeline extension
 - **apis** (`praxis-ai-apis`): provider-specific API
   types (OpenAI, Anthropic), request classification,
-  response storage backends (SQLite, PostgreSQL),
-  token usage extraction, SSE parsing
+  response storage backends (SQLite, PostgreSQL), SSE
+  parsing
 - **filters** (`praxis-ai-filters`): cross-cutting AI
   filter implementations (A2A, MCP, guardrails,
   inference routing, prompt enrichment, token usage
-  header injection)
+  extraction and header injection)
 
 **Dependencies on Praxis core** (path deps to
 `../praxis`): `praxis-filter` for `HttpFilter` trait,
@@ -135,12 +135,11 @@ New capabilities require:
   SSE, model rewrite, store, rehydrate, validate, proxy
 - `apis/src/classifier/` — AI request format detection
 - `apis/src/store/` — ResponseStore trait, SQLite/Postgres
-- `apis/src/token_usage/` — Multi-provider token counting
 - `filters/src/agentic/` — A2A, MCP protocol filters
 - `filters/src/guardrails/` — AI content safety (NeMo)
 - `filters/src/inference/` — Model-to-header routing
 - `filters/src/prompt_enrich/` — Prompt enrichment
-- `filters/src/token_usage_headers.rs` — Token headers
+- `filters/src/token_usage/` — Multi-provider token counting and token headers
 
 ## Dynamic Config Reload
 
