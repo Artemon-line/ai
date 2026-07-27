@@ -57,7 +57,7 @@ curl http://127.0.0.1:8080/
 ```
 
 ```json
-{"status": "ok", "server": "praxis"}
+{"status": "ok", "server": "praxis-ai"}
 ```
 
 Ready to connect a backend? Follow the [quickstart](docs/quickstart.md), or
