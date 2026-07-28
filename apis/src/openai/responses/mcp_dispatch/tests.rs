@@ -637,9 +637,8 @@ fn process_call_result_tool_error() {
 #[test]
 fn process_call_result_transport_error() {
     let err = crate::mcp_client::McpClientError::CallTool {
-        url: "http://example.com/mcp".to_owned(),
+        url: crate::mcp_client::McpDisplayUrl::from_uri(&"http://example.com/mcp".parse().unwrap()),
         tool_name: "tool".to_owned(),
-        source: Box::new(std::io::Error::other("transport error")),
     };
     let result = process_call_result(Err(err), "c1", "srv", "tool", "{}");
     assert!(result.message["output"].as_str().unwrap().contains("Error:"));
