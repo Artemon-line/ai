@@ -10,9 +10,10 @@ use praxis_filter::FilterAction;
 use serde_json::json;
 
 use super::{
-    McpDispatchFilter, build_error_result, build_success_result, content_blocks_to_text, execute_mcp_calls,
-    execute_single_call, extract_arguments, extract_call_id, extract_mcp_tool_calls, find_approval_required,
-    find_by_encoded_name, is_mcp_tool_call, parse_call_arguments, process_call_result, resolve_tool_entry,
+    McpDispatchFilter, build_error_result, build_success_result, content_blocks_to_text, encode_function_name,
+    execute_mcp_calls, execute_single_call, extract_arguments, extract_call_id, extract_mcp_tool_calls,
+    find_approval_required, find_by_encoded_name, is_mcp_tool_call, parse_call_arguments, process_call_result,
+    resolve_tool_entry,
 };
 use crate::{
     openai::responses::{
@@ -959,5 +960,104 @@ async fn on_request_executes_and_appends_results() {
     let state = ctx.extensions.get::<ResponsesState>().unwrap();
     assert!(!state.messages.is_empty(), "should append result messages");
     assert!(!state.output_items().is_empty(), "should append output items");
+    assert!(state.tool_calls.is_empty(), "should clear executed MCP tool calls");
+}
+
+// =========================================================================
+// Resolve → Dispatch roundtrip (end-to-end data contract)
+// =========================================================================
+
+fn resolver_style_tool_map(
+    label: &str,
+    tool_name: &str,
+    server_url: &str,
+) -> HashMap<(String, String), serde_json::Value> {
+    let mut map = HashMap::new();
+    map.insert(
+        (label.to_owned(), tool_name.to_owned()),
+        json!({
+            "server_label": label,
+            "server_url": server_url,
+            "headers": null,
+            "authorization": null,
+            "require_approval": "never",
+            "tool_definition": {
+                "name": tool_name,
+                "description": "Get weather for a city",
+                "inputSchema": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }),
+    );
+    map
+}
+
+#[test]
+fn resolve_to_dispatch_encoded_name_roundtrip() {
+    let (label, tool_name, url) = ("weather", "get_weather", "http://weather.example.com/mcp");
+    let encoded = encode_function_name(label, tool_name);
+    assert_eq!(encoded, "weather__get_weather");
+
+    let tool_map = resolver_style_tool_map(label, tool_name, url);
+    let tool_calls = vec![
+        json!({"name": encoded, "call_id": "c1"}),
+        json!({"name": "plain_function", "call_id": "c2"}),
+    ];
+
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: tool_map.clone(),
+        tool_calls: tool_calls.clone(),
+        ..ResponsesState::default()
+    });
+
+    let mut body = None;
+    let result = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+    assert!(matches!(result, FilterAction::Continue));
+    assert_eq!(
+        ctx.filter_metadata.get("openai_mcp_dispatch.action"),
+        Some(&"execute_mcp".to_owned()),
+    );
+
+    let (key, entry) = find_by_encoded_name(&tool_map, &encoded).unwrap();
+    assert_eq!((key.0.as_str(), key.1.as_str()), (label, tool_name));
+    assert_eq!(entry["server_url"], url);
+
+    let mcp_calls = extract_mcp_tool_calls(&tool_calls, &tool_map);
+    assert_eq!(mcp_calls.len(), 1);
+    assert_eq!(mcp_calls[0]["name"], encoded);
+}
+
+#[tokio::test]
+async fn resolve_to_dispatch_execute_with_original_name() {
+    let label = "weather";
+    let tool_name = "get_weather";
+    let encoded_name = encode_function_name(label, tool_name);
+    let tool_map = resolver_style_tool_map(label, tool_name, "http://192.0.2.1:1/mcp");
+
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: tool_map,
+        tool_calls: vec![json!({"name": encoded_name, "call_id": "c1", "arguments": "{\"city\":\"NYC\"}"})],
+        ..ResponsesState::default()
+    });
+
+    let result = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(result, FilterAction::Continue));
+
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(!state.messages.is_empty(), "should append result messages");
+
+    let output = state.output_items();
+    assert!(!output.is_empty(), "should append output items");
+    assert_eq!(output[0]["type"], "mcp_call");
+    assert_eq!(
+        output[0]["name"], tool_name,
+        "should use original tool name, not encoded"
+    );
+    assert_eq!(output[0]["server_label"], label);
     assert!(state.tool_calls.is_empty(), "should clear executed MCP tool calls");
 }
