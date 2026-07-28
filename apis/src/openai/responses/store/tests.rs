@@ -2537,8 +2537,27 @@ conversations_table: conversations
 }
 
 #[test]
-fn postgres_config_rejects_ssl_root_cert_without_verified_ssl_mode() {
-    for ssl_mode in ["", "ssl_mode: disable", "ssl_mode: prefer", "ssl_mode: require"] {
+fn postgres_config_accepts_ssl_root_cert_without_explicit_ssl_mode() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+ssl_root_cert: /path/to/ca.pem
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "ssl_root_cert should be accepted when default ssl_mode is verify-full"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_ssl_root_cert_with_non_verified_ssl_mode() {
+    for ssl_mode in ["ssl_mode: disable", "ssl_mode: prefer", "ssl_mode: require"] {
         let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
             r#"
 backend: postgres
@@ -2575,7 +2594,7 @@ ssl_root_cert: /path/to/ca.pem
 }
 
 #[test]
-fn postgres_config_does_not_treat_mixed_case_sslmode_as_effective() {
+fn postgres_config_mixed_case_url_sslmode_falls_through_to_verified_default() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 backend: postgres
@@ -2587,8 +2606,8 @@ conversations_table: conversations
     .unwrap();
     let result = ResponseStoreFilter::from_config(&yaml);
     assert!(
-        result.is_err(),
-        "mixed-case sslmode query should not satisfy sslrootcert validation"
+        result.is_ok(),
+        "mixed-case SSLMODE is not recognized but default verify-full satisfies sslrootcert"
     );
 }
 
