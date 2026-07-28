@@ -82,6 +82,7 @@ pingora-proxy = { version = "0.8.2", package = "quixotic-plecostomus-proxy", fea
 arc-swap = "1.9.2"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
 cargo_metadata = "0.23.1"
 
 [profile.release]
