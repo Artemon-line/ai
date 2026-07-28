@@ -66,7 +66,7 @@ impl McpDisplayUrl {
     /// path) rather than the raw authority string, so URL userinfo can never
     /// reach the output. Query strings and fragments (both common credential
     /// carriers) are never appended.
-    fn from_uri(uri: &http::Uri) -> Self {
+    pub(crate) fn from_uri(uri: &http::Uri) -> Self {
         let (Some(scheme), Some(host)) = (uri.scheme_str(), uri.host()) else {
             return Self::invalid();
         };
@@ -141,17 +141,17 @@ pub(crate) enum McpClientError {
     },
 
     /// The `tools/call` request failed.
-    #[error("mcp tools/call failed for {url} tool {tool_name}: {source}")]
+    ///
+    /// The underlying transport error is deliberately not retained: its
+    /// `Display` output can echo the full request URL, credentials in userinfo
+    /// or query parameters included.
+    #[error("mcp tools/call failed for {url} tool {tool_name}")]
     CallTool {
         /// URL of the MCP server.
-        url: String,
+        url: McpDisplayUrl,
 
         /// Name of the tool that was called.
         tool_name: String,
-
-        /// Underlying error.
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     /// Timed out waiting for the MCP server.
@@ -298,10 +298,9 @@ pub(crate) async fn call_tool(
             url: display_url.clone(),
             timeout,
         })?
-        .map_err(|e| McpClientError::CallTool {
-            url: server_url.to_owned(),
+        .map_err(|_source| McpClientError::CallTool {
+            url: display_url.clone(),
             tool_name: tool_name.to_owned(),
-            source: Box::new(e),
         })
 }
 
