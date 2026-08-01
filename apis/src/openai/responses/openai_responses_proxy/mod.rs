@@ -41,6 +41,7 @@ use tracing::{debug, trace};
 
 use self::config::{ResponsesProxyConfig, build_config};
 use super::{error::responses_error_rejection, state::ResponsesState};
+use crate::json_body::{SerializedJson, serialize_json_body};
 
 // -----------------------------------------------------------------------------
 // ResponsesProxyFilter
@@ -166,13 +167,13 @@ impl HttpFilter for ResponsesProxyFilter {
         }
 
         let Some(state) = ctx.extensions.get::<ResponsesState>() else {
-            strip_conversation_field(body);
+            strip_conversation_field(body, self.name());
             debug!("no ResponsesState in extensions, passthrough");
             return Ok(FilterAction::Continue);
         };
 
         if !request_needs_rebuild(state) {
-            strip_conversation_field(body);
+            strip_conversation_field(body, self.name());
             debug!("ResponsesState does not require an outbound rewrite, passthrough");
             return Ok(FilterAction::Continue);
         }
@@ -186,7 +187,7 @@ impl HttpFilter for ResponsesProxyFilter {
             Err(action) => return Ok(action),
         };
 
-        *body = Some(Bytes::from(serialized));
+        SerializedJson::from_bytes(serialized).commit(body, self.name(), "body");
 
         Ok(FilterAction::Continue)
     }
@@ -198,7 +199,7 @@ impl HttpFilter for ResponsesProxyFilter {
 
 /// Defensively strip `conversation` from a passthrough body so it never
 /// leaks to the backend even when no [`ResponsesState`] was produced.
-fn strip_conversation_field(body: &mut Option<Bytes>) {
+fn strip_conversation_field(body: &mut Option<Bytes>, filter_name: &'static str) {
     let Some(bytes) = body.as_ref() else {
         return;
     };
@@ -210,8 +211,8 @@ fn strip_conversation_field(body: &mut Option<Bytes>) {
         .is_some_and(|obj| obj.remove("conversation").is_some())
     {
         debug!("stripped conversation from passthrough body");
-        if let Ok(serialized) = serde_json::to_vec(&parsed) {
-            *body = Some(Bytes::from(serialized));
+        if let Ok(serialized) = serialize_json_body(&parsed) {
+            serialized.commit(body, filter_name, "conversation");
         }
     }
 }
