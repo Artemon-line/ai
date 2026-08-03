@@ -158,6 +158,7 @@ fn register_openai_responses_filters(registry: &mut FilterRegistry, subrequest_c
         @register registry,
         http "openai_responses_rehydrate" => praxis_ai_apis::openai::RehydrateFilter::from_config
     );
+    register_compact(registry, subrequest_client);
     register_openai_response_filters(registry, subrequest_client);
 }
 
@@ -221,6 +222,28 @@ fn register_file_resolve(registry: &mut FilterRegistry, subrequest_client: Optio
         praxis_filter::register_filters!(
             @register registry,
             http "openai_file_resolve" => praxis_ai_apis::openai::FileResolveFilter::from_config
+        );
+    }
+}
+
+/// Register `openai_responses_compact` with the shared client when
+/// available, otherwise fall back to an isolated per-filter connector.
+#[expect(clippy::panic, reason = "matches register_filters! macro convention")]
+fn register_compact(registry: &mut FilterRegistry, subrequest_client: Option<&SubRequestClient>) {
+    if let Some(client) = subrequest_client {
+        let client = client.clone();
+        registry
+            .register(
+                "openai_responses_compact",
+                praxis_filter::FilterFactory::Http(std::sync::Arc::new(move |config| {
+                    praxis_ai_apis::openai::CompactFilter::from_config_with_client(config, client.clone())
+                })),
+            )
+            .unwrap_or_else(|_| panic!("duplicate filter name: 'openai_responses_compact'"));
+    } else {
+        praxis_filter::register_filters!(
+            @register registry,
+            http "openai_responses_compact" => praxis_ai_apis::openai::CompactFilter::from_config
         );
     }
 }
