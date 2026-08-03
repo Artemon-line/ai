@@ -68,6 +68,12 @@ see the [Praxis core filter reference][core-ref].
 |--------|-------------|
 | [`prompt_enrich`](prompt_enrich.md) | Injects statically configured messages into the `messages` array of OpenAI-compatible chat completion request bodies. |
 
+### Routing
+
+| Filter | Description |
+|--------|-------------|
+| [`intelligent_route`](intelligent_route.md) | Selects an upstream cluster from an ordered candidate configuration by matching either an inference model name or MCP tool name. |
+
 ### Time To First Token
 
 | Filter | Description |
