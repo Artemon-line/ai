@@ -44,7 +44,7 @@ pub(crate) fn reload_pipelines(
     live: &ListenerPipelines,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
-    subrequest_client: &praxis_core::subrequest::SubRequestClient,
+    reload_client: &crate::ReloadableSubRequestClient,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
@@ -55,15 +55,33 @@ pub(crate) fn reload_pipelines(
 
     let health_registry = build_health_registry(&new_config.clusters);
 
+    // Build a client carrying the new response ceiling, reusing the existing
+    // connection pool (pool/connection changes are restart-only, see
+    // `detect_subrequest_connector_changes`). Snapshot the current client first
+    // so we can roll the handle back if pipeline construction fails.
+    let old_client = reload_client.load();
     let new_ceiling = new_config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
-    let updated_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
-        subrequest_client.connector().clone(),
-        new_ceiling,
-    );
+    let updated_client =
+        praxis_core::subrequest::SubRequestClient::with_max_response_bytes(old_client.connector().clone(), new_ceiling);
 
-    let new_pipelines = match resolve_pipelines(new_config, registry, &health_registry, kv_stores, &updated_client) {
+    // Publish the new client *before* building pipelines so that client-aware
+    // filter factories (which read the handle at build time) capture the new
+    // ceiling. This is the crux of the reload fix: without the swap, rebuilt
+    // filters would keep observing the stale startup client.
+    reload_client.store(Arc::new(updated_client));
+
+    let new_pipelines = match resolve_pipelines(
+        new_config,
+        registry,
+        &health_registry,
+        kv_stores,
+        &reload_client.current(),
+    ) {
         Ok(p) => p,
         Err(e) => {
+            // Roll the handle back to the pre-reload client so a failed reload
+            // leaves observable state exactly as it was.
+            reload_client.store(old_client);
             error!(error = %e, "config reload failed: pipeline build error");
             return Err(e);
         },
@@ -338,7 +356,7 @@ mod tests {
             &live,
             &shutdown,
             &empty_kv_stores(),
-            &test_client(),
+            &test_reload_client(),
         );
 
         assert!(result.is_ok(), "valid reload should succeed");
@@ -372,7 +390,7 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
-            &test_client(),
+            &test_reload_client(),
         );
         assert!(result.is_err(), "invalid filter should return Err");
 
@@ -393,7 +411,7 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
-            &test_client(),
+            &test_reload_client(),
         )
         .unwrap();
 
@@ -416,7 +434,7 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
-            &test_client(),
+            &test_reload_client(),
         )
         .unwrap();
 
@@ -454,7 +472,7 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
-            &test_client(),
+            &test_reload_client(),
         );
         assert!(
             !old_token.is_cancelled(),
@@ -491,7 +509,7 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
-            &test_client(),
+            &test_reload_client(),
         );
         assert!(result.is_ok(), "reload with new listener should succeed");
         assert!(
@@ -674,5 +692,77 @@ filter_chains:
     /// Minimal sub-request client for tests.
     fn test_client() -> praxis_core::subrequest::SubRequestClient {
         praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None))
+    }
+
+    /// Minimal reloadable sub-request client handle for tests.
+    fn test_reload_client() -> crate::ReloadableSubRequestClient {
+        crate::ReloadableSubRequestClient::new(test_client())
+    }
+
+    /// A valid reload must publish a *new* client into the shared handle so that
+    /// filters rebuilt during the reload observe the updated response ceiling.
+    #[test]
+    fn valid_reload_swaps_client_in_handle() {
+        let (live, old_config, registry, shutdown) = setup_live_pipelines();
+        let handle = test_reload_client();
+        let before = handle.load();
+
+        let new_config = valid_config();
+        reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &shutdown,
+            &empty_kv_stores(),
+            &handle,
+        )
+        .unwrap();
+
+        let after = handle.load();
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "handle should hold a new client after a successful reload"
+        );
+    }
+
+    /// A failed reload must restore the pre-reload client into the handle so a
+    /// later good reload is not polluted by the aborted attempt.
+    #[test]
+    fn failed_reload_restores_client_in_handle() {
+        let (live, old_config, registry, shutdown) = setup_live_pipelines();
+        let handle = test_reload_client();
+        let before = handle.load();
+
+        let bad_config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: nonexistent_filter_xyz
+"#,
+        )
+        .unwrap();
+
+        let result = reload_pipelines(
+            &bad_config,
+            &old_config,
+            &registry,
+            &live,
+            &shutdown,
+            &empty_kv_stores(),
+            &handle,
+        );
+        assert!(result.is_err(), "invalid filter should return Err");
+
+        let after = handle.load();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "handle should hold the original client after a failed reload"
+        );
     }
 }

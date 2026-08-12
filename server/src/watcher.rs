@@ -62,8 +62,9 @@ pub(crate) struct WatcherParams {
     /// Token for clean watcher shutdown.
     pub(crate) shutdown: CancellationToken,
 
-    /// Shared sub-request client, preserved across reloads.
-    pub(crate) subrequest_client: praxis_core::subrequest::SubRequestClient,
+    /// Shared, swappable sub-request client handle. Preserved across reloads and
+    /// updated in place so newly built client-aware filters see the new client.
+    pub(crate) reload_client: crate::ReloadableSubRequestClient,
 }
 
 // -----------------------------------------------------------------------------
@@ -124,7 +125,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
                     &params.pipelines,
                     &params.health_shutdown,
                     &params.kv_stores,
-                    &params.subrequest_client,
+                    &params.reload_client,
                 );
             }
             () = params.shutdown.cancelled() => {
@@ -148,7 +149,7 @@ fn handle_reload(
     pipelines: &ListenerPipelines,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
-    subrequest_client: &praxis_core::subrequest::SubRequestClient,
+    reload_client: &crate::ReloadableSubRequestClient,
 ) {
     let content = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -181,7 +182,7 @@ fn handle_reload(
         pipelines,
         health_shutdown,
         kv_stores,
-        subrequest_client,
+        reload_client,
     ) {
         Ok(()) => {
             *current_config = new_config;
@@ -310,7 +311,7 @@ mod tests {
             pipelines,
             registry,
             shutdown: shutdown.clone(),
-            subrequest_client: test_client(),
+            reload_client: crate::ReloadableSubRequestClient::new(test_client()),
         });
 
         std::thread::sleep(Duration::from_millis(100));
@@ -345,7 +346,7 @@ mod tests {
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_client: test_client(),
+            reload_client: crate::ReloadableSubRequestClient::new(test_client()),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -388,7 +389,7 @@ mod tests {
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_client: test_client(),
+            reload_client: crate::ReloadableSubRequestClient::new(test_client()),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -460,7 +461,7 @@ mod tests {
             pipelines,
             registry,
             shutdown: shutdown.clone(),
-            subrequest_client: test_client(),
+            reload_client: crate::ReloadableSubRequestClient::new(test_client()),
         });
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);

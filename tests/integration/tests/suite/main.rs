@@ -53,4 +53,5 @@ mod openai_responses_format;
 mod openai_responses_model_rewrite;
 mod openai_tool_parse;
 mod prompt_enrich;
+mod reload_response_ceiling;
 mod responses_routing;

@@ -14,6 +14,7 @@ pub mod inference;
 pub mod prompt_enrich;
 mod register;
 pub mod routing;
+mod subrequest;
 mod time_to_first_token;
 mod token_usage;
 
@@ -23,6 +24,7 @@ pub use inference::ModelToHeaderFilter;
 pub use prompt_enrich::PromptEnrichFilter;
 pub use register::{build_ai_registry, register_ai_filters};
 pub use routing::IntelligentRouteFilter;
+pub use subrequest::ReloadableSubRequestClient;
 pub use time_to_first_token::TimeToFirstTokenFilter;
 pub use token_usage::{TokenCountFilter, TokenUsageHeadersFilter};
 

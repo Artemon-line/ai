@@ -60,8 +60,9 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
     let subrequest_client = create_subrequest_client(&config);
-    let registry = crate::build_full_registry(&subrequest_client);
-    boot_server(config, registry, subrequest_client, config_path)
+    let reload_client = crate::ReloadableSubRequestClient::new(subrequest_client);
+    let registry = crate::build_full_registry(&reload_client);
+    boot_server(config, registry, reload_client, config_path)
 }
 
 /// Build filter pipelines from the given registry, register protocols and run the server.
@@ -77,7 +78,8 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
     let subrequest_client = create_subrequest_client(&config);
-    boot_server(config, registry, subrequest_client, config_path)
+    let reload_client = crate::ReloadableSubRequestClient::new(subrequest_client);
+    boot_server(config, registry, reload_client, config_path)
 }
 
 /// Common server startup: enforce checks, build pipelines, register
@@ -87,7 +89,7 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
 fn boot_server(
     config: Config,
     registry: FilterRegistry,
-    subrequest_client: praxis_core::subrequest::SubRequestClient,
+    reload_client: crate::ReloadableSubRequestClient,
     config_path: Option<PathBuf>,
 ) -> ! {
     enforce_root_check(&config);
@@ -96,7 +98,7 @@ fn boot_server(
     warn_insecure_key_permissions(&config);
 
     let health_registry = build_health_registry(&config.clusters);
-    let state = build_server_state(&config, &registry, &health_registry, subrequest_client);
+    let state = build_server_state(&config, &registry, &health_registry, reload_client);
 
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
@@ -120,8 +122,10 @@ struct ServerState {
     pipelines: Arc<ListenerPipelines>,
     /// KV store registry.
     kv_stores: praxis_core::kv::KvStoreRegistry,
-    /// Shared sub-request client for filters and `iterative_request_router` step chains.
-    subrequest_client: praxis_core::subrequest::SubRequestClient,
+    /// Shared, swappable sub-request client handle for filters and
+    /// `iterative_request_router` step chains. Swapped on each reload so newly
+    /// built client-aware filters observe the current client.
+    reload_client: crate::ReloadableSubRequestClient,
     /// Health check cancellation token.
     health_shutdown: Arc<Mutex<CancellationToken>>,
 }
@@ -151,12 +155,12 @@ fn build_server_state(
     config: &Config,
     registry: &FilterRegistry,
     health_registry: &HealthRegistry,
-    subrequest_client: praxis_core::subrequest::SubRequestClient,
+    reload_client: crate::ReloadableSubRequestClient,
 ) -> ServerState {
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
 
-    let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores, &subrequest_client)
+    let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores, &reload_client.current())
         .unwrap_or_else(|e| fatal(&e));
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
@@ -165,7 +169,7 @@ fn build_server_state(
     ServerState {
         pipelines: Arc::new(pipelines),
         kv_stores,
-        subrequest_client,
+        reload_client,
         health_shutdown,
     }
 }
@@ -215,7 +219,7 @@ fn spawn_watcher(
         pipelines: state.pipelines,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),
-        subrequest_client: state.subrequest_client,
+        reload_client: state.reload_client,
     });
     Some(handle)
 }

@@ -43,10 +43,17 @@ pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn
         subrequest_connector,
         subrequest_response_ceiling,
     );
-    let registry = praxis_ai::build_full_registry(&subrequest_client);
+    let reload_client = praxis_ai::ReloadableSubRequestClient::new(subrequest_client);
+    let registry = praxis_ai::build_full_registry(&reload_client);
     let health_registry = praxis_core::health::build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    praxis_ai::resolve_pipelines(config, &registry, &health_registry, &kv_stores, &subrequest_client)?;
+    praxis_ai::resolve_pipelines(
+        config,
+        &registry,
+        &health_registry,
+        &kv_stores,
+        &reload_client.current(),
+    )?;
     Ok(())
 }
 
