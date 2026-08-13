@@ -15,12 +15,12 @@ use praxis_core::subrequest::SubRequestClient;
 
 /// A shared, atomically swappable handle to the server's [`SubRequestClient`].
 ///
-/// Client-aware filter factories capture a clone of this handle (a cheap
-/// [`Arc`] bump) and read the current client via [`current`](Self::current)
-/// **each time they build a filter**. On a hot config reload the server calls
-/// [`store`](Self::store) with a client carrying the new
-/// `body_limits.max_response_bytes` ceiling, so any filter rebuilt during that
-/// reload observes the new ceiling instead of the startup client.
+/// Client-aware filter factories capture a clone of this handle and read the
+/// current client via [`current`](Self::current) **each time they build a
+/// filter**. On a hot config reload the server calls [`store`](Self::store) with a
+/// client carrying the new `body_limits.max_response_bytes` ceiling, so any
+/// filter rebuilt during that reload observes the new ceiling instead of the
+/// startup client.
 ///
 /// This mirrors the `Arc<ArcSwap<_>>` reload idiom used elsewhere in this crate
 /// (see [`routing`](crate::routing)): readers are lock-free and in-flight work
@@ -35,20 +35,16 @@ impl ReloadableSubRequestClient {
         Self(Arc::new(ArcSwap::from_pointee(client)))
     }
 
-    /// Load the current client as a shared [`Arc`] without cloning the client.
+    /// Load the current client as a shared [`Arc`].
     ///
     /// Preferred when a reference or pointer identity is enough (e.g. reload
-    /// rollback), because it avoids cloning the client itself.
+    /// rollback).
     #[must_use]
     pub fn load(&self) -> Arc<SubRequestClient> {
         self.0.load_full()
     }
 
     /// Return an owned snapshot of the current client for filter construction.
-    ///
-    /// [`SubRequestClient`] is cheap to clone (its connector is `Arc`-backed)
-    /// and filter factories require an owned client, so this clone sits at the
-    /// construction boundary that genuinely needs ownership.
     #[must_use]
     pub fn current(&self) -> SubRequestClient {
         SubRequestClient::clone(&self.0.load())
@@ -75,11 +71,6 @@ mod tests {
     use praxis_core::subrequest::SubRequestConnector;
 
     use super::*;
-
-    /// Minimal client for handle tests.
-    fn client() -> SubRequestClient {
-        SubRequestClient::new(SubRequestConnector::new(8, None))
-    }
 
     #[test]
     fn store_swaps_in_a_new_client() {
@@ -120,7 +111,14 @@ mod tests {
             Arc::ptr_eq(&handle.load(), &stored),
             "load should return the most recently stored client"
         );
-        // Smoke check: an owned snapshot builds for filter construction.
         let _owned = handle.current();
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    fn client() -> SubRequestClient {
+        SubRequestClient::new(SubRequestConnector::new(8, None))
     }
 }

@@ -651,56 +651,6 @@ filter_chains:
         log_restart_required_changes(&old, &new);
     }
 
-    // -------------------------------------------------------------------------
-    // Test Utilities
-    // -------------------------------------------------------------------------
-
-    /// Minimal valid config for reload tests.
-    fn valid_config() -> Config {
-        Config::from_yaml(
-            r#"
-listeners:
-  - name: web
-    address: "127.0.0.1:8080"
-    filter_chains: [main]
-filter_chains:
-  - name: main
-    filters:
-      - filter: static_response
-        status: 200
-"#,
-        )
-        .unwrap()
-    }
-
-    /// Set up live pipelines, registry, and shutdown token for reload tests.
-    fn setup_live_pipelines() -> (ListenerPipelines, Config, FilterRegistry, Arc<Mutex<CancellationToken>>) {
-        let config = valid_config();
-        let registry = FilterRegistry::with_builtins();
-        let health_registry: HealthRegistry = Arc::new(HashMap::new());
-        let pipelines =
-            resolve_pipelines(&config, &registry, &health_registry, &empty_kv_stores(), &test_client()).unwrap();
-        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        (pipelines, config, registry, shutdown)
-    }
-
-    /// Empty KV store registry for tests without KV stores.
-    fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
-        praxis_core::kv::KvStoreRegistry::new()
-    }
-
-    /// Minimal sub-request client for tests.
-    fn test_client() -> praxis_core::subrequest::SubRequestClient {
-        praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None))
-    }
-
-    /// Minimal reloadable sub-request client handle for tests.
-    fn test_reload_client() -> crate::ReloadableSubRequestClient {
-        crate::ReloadableSubRequestClient::new(test_client())
-    }
-
-    /// A valid reload must publish a *new* client into the shared handle so that
-    /// filters rebuilt during the reload observe the updated response ceiling.
     #[test]
     fn valid_reload_swaps_client_in_handle() {
         let (live, old_config, registry, shutdown) = setup_live_pipelines();
@@ -726,8 +676,6 @@ filter_chains:
         );
     }
 
-    /// A failed reload must restore the pre-reload client into the handle so a
-    /// later good reload is not polluted by the aborted attempt.
     #[test]
     fn failed_reload_restores_client_in_handle() {
         let (live, old_config, registry, shutdown) = setup_live_pipelines();
@@ -764,5 +712,48 @@ filter_chains:
             Arc::ptr_eq(&before, &after),
             "handle should hold the original client after a failed reload"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    fn valid_config() -> Config {
+        Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap()
+    }
+
+    fn setup_live_pipelines() -> (ListenerPipelines, Config, FilterRegistry, Arc<Mutex<CancellationToken>>) {
+        let config = valid_config();
+        let registry = FilterRegistry::with_builtins();
+        let health_registry: HealthRegistry = Arc::new(HashMap::new());
+        let pipelines =
+            resolve_pipelines(&config, &registry, &health_registry, &empty_kv_stores(), &test_client()).unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        (pipelines, config, registry, shutdown)
+    }
+
+    fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
+        praxis_core::kv::KvStoreRegistry::new()
+    }
+
+    fn test_client() -> praxis_core::subrequest::SubRequestClient {
+        praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None))
+    }
+
+    fn test_reload_client() -> crate::ReloadableSubRequestClient {
+        crate::ReloadableSubRequestClient::new(test_client())
     }
 }
