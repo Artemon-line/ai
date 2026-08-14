@@ -9,15 +9,33 @@ use std::{
     time::Duration,
 };
 
-use praxis_test_utils::{free_port, http_send, json_post, parse_body, parse_status, start_reloadable_proxy};
+use praxis_test_utils::{
+    ReloadableProxyGuard, free_port, http_send, json_post, parse_body, parse_status, start_reloadable_proxy,
+    start_reloadable_proxy_with_registry,
+};
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// File id the stub Files API recognizes for metadata and content lookups.
 const PROBE_FILE_ID: &str = "reload-probe";
 
+/// Metadata the stub Files API returns for [`PROBE_FILE_ID`].
 const PROBE_METADATA: &str =
     r#"{"id":"reload-probe","object":"file","content_type":"text/plain","filename":"probe.txt","purpose":"user_data"}"#;
 
-const LARGE_CEILING: usize = 65_536;
+/// Size of the probe file's content callout body, 4 KiB. Chosen to sit between
+/// [`SMALL_CEILING`] and [`LARGE_CEILING`] so the same probe is admitted under
+/// the large ceiling and rejected under the small one.
+const PROBE_CONTENT_BYTES: usize = 4 * 1_024;
 
+/// Large response ceiling, 64 KiB. Comfortably above [`PROBE_CONTENT_BYTES`],
+/// so the content callout resolves and forwards.
+const LARGE_CEILING: usize = 64 * 1_024;
+
+/// Small response ceiling, 1 KiB. Below [`PROBE_CONTENT_BYTES`], so the content
+/// callout exceeds the ceiling and is rejected.
 const SMALL_CEILING: usize = 1_024;
 
 // -----------------------------------------------------------------------------
@@ -26,11 +44,38 @@ const SMALL_CEILING: usize = 1_024;
 
 #[test]
 fn tightening_ceiling_on_reload_rejects_oversized_file() {
+    assert_tightening_rejects(start_reloadable_proxy);
+}
+
+#[test]
+fn relaxing_ceiling_on_reload_admits_previously_rejected_file() {
+    assert_relaxing_admits(start_reloadable_proxy);
+}
+
+#[test]
+fn tightening_ceiling_on_reload_rejects_oversized_file_with_custom_registry() {
+    assert_tightening_rejects(start_reloadable_proxy_with_registry);
+}
+
+#[test]
+fn relaxing_ceiling_on_reload_admits_previously_rejected_file_with_custom_registry() {
+    assert_relaxing_admits(start_reloadable_proxy_with_registry);
+}
+
+// -----------------------------------------------------------------------------
+// Scenarios
+// -----------------------------------------------------------------------------
+
+/// Start with the large ceiling, reload to the small ceiling, and assert the
+/// oversized content callout is rejected only after the reload. Parameterized
+/// over the server entry point so both the built-in and custom-registry startup
+/// paths are covered.
+fn assert_tightening_rejects(start: fn(&str) -> ReloadableProxyGuard) {
     let files_api_port = start_files_api_stub();
     let inference_port = start_inference_backend();
     let proxy_port = free_port();
 
-    let guard = start_reloadable_proxy(&config_yaml(proxy_port, files_api_port, inference_port, LARGE_CEILING));
+    let guard = start(&config_yaml(proxy_port, files_api_port, inference_port, LARGE_CEILING));
 
     let before = http_send(guard.addr(), &probe_request());
     assert_eq!(
@@ -56,13 +101,15 @@ fn tightening_ceiling_on_reload_rejects_oversized_file() {
     );
 }
 
-#[test]
-fn relaxing_ceiling_on_reload_admits_previously_rejected_file() {
+/// Start with the small ceiling, reload to the large ceiling, and assert the
+/// previously rejected callout is admitted after the reload. Parameterized over
+/// the server entry point so both startup paths are covered.
+fn assert_relaxing_admits(start: fn(&str) -> ReloadableProxyGuard) {
     let files_api_port = start_files_api_stub();
     let inference_port = start_inference_backend();
     let proxy_port = free_port();
 
-    let guard = start_reloadable_proxy(&config_yaml(proxy_port, files_api_port, inference_port, SMALL_CEILING));
+    let guard = start(&config_yaml(proxy_port, files_api_port, inference_port, SMALL_CEILING));
 
     let before = http_send(guard.addr(), &probe_request());
     assert_eq!(
@@ -86,7 +133,7 @@ fn relaxing_ceiling_on_reload_admits_previously_rejected_file() {
 // -----------------------------------------------------------------------------
 
 fn probe_content() -> String {
-    "A".repeat(4096)
+    "A".repeat(PROBE_CONTENT_BYTES)
 }
 
 fn config_yaml(proxy_port: u16, files_api_port: u16, inference_port: u16, max_response_bytes: usize) -> String {

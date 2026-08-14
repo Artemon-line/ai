@@ -474,6 +474,51 @@ pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
     }
 }
 
+/// Start a hot-reload proxy through the custom-registry entry point.
+///
+/// Exercises the same path an embedder uses: build the shared
+/// [`ReloadableSubRequestClient`] handle from config, build a filter registry
+/// with that handle, then hand *both* to [`run_server_with_registry`]. This
+/// verifies client-aware filters observe reloaded ceilings even when the server
+/// is started with a caller-supplied registry.
+///
+/// Returns a guard with the listen address and config path.
+///
+/// # Panics
+///
+/// Panics if the config cannot be parsed or the server fails to start.
+///
+/// [`ReloadableSubRequestClient`]: praxis_ai::ReloadableSubRequestClient
+/// [`run_server_with_registry`]: praxis_ai::run_server_with_registry
+pub fn start_reloadable_proxy_with_registry(yaml: &str) -> ReloadableProxyGuard {
+    let config = Config::from_yaml(yaml).expect("test config should parse");
+    let addr = config
+        .listeners
+        .first()
+        .expect("config must have at least one listener")
+        .address
+        .clone();
+
+    let mut temp_file = tempfile::NamedTempFile::new().expect("failed to create temp config file");
+    std::io::Write::write_all(&mut temp_file, yaml.as_bytes()).expect("failed to write temp config");
+    let config_path = temp_file.path().to_path_buf();
+
+    let path_for_server = config_path.clone();
+    std::thread::spawn(move || {
+        let reload_client = praxis_ai::build_reload_client(&config);
+        let registry = praxis_ai::build_full_registry(&reload_client);
+        praxis_ai::run_server_with_registry(config, registry, reload_client, Some(path_for_server));
+    });
+
+    crate::net::wait::wait_for_http(&addr);
+
+    ReloadableProxyGuard {
+        addr,
+        config_path,
+        _temp_file: temp_file,
+    }
+}
+
 /// Start an HTTP proxy with a TLS listener, waiting for HTTPS readiness before returning.
 ///
 /// Uses the same server construction as [`start_proxy`] but

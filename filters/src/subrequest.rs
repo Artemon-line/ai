@@ -35,6 +35,12 @@ impl ReloadableSubRequestClient {
         Self(Arc::new(ArcSwap::from_pointee(client)))
     }
 
+    /// Return an owned snapshot of the current client for filter construction.
+    #[must_use]
+    pub fn current(&self) -> SubRequestClient {
+        SubRequestClient::clone(&self.0.load())
+    }
+
     /// Load the current client as a shared [`Arc`].
     ///
     /// Preferred when a reference or pointer identity is enough (e.g. reload
@@ -42,12 +48,6 @@ impl ReloadableSubRequestClient {
     #[must_use]
     pub fn load(&self) -> Arc<SubRequestClient> {
         self.0.load_full()
-    }
-
-    /// Return an owned snapshot of the current client for filter construction.
-    #[must_use]
-    pub fn current(&self) -> SubRequestClient {
-        SubRequestClient::clone(&self.0.load())
     }
 
     /// Atomically replace the current client.

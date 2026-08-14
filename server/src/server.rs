@@ -59,8 +59,7 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
-    let subrequest_client = create_subrequest_client(&config);
-    let reload_client = crate::ReloadableSubRequestClient::new(subrequest_client);
+    let reload_client = build_reload_client(&config);
     let registry = crate::build_full_registry(&reload_client);
     boot_server(config, registry, reload_client, config_path)
 }
@@ -69,16 +68,27 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 ///
 /// Use this variant when you need custom filters beyond the built-ins (e.g. via [`register_filters!`]).
 ///
+/// `reload_client` **must be the same handle the `registry` was built with**
+/// (see [`build_reload_client`] and [`build_full_registry`]). Client-aware
+/// filter factories capture that handle at registration time and re-read it on
+/// every build, so hot reload can only reach them through the shared handle. A
+/// mismatched handle would leave client-aware filters pinned to the startup
+/// `body_limits.max_response_bytes` ceiling after a reload.
+///
 /// Assumes tracing is already initialized. Blocks until the process is terminated; never returns.
 ///
 /// Config is owned for the server's lifetime (never returns).
 ///
 /// [`register_filters!`]: praxis_filter::register_filters
+/// [`build_full_registry`]: crate::build_full_registry
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
-    let subrequest_client = create_subrequest_client(&config);
-    let reload_client = crate::ReloadableSubRequestClient::new(subrequest_client);
+pub fn run_server_with_registry(
+    config: Config,
+    registry: FilterRegistry,
+    reload_client: crate::ReloadableSubRequestClient,
+    config_path: Option<PathBuf>,
+) -> ! {
     boot_server(config, registry, reload_client, config_path)
 }
 
@@ -128,6 +138,23 @@ struct ServerState {
     reload_client: crate::ReloadableSubRequestClient,
     /// Health check cancellation token.
     health_shutdown: Arc<Mutex<CancellationToken>>,
+}
+
+/// Build the shared [`ReloadableSubRequestClient`] handle from configuration.
+///
+/// Callers of [`run_server_with_registry`] must build their registry with the
+/// returned handle (via [`build_full_registry`] or
+/// [`register_ai_filters`]) and pass the *same* handle to the server, so that
+/// client-aware filters rebuilt on a hot config reload observe the current
+/// `body_limits.max_response_bytes` ceiling. [`run_server`] does this wiring
+/// internally.
+///
+/// [`ReloadableSubRequestClient`]: crate::ReloadableSubRequestClient
+/// [`build_full_registry`]: crate::build_full_registry
+/// [`register_ai_filters`]: praxis_ai_filters::register_ai_filters
+#[must_use]
+pub fn build_reload_client(config: &Config) -> crate::ReloadableSubRequestClient {
+    crate::ReloadableSubRequestClient::new(create_subrequest_client(config))
 }
 
 /// Create a [`SubRequestClient`] from the runtime configuration.

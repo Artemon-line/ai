@@ -36,7 +36,7 @@ pub use net::*;
 pub use proxy::{
     ProxyGuard, ProxyShutdownError, ReloadableProxyGuard, build_pipeline, custom_filter_yaml, registry_with,
     simple_proxy_yaml, start_full_proxy, start_proxy, start_proxy_no_wait, start_proxy_with_registry,
-    start_reloadable_proxy, start_tls_proxy, start_tls_proxy_no_wait,
+    start_reloadable_proxy, start_reloadable_proxy_with_registry, start_tls_proxy, start_tls_proxy_no_wait,
 };
 pub use recording::Recording;
 pub use session_replay::{
