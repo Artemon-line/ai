@@ -12,7 +12,26 @@ use std::collections::HashMap;
 use praxis_test_utils::{
     McpMockConfig, McpToolFixture, StatefulCapturingBackend, build_pipeline, example_config_path, free_port, http_send,
     json_post, parse_body, parse_status, patch_yaml, start_mcp_mock_server_with_config, start_proxy,
+    start_reloadable_proxy,
 };
+
+// -----------------------------------------------------------------------------
+// Web search reload ceiling constants
+// -----------------------------------------------------------------------------
+
+/// Large sub-request response ceiling, 64 KiB. Comfortably above
+/// [`WS_SEARCH_BODY_BYTES`], so the search callout resolves and the loop
+/// completes.
+const WS_LARGE_CEILING: usize = 64 * 1_024;
+
+/// Small sub-request response ceiling, 1 KiB. Below [`WS_SEARCH_BODY_BYTES`], so
+/// the search callout body exceeds the ceiling and is rejected.
+const WS_SMALL_CEILING: usize = 1_024;
+
+/// Size of the mock search provider's response body, 4 KiB. Chosen to sit
+/// between [`WS_SMALL_CEILING`] and [`WS_LARGE_CEILING`] so the same callout is
+/// admitted under the large ceiling and rejected under the small one.
+const WS_SEARCH_BODY_BYTES: usize = 4 * 1_024;
 
 // -----------------------------------------------------------------------------
 // Pipeline Build
@@ -373,6 +392,118 @@ fn web_search_round_trip_executes_and_re_enters_inference() {
     );
 }
 
+// -----------------------------------------------------------------------------
+// Round-Trip: Web Search callout honors a reloaded response ceiling
+// -----------------------------------------------------------------------------
+
+/// The `openai_web_search` callout must observe a `body_limits.max_response_bytes`
+/// change applied by a hot config reload. `openai_web_search` is one of the
+/// client-aware factories rebuilt against the shared
+/// `ReloadableSubRequestClient`, so a reload that tightens the ceiling must reach
+/// its search callout — the file-resolve reload tests cover the other client-aware
+/// path. Under closed failure mode a callout body that exceeds the reloaded
+/// ceiling is rejected with `status_on_error`.
+///
+/// Without the reload fix the rebuilt filter would keep the startup (large)
+/// client, the callout would still succeed, and this would stay `200`.
+///
+/// The post-reload request re-runs the first inference (a third model response,
+/// another `web_search_call`) before the tightened ceiling rejects the callout.
+#[test]
+fn web_search_callout_respects_reloaded_response_ceiling() {
+    let search_call_response = serde_json::json!({
+        "id": "resp_ws_1",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "search", "query": "Rust 2025 edition"}
+        }]
+    });
+    let message_response = serde_json::json!({
+        "id": "resp_ws_2",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Rust 2025 brings great features."}]
+        }]
+    });
+    let post_reload_search_call = serde_json::json!({
+        "id": "resp_ws_3",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "web_search_call",
+            "id": "ws_3",
+            "status": "completed",
+            "action": {"type": "search", "query": "Rust 2025 edition"}
+        }]
+    });
+
+    let model = StatefulCapturingBackend::new(vec![
+        (200, serde_json::to_string(&search_call_response).unwrap()),
+        (200, serde_json::to_string(&message_response).unwrap()),
+        (200, serde_json::to_string(&post_reload_search_call).unwrap()),
+    ])
+    .start_with_shutdown();
+
+    let search_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let search_port = search_listener.local_addr().unwrap().port();
+    spawn_sized_search_mock(search_listener, sized_search_body(WS_SEARCH_BODY_BYTES));
+
+    let proxy_port = free_port();
+    let guard = start_reloadable_proxy(&web_search_reload_yaml(
+        proxy_port,
+        model.port(),
+        search_port,
+        WS_LARGE_CEILING,
+    ));
+
+    let request_body = serde_json::json!({
+        "model": "gpt-4.1",
+        "input": "Search for Rust 2025 edition features",
+        "tools": [{"type": "web_search_preview"}]
+    });
+    let request = json_post("/v1/responses", &serde_json::to_string(&request_body).unwrap());
+
+    let before = http_send(guard.addr(), &request);
+    assert_eq!(
+        parse_status(&before),
+        200,
+        "under the large startup ceiling the search callout resolves and the loop completes"
+    );
+    let before_body: serde_json::Value = serde_json::from_str(&parse_body(&before)).expect("response should be JSON");
+    assert_eq!(
+        before_body["id"], "resp_ws_2",
+        "the loop should re-enter inference and return the final model response"
+    );
+
+    guard.reload(&web_search_reload_yaml(
+        proxy_port,
+        model.port(),
+        search_port,
+        WS_SMALL_CEILING,
+    ));
+
+    let after = http_send(guard.addr(), &request);
+    assert_eq!(
+        parse_status(&after),
+        502,
+        "after tightening the ceiling the oversized search callout must be rejected"
+    );
+    let after_body: serde_json::Value =
+        serde_json::from_str(&parse_body(&after)).expect("error response should be JSON");
+    assert_eq!(
+        after_body["error"]["type"].as_str(),
+        Some("server_error"),
+        "rejection should use the web search closed-failure error envelope"
+    );
+}
+
 fn spawn_search_mock(listener: std::net::TcpListener) {
     use std::io::{Read as _, Write as _};
     let body = serde_json::json!({
@@ -406,6 +537,63 @@ fn load_web_search_config(proxy_port: u16, model_port: u16, search_port: u16) ->
         &format!("api_key: test-key\n                base_url: http://127.0.0.1:{search_port}"),
     );
     praxis_core::config::Config::from_yaml(&yaml).expect("parse web search config")
+}
+
+/// Build a reloadable agentic-loop config YAML string with an injected
+/// `body_limits.max_response_bytes` ceiling, the web search provider pointed at
+/// the mock, and a per-test sqlite store path for isolation.
+fn web_search_reload_yaml(proxy_port: u16, model_port: u16, search_port: u16, max_response_bytes: usize) -> String {
+    let path = example_config_path("openai/responses/agentic-loop.yaml");
+    let yaml = std::fs::read_to_string(path).expect("read agentic-loop example");
+    let yaml = patch_yaml(&yaml, proxy_port, &HashMap::from([("127.0.0.1:3001", model_port)]));
+    let yaml = yaml.replace(
+        "api_key: ${WEB_SEARCH_API_KEY}",
+        &format!("api_key: test-key\n                base_url: http://127.0.0.1:{search_port}"),
+    );
+    let yaml = yaml.replace(
+        "sqlite://responses.db?mode=rwc",
+        &format!("sqlite://responses-ws-reload-{proxy_port}.db?mode=rwc"),
+    );
+    format!("body_limits:\n  max_response_bytes: {max_response_bytes}\n\n{yaml}")
+}
+
+/// A valid Brave-format search response padded to at least `min_bytes` so a
+/// tightened response ceiling can reject it while a relaxed ceiling admits it.
+fn sized_search_body(min_bytes: usize) -> String {
+    let padding = "x".repeat(min_bytes);
+    serde_json::json!({
+        "web": {
+            "results": [{
+                "title": "Rust 2025 Edition",
+                "url": "https://blog.rust-lang.org/2025",
+                "description": padding
+            }]
+        }
+    })
+    .to_string()
+}
+
+/// Spawn a search mock that serves `body` on every connection. Unlike
+/// [`spawn_search_mock`], it accepts repeated connections (one per callout across
+/// the pre- and post-reload requests) and ignores write errors, since the client
+/// aborts the read once the body exceeds a tightened ceiling.
+fn spawn_sized_search_mock(listener: std::net::TcpListener, body: String) {
+    use std::io::{Read as _, Write as _};
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0_u8; 4096];
+                let _n = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _sent = stream.write_all(response.as_bytes());
+            });
+        }
+    });
 }
 
 // -----------------------------------------------------------------------------
