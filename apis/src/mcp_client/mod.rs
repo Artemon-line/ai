@@ -20,7 +20,8 @@ mod tests;
 
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr},
+    fmt,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
 
@@ -31,6 +32,81 @@ use rmcp::{
 };
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Cloud instance-metadata IPv4 endpoints that the generic loopback,
+/// link-local, and unspecified checks do not already cover. Any request that
+/// resolves to one of these is treated as an SSRF attempt.
+const CLOUD_METADATA_IPV4: &[Ipv4Addr] = &[
+    // Alibaba Cloud ECS metadata service. Lives in 100.64.0.0/10 shared
+    // address space, so it is not flagged as link-local.
+    Ipv4Addr::new(100, 100, 100, 200),
+];
+
+// -----------------------------------------------------------------------------
+// McpDisplayUrl
+// -----------------------------------------------------------------------------
+
+/// A URL reduced to its non-secret locator parts, safe to embed in error
+/// messages and logs.
+///
+/// Only the scheme, host, optional port, and path are kept; userinfo, query,
+/// and fragment are dropped, since each of those can carry credentials.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct McpDisplayUrl(String);
+
+impl McpDisplayUrl {
+    /// Build a safe display URL from an already-parsed URI.
+    ///
+    /// Reassembled from individual components (scheme, host, optional port,
+    /// path) rather than the raw authority string, so URL userinfo can never
+    /// reach the output. Query strings and fragments (both common credential
+    /// carriers) are never appended.
+    fn from_uri(uri: &http::Uri) -> Self {
+        let (Some(scheme), Some(host)) = (uri.scheme_str(), uri.host()) else {
+            return Self::invalid();
+        };
+
+        let mut out = String::with_capacity(scheme.len() + host.len() + 16);
+        out.push_str(scheme);
+        out.push_str("://");
+        // `http::Uri::host()` can return an IPv6 literal without its brackets;
+        // put them back so the value stays a valid URL authority.
+        if host.contains(':') && !host.starts_with('[') {
+            out.push('[');
+            out.push_str(host);
+            out.push(']');
+        } else {
+            out.push_str(host);
+        }
+        if let Some(port) = uri.port_u16() {
+            out.push(':');
+            out.push_str(&port.to_string());
+        }
+        out.push_str(uri.path());
+        Self(out)
+    }
+
+    /// Opaque replacement used when a URL cannot be shown safely.
+    fn invalid() -> Self {
+        Self("<invalid MCP URL>".to_owned())
+    }
+}
+
+impl fmt::Display for McpDisplayUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Construct an [`McpClientError::SsrfBlocked`] from an already-sanitized URL
+/// and a fixed, non-sensitive reason string.
+fn ssrf_blocked(url: McpDisplayUrl, reason: &'static str) -> McpClientError {
+    McpClientError::SsrfBlocked { url, reason }
+}
+
+// -----------------------------------------------------------------------------
 // McpClientError
 // -----------------------------------------------------------------------------
 
@@ -39,33 +115,33 @@ use rmcp::{
 pub(crate) enum McpClientError {
     /// Failed to connect to the MCP server or complete the
     /// handshake.
-    #[error("mcp connection failed for {url}: {source}")]
+    ///
+    /// The underlying transport error is deliberately not retained: its
+    /// `Display` output can echo the full request URL, credentials in userinfo
+    /// or query parameters included.
+    #[error("mcp connection failed for {url}")]
     Connection {
         /// URL of the MCP server.
-        url: String,
-
-        /// Underlying error.
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
+        url: McpDisplayUrl,
     },
 
     /// The `tools/list` call failed or returned an invalid
     /// response.
-    #[error("mcp tools/list failed for {url}: {source}")]
+    ///
+    /// The underlying transport error is deliberately not retained: its
+    /// `Display` output can echo the full request URL, credentials in userinfo
+    /// or query parameters included.
+    #[error("mcp tools/list failed for {url}")]
     ListTools {
         /// URL of the MCP server.
-        url: String,
-
-        /// Underlying error.
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
+        url: McpDisplayUrl,
     },
 
     /// Timed out waiting for the MCP server.
     #[error("mcp request timed out for {url} after {timeout:?}")]
     Timeout {
         /// URL of the MCP server.
-        url: String,
+        url: McpDisplayUrl,
 
         /// Configured timeout duration.
         timeout: Duration,
@@ -83,7 +159,7 @@ pub(crate) enum McpClientError {
     #[error("mcp server {url} returned too many tools: {count} exceeds limit of {max}")]
     TooManyTools {
         /// Server URL.
-        url: String,
+        url: McpDisplayUrl,
 
         /// Actual tool count.
         count: usize,
@@ -92,12 +168,15 @@ pub(crate) enum McpClientError {
         max: usize,
     },
 
-    /// MCP server URL resolves to a blocked address.
-    #[error("mcp server URL blocked (SSRF): {0}")]
-    SsrfBlocked(
+    /// MCP server URL is invalid or resolves to a blocked address.
+    #[error("mcp server URL blocked (SSRF): {url}: {reason}")]
+    SsrfBlocked {
         /// The blocked URL.
-        String,
-    ),
+        url: McpDisplayUrl,
+
+        /// Safe explanation of why the URL was blocked.
+        reason: &'static str,
+    },
 
     /// Authorization token contains invalid header characters.
     #[error("authorization token contains invalid HTTP header characters")]
@@ -133,18 +212,17 @@ pub(crate) async fn list_tools(
         build_pinned_client(&resolved)?,
         build_transport_config(server_url, headers, authorization)?,
     );
-    let url = server_url.to_owned();
+    let display_url = resolved.display_url;
     let client = tokio::time::timeout(timeout, Box::pin(().serve(transport)))
         .await
         .map_err(|_elapsed| McpClientError::Timeout {
-            url: url.clone(),
+            url: display_url.clone(),
             timeout,
         })?
-        .map_err(|e| McpClientError::Connection {
-            url: url.clone(),
-            source: Box::new(e),
+        .map_err(|_source| McpClientError::Connection {
+            url: display_url.clone(),
         })?;
-    let tools = paginate_tools(&client, timeout, max_tools, &url).await?;
+    let tools = paginate_tools(&client, timeout, max_tools, &display_url).await?;
     tools_to_json(tools)
 }
 
@@ -159,7 +237,7 @@ async fn paginate_tools(
     client: &Peer<RoleClient>,
     timeout: Duration,
     max_tools: usize,
-    url: &str,
+    url: &McpDisplayUrl,
 ) -> Result<Vec<rmcp::model::Tool>, McpClientError> {
     let mut all_tools = Vec::new();
     let mut cursor = None;
@@ -168,17 +246,14 @@ async fn paginate_tools(
         let page = tokio::time::timeout(timeout, Box::pin(client.list_tools(Some(params))))
             .await
             .map_err(|_elapsed| McpClientError::Timeout {
-                url: url.to_owned(),
+                url: url.clone(),
                 timeout,
             })?
-            .map_err(|e| McpClientError::ListTools {
-                url: url.to_owned(),
-                source: Box::new(e),
-            })?;
+            .map_err(|_source| McpClientError::ListTools { url: url.clone() })?;
         all_tools.extend(page.tools);
         if all_tools.len() > max_tools {
             return Err(McpClientError::TooManyTools {
-                url: url.to_owned(),
+                url: url.clone(),
                 count: all_tools.len(),
                 max: max_tools,
             });
@@ -189,7 +264,7 @@ async fn paginate_tools(
         }
     }
     Err(McpClientError::TooManyTools {
-        url: url.to_owned(),
+        url: url.clone(),
         count: all_tools.len(),
         max: max_tools,
     })
@@ -273,6 +348,9 @@ pub(crate) async fn validate_mcp_url(url: &str, timeout: Duration, allow_loopbac
 /// connect-time use, eliminating DNS rebinding between
 /// validation and the actual connection.
 struct ResolvedMcpUrl {
+    /// Sanitized URL retained for diagnostics.
+    display_url: McpDisplayUrl,
+
     /// Hostname to pin (present for DNS-resolved hosts, absent
     /// for literal IPs).
     hostname: Option<String>,
@@ -293,42 +371,45 @@ async fn resolve_and_validate(
 ) -> Result<ResolvedMcpUrl, McpClientError> {
     let uri: http::Uri = url
         .parse()
-        .map_err(|_parse_err| McpClientError::SsrfBlocked(url.to_owned()))?;
+        .map_err(|_parse_err| ssrf_blocked(McpDisplayUrl::invalid(), "invalid URL"))?;
     let scheme = uri.scheme_str().unwrap_or_default();
     if scheme != "http" && scheme != "https" {
-        return Err(McpClientError::SsrfBlocked(url.to_owned()));
+        return Err(ssrf_blocked(McpDisplayUrl::invalid(), "scheme must be http or https"));
     }
+    let display_url = McpDisplayUrl::from_uri(&uri);
     if uri.authority().is_some_and(|a| a.as_str().contains('@')) {
-        return Err(McpClientError::SsrfBlocked(
-            "URL with embedded credentials is not allowed".to_owned(),
-        ));
+        return Err(ssrf_blocked(display_url, "embedded credentials are not allowed"));
     }
     let Some(host) = uri.host() else {
-        return Err(McpClientError::SsrfBlocked(url.to_owned()));
+        return Err(ssrf_blocked(display_url, "URL must include a host"));
     };
     let host = host.trim_matches(|c| c == '[' || c == ']');
     if !allow_loopback && is_blocked_hostname(host) {
-        return Err(McpClientError::SsrfBlocked(url.to_owned()));
+        return Err(ssrf_blocked(display_url, "localhost hostnames are not allowed"));
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
-        check_ip(ip, url, allow_loopback)?;
+        check_ip(ip, &display_url, allow_loopback)?;
         return Ok(ResolvedMcpUrl {
+            display_url,
             hostname: None,
             addrs: Vec::new(),
         });
     }
     let port = uri.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
-    resolve_hostname_ssrf(host, port, url, timeout, allow_loopback).await
+    resolve_hostname_ssrf(host, port, display_url, timeout, allow_loopback).await
 }
 
 /// Check a literal IP address against the SSRF block list.
-fn check_ip(ip: IpAddr, url: &str, allow_loopback: bool) -> Result<(), McpClientError> {
+fn check_ip(ip: IpAddr, url: &McpDisplayUrl, allow_loopback: bool) -> Result<(), McpClientError> {
     let ip = praxis_core::connectivity::normalize_mapped_ipv4(ip);
     if allow_loopback && ip.is_loopback() {
         return Ok(());
     }
     if is_ssrf_sensitive(&ip) {
-        return Err(McpClientError::SsrfBlocked(url.to_owned()));
+        return Err(ssrf_blocked(
+            url.clone(),
+            "address is loopback, link-local, unspecified, or cloud metadata",
+        ));
     }
     Ok(())
 }
@@ -339,31 +420,32 @@ fn check_ip(ip: IpAddr, url: &str, allow_loopback: bool) -> Result<(), McpClient
 async fn resolve_hostname_ssrf(
     host: &str,
     port: u16,
-    url: &str,
+    url: McpDisplayUrl,
     timeout: Duration,
     allow_loopback: bool,
 ) -> Result<ResolvedMcpUrl, McpClientError> {
     let addrs: Vec<SocketAddr> = tokio::time::timeout(timeout, tokio::net::lookup_host((host, port)))
         .await
         .map_err(|_elapsed| McpClientError::Timeout {
-            url: url.to_owned(),
+            url: url.clone(),
             timeout,
         })?
-        .map_err(|_dns_err| McpClientError::SsrfBlocked(url.to_owned()))?
+        .map_err(|_dns_err| ssrf_blocked(url.clone(), "DNS resolution failed"))?
         .collect();
-    for addr in &addrs {
-        let ip = praxis_core::connectivity::normalize_mapped_ipv4(addr.ip());
-        if allow_loopback && ip.is_loopback() {
-            continue;
-        }
-        if is_ssrf_sensitive(&ip) {
-            return Err(McpClientError::SsrfBlocked(url.to_owned()));
-        }
-    }
+    check_resolved_addrs(&addrs, &url, allow_loopback)?;
     Ok(ResolvedMcpUrl {
+        display_url: url,
         hostname: Some(host.to_owned()),
         addrs,
     })
+}
+
+/// Check DNS-resolved addresses against the SSRF block list.
+fn check_resolved_addrs(addrs: &[SocketAddr], url: &McpDisplayUrl, allow_loopback: bool) -> Result<(), McpClientError> {
+    for addr in addrs {
+        check_ip(addr.ip(), url, allow_loopback)?;
+    }
+    Ok(())
 }
 
 /// Build a reqwest client with resolved addresses pinned, so
@@ -378,9 +460,8 @@ fn build_pinned_client(resolved: &ResolvedMcpUrl) -> Result<reqwest::Client, Mcp
         builder = builder.resolve_to_addrs(hostname, &resolved.addrs);
     }
 
-    builder.build().map_err(|e| McpClientError::Connection {
-        url: String::new(),
-        source: Box::new(e),
+    builder.build().map_err(|_source| McpClientError::Connection {
+        url: resolved.display_url.clone(),
     })
 }
 
@@ -411,11 +492,19 @@ fn is_blocked_hostname(host: &str) -> bool {
     lower == "localhost" || lower.ends_with(".localhost")
 }
 
+/// Whether `v4` matches a known cloud instance-metadata endpoint that the
+/// generic loopback, link-local, and unspecified checks miss.
+fn is_cloud_metadata_ipv4(v4: Ipv4Addr) -> bool {
+    CLOUD_METADATA_IPV4.contains(&v4)
+}
+
 /// Loopback, link-local, unspecified, and known cloud
 /// metadata addresses are SSRF-sensitive.
 fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.is_unspecified(),
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() || is_cloud_metadata_ipv4(*v4)
+        },
         IpAddr::V6(v6) => {
             let [a, b, ..] = v6.octets();
             v6.is_loopback() || v6.is_unspecified() || (a == 0xFE && (b & 0xC0) == 0x80) || is_cloud_metadata_v6(v6)

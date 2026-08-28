@@ -13,6 +13,24 @@ async fn validate_url(url: &str) -> Result<(), McpClientError> {
     validate_mcp_url(url, TEST_TIMEOUT, false).await
 }
 
+fn display_url(url: &str) -> McpDisplayUrl {
+    McpDisplayUrl::from_uri(&url.parse().unwrap())
+}
+
+fn assert_error_uses_sanitized_url(error: &McpClientError) {
+    let message = error.to_string();
+    assert!(
+        message.contains("https://example.com:8443/mcp/tools"),
+        "sanitized endpoint should survive in: {message}"
+    );
+    for secret in ["user", "pass", "api_key", "TOPSECRET"] {
+        assert!(
+            !message.contains(secret),
+            "credential fragment {secret:?} leaked into error: {message}"
+        );
+    }
+}
+
 // =========================================================================
 // Transport Config
 // =========================================================================
@@ -171,8 +189,7 @@ fn authorization_with_invalid_chars_returns_error() {
 #[test]
 fn connection_error_display() {
     let err = McpClientError::Connection {
-        url: "http://example.com/mcp".to_owned(),
-        source: "refused".into(),
+        url: display_url("http://example.com/mcp"),
     };
     let msg = err.to_string();
     assert!(msg.contains("example.com"), "should include URL");
@@ -182,7 +199,7 @@ fn connection_error_display() {
 #[test]
 fn timeout_error_display() {
     let err = McpClientError::Timeout {
-        url: "http://example.com/mcp".to_owned(),
+        url: display_url("http://example.com/mcp"),
         timeout: Duration::from_secs(5),
     };
     let msg = err.to_string();
@@ -193,7 +210,7 @@ fn timeout_error_display() {
 #[test]
 fn too_many_tools_error_display() {
     let err = McpClientError::TooManyTools {
-        url: "http://example.com/mcp".to_owned(),
+        url: display_url("http://example.com/mcp"),
         count: 200,
         max: 128,
     };
@@ -205,8 +222,7 @@ fn too_many_tools_error_display() {
 #[test]
 fn list_tools_error_display() {
     let err = McpClientError::ListTools {
-        url: "http://example.com/mcp".to_owned(),
-        source: "protocol error".into(),
+        url: display_url("http://example.com/mcp"),
     };
     let msg = err.to_string();
     assert!(msg.contains("tools/list failed"), "should describe failure");
@@ -221,6 +237,58 @@ fn invalid_authorization_error_display() {
         msg.contains("invalid HTTP header"),
         "should describe invalid header: {msg}"
     );
+}
+
+#[test]
+fn display_url_keeps_locators_and_drops_secrets() {
+    // scheme + host + port + path survive; userinfo, query, and fragment do not.
+    let cases = [
+        (
+            "https://user:pass@example.com:8443/mcp/tools?api_key=TOPSECRET#frag",
+            "https://example.com:8443/mcp/tools",
+        ),
+        ("http://example.com/", "http://example.com/"),
+        ("https://token@host.example/path", "https://host.example/path"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(display_url(raw).to_string(), expected, "input: {raw}");
+    }
+}
+
+#[test]
+fn display_url_brackets_ipv6_and_strips_credentials() {
+    assert_eq!(
+        display_url("https://user:pass@[2001:db8::1]:8443/mcp?api_key=TOPSECRET").to_string(),
+        "https://[2001:db8::1]:8443/mcp",
+    );
+    // Bare IPv6 host, no port: brackets are still restored.
+    assert_eq!(display_url("http://[fd00::5]/x").to_string(), "http://[fd00::5]/x");
+}
+
+#[test]
+fn every_url_bearing_error_variant_is_sanitized() {
+    let url = display_url("https://user:pass@example.com:8443/mcp/tools?api_key=TOPSECRET");
+    let variants = [
+        McpClientError::Connection { url: url.clone() },
+        McpClientError::ListTools { url: url.clone() },
+        McpClientError::Timeout {
+            url: url.clone(),
+            timeout: Duration::from_secs(5),
+        },
+        McpClientError::TooManyTools {
+            url: url.clone(),
+            count: 200,
+            max: 128,
+        },
+        McpClientError::SsrfBlocked {
+            url,
+            reason: "test reason",
+        },
+    ];
+
+    for variant in &variants {
+        assert_error_uses_sanitized_url(variant);
+    }
 }
 
 // =========================================================================
@@ -258,6 +326,14 @@ async fn ssrf_blocks_link_local() {
 }
 
 #[tokio::test]
+async fn alibaba_metadata_ipv4_is_blocked() {
+    assert!(
+        validate_url("http://100.100.100.200/latest/meta-data/").await.is_err(),
+        "Alibaba Cloud metadata IPv4 must be treated as SSRF"
+    );
+}
+
+#[tokio::test]
 async fn ssrf_blocks_mapped_ipv4_loopback() {
     assert!(validate_url("http://[::ffff:127.0.0.1]/mcp").await.is_err());
 }
@@ -268,6 +344,24 @@ async fn ssrf_blocks_mapped_metadata() {
 }
 
 #[tokio::test]
+async fn alibaba_metadata_ipv4_mapped_ipv6_is_blocked() {
+    assert!(
+        validate_url("http://[::ffff:100.100.100.200]/latest/meta-data/").await.is_err(),
+        "IPv4-mapped Alibaba metadata address must be normalized then blocked"
+    );
+}
+
+#[test]
+fn alibaba_metadata_via_dns_is_blocked() {
+    let resolved = ["100.100.100.200:80".parse::<SocketAddr>().unwrap()];
+    let shown = display_url("http://metadata.example/mcp");
+    assert!(
+        check_resolved_addrs(&resolved, &shown, false).is_err(),
+        "a hostname resolving to Alibaba metadata must be blocked after DNS"
+    );
+}
+
+#[tokio::test]
 async fn ssrf_blocks_invalid_url() {
     assert!(validate_url("not-a-url").await.is_err());
 }
@@ -275,6 +369,60 @@ async fn ssrf_blocks_invalid_url() {
 #[tokio::test]
 async fn ssrf_blocks_unresolvable_hostname() {
     assert!(validate_url("http://unresolvable.invalid/mcp").await.is_err());
+}
+
+#[tokio::test]
+async fn blocked_url_errors_hide_query_and_fragment() {
+    let with_secrets = [
+        "http://unresolvable.invalid/mcp?api_key=TOPSECRET",
+        "http://127.0.0.1/admin?token=TOPSECRET",
+        "http://169.254.169.254/latest?token=TOPSECRET#FRAGMENTSECRET",
+    ];
+
+    for raw in with_secrets {
+        let message = validate_url(raw).await.unwrap_err().to_string();
+        for leaked in ["TOPSECRET", "FRAGMENTSECRET"] {
+            assert!(!message.contains(leaked), "{leaked} leaked from {raw}: {message}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn unshowable_urls_use_opaque_placeholder() {
+    let malformed = [
+        "http://exa mple.com/mcp?api_key=TOPSECRET#FRAGMENTSECRET",
+        "//user:pass@example.com/mcp?api_key=TOPSECRET#FRAGMENTSECRET",
+        "ftp://user:pass@example.com/mcp?api_key=TOPSECRET#FRAGMENTSECRET",
+    ];
+
+    for raw in malformed {
+        let message = validate_url(raw).await.unwrap_err().to_string();
+        assert!(
+            message.contains("<invalid MCP URL>"),
+            "expected opaque placeholder for {raw}: {message}"
+        );
+        for secret in ["user", "pass", "TOPSECRET", "FRAGMENTSECRET"] {
+            assert!(!message.contains(secret), "{secret} leaked from {raw}: {message}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn blocked_urls_report_actionable_reason() {
+    let expectations = [
+        ("ftp://example.com/mcp", "scheme must be http or https"),
+        ("http://user:pass@example.com/mcp", "embedded credentials are not allowed"),
+        ("http://localhost/mcp", "localhost hostnames are not allowed"),
+        (
+            "http://127.0.0.1/mcp",
+            "address is loopback, link-local, unspecified, or cloud metadata",
+        ),
+    ];
+
+    for (raw, reason) in expectations {
+        let message = validate_url(raw).await.unwrap_err().to_string();
+        assert!(message.contains(reason), "missing actionable reason for {raw}: {message}");
+    }
 }
 
 #[tokio::test]
@@ -290,11 +438,15 @@ async fn ssrf_allows_private_rfc1918() {
 }
 
 #[test]
-fn ssrf_error_display() {
-    let err = McpClientError::SsrfBlocked("http://127.0.0.1/mcp".to_owned());
+fn ssrf_blocked_display_lists_ssrf_url_and_reason() {
+    let err = McpClientError::SsrfBlocked {
+        url: display_url("http://127.0.0.1/mcp"),
+        reason: "loopback address is not allowed",
+    };
     let msg = err.to_string();
-    assert!(msg.contains("SSRF"), "should mention SSRF");
-    assert!(msg.contains("127.0.0.1"), "should include the URL");
+    for expected in ["SSRF", "127.0.0.1", "loopback address is not allowed"] {
+        assert!(msg.contains(expected), "display missing {expected:?}: {msg}");
+    }
 }
 
 #[tokio::test]
@@ -313,11 +465,18 @@ async fn ssrf_blocks_mapped_unspecified() {
 }
 
 #[tokio::test]
-async fn ssrf_blocks_url_with_userinfo() {
-    let err = validate_url("http://user:pass@example.com/mcp").await.unwrap_err();
-    let msg = err.to_string();
-    assert!(!msg.contains("pass"), "error must not leak credentials");
+async fn userinfo_urls_are_blocked_and_redacted() {
+    let msg = validate_url("http://user:pass@example.com/mcp").await.unwrap_err().to_string();
+    assert!(!msg.contains("pass"), "userinfo password must not leak: {msg}");
     assert!(validate_url("https://user@example.com/mcp").await.is_err());
+
+    let ipv6 = validate_url("http://user:pass@[::1]:8080/mcp?api_key=TOPSECRET")
+        .await
+        .unwrap_err()
+        .to_string();
+    for secret in ["user", "pass", "TOPSECRET"] {
+        assert!(!ipv6.contains(secret), "IPv6 error leaked {secret}: {ipv6}");
+    }
 }
 
 #[tokio::test]
