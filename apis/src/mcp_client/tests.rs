@@ -376,7 +376,9 @@ async fn ssrf_blocks_mapped_metadata() {
 #[tokio::test]
 async fn alibaba_metadata_ipv4_mapped_ipv6_is_blocked() {
     assert!(
-        validate_url("http://[::ffff:100.100.100.200]/latest/meta-data/").await.is_err(),
+        validate_url("http://[::ffff:100.100.100.200]/latest/meta-data/")
+            .await
+            .is_err(),
         "IPv4-mapped Alibaba metadata address must be normalized then blocked"
     );
 }
@@ -441,7 +443,10 @@ async fn unshowable_urls_use_opaque_placeholder() {
 async fn blocked_urls_report_actionable_reason() {
     let expectations = [
         ("ftp://example.com/mcp", "scheme must be http or https"),
-        ("http://user:pass@example.com/mcp", "embedded credentials are not allowed"),
+        (
+            "http://user:pass@example.com/mcp",
+            "embedded credentials are not allowed",
+        ),
         ("http://localhost/mcp", "localhost hostnames are not allowed"),
         (
             "http://127.0.0.1/mcp",
@@ -451,7 +456,10 @@ async fn blocked_urls_report_actionable_reason() {
 
     for (raw, reason) in expectations {
         let message = validate_url(raw).await.unwrap_err().to_string();
-        assert!(message.contains(reason), "missing actionable reason for {raw}: {message}");
+        assert!(
+            message.contains(reason),
+            "missing actionable reason for {raw}: {message}"
+        );
     }
 }
 
@@ -496,7 +504,10 @@ async fn ssrf_blocks_mapped_unspecified() {
 
 #[tokio::test]
 async fn userinfo_urls_are_blocked_and_redacted() {
-    let msg = validate_url("http://user:pass@example.com/mcp").await.unwrap_err().to_string();
+    let msg = validate_url("http://user:pass@example.com/mcp")
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(!msg.contains("pass"), "userinfo password must not leak: {msg}");
     assert!(validate_url("https://user@example.com/mcp").await.is_err());
 

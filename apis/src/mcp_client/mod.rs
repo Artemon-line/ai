@@ -588,9 +588,7 @@ fn is_cloud_metadata_ipv4(v4: Ipv4Addr) -> bool {
 /// known cloud metadata addresses are SSRF-sensitive.
 fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() || is_cloud_metadata_ipv4(*v4)
-        },
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() || is_cloud_metadata_ipv4(*v4),
         IpAddr::V6(v6) => {
             let [a, b, ..] = v6.octets();
             v6.is_loopback() || v6.is_unspecified() || (a == 0xFE && (b & 0xC0) == 0x80) || (a & 0xFE) == 0xFC
