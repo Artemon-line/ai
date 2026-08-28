@@ -7,7 +7,7 @@
 [![MSRV: 1.96](https://img.shields.io/badge/MSRV-1.96-brightgreen.svg)](https://blog.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Praxis AI is a programmable gateway for AI traffic.** It extends
+**Praxis AI provides the components to build an AI Gateway.** It extends
 [Praxis](https://github.com/praxis-proxy/praxis) with provider-aware filters,
 agentic protocols, response storage, guardrails, and observability—all
 configured at the proxy layer.
@@ -141,3 +141,7 @@ For larger changes, open a [feature request] and follow the
 [quickstart]: docs/quickstart.md
 [release documentation]: docs/release.md
 [security policy]: SECURITY.md
+
+## License
+
+Apache 2.0
