@@ -16,30 +16,27 @@ use praxis_test_utils::{
 
 #[test]
 fn json_rpc_routing_routes_mcp_tools() {
-    let mcp_tools_guard = start_backend_with_shutdown("mcp-tools-response");
-    let mcp_tools_port = mcp_tools_guard.port();
+    // The mcp-tools and a2a-send clusters each declare two replicas, so every
+    // example endpoint gets its own backend; collapsing replicas onto one port
+    // would make the cluster reject the config as a duplicate endpoint.
+    let mcp_tools_a_guard = start_backend_with_shutdown("mcp-tools-response");
+    let mcp_tools_b_guard = start_backend_with_shutdown("mcp-tools-response");
     let mcp_discovery_guard = start_backend_with_shutdown("mcp-discovery-response");
-    let mcp_discovery_port = mcp_discovery_guard.port();
-    let a2a_send_guard = start_backend_with_shutdown("a2a-send-response");
-    let a2a_send_port = a2a_send_guard.port();
+    let a2a_send_a_guard = start_backend_with_shutdown("a2a-send-response");
+    let a2a_send_b_guard = start_backend_with_shutdown("a2a-send-response");
     let a2a_tasks_guard = start_backend_with_shutdown("a2a-tasks-response");
-    let a2a_tasks_port = a2a_tasks_guard.port();
     let default_guard = start_backend_with_shutdown("default-response");
-    let default_port = default_guard.port();
     let proxy_port = free_port();
 
-    let config = load_example_config(
-        "json-rpc-routing.yaml",
+    let config = load_json_rpc_example_config(
         proxy_port,
-        HashMap::from([
-            ("127.0.0.1:9001", mcp_tools_port),
-            ("127.0.0.1:9002", mcp_tools_port),
-            ("127.0.0.1:9101", mcp_discovery_port),
-            ("127.0.0.1:9201", a2a_send_port),
-            ("127.0.0.1:9202", a2a_send_port),
-            ("127.0.0.1:9301", a2a_tasks_port),
-            ("127.0.0.1:9000", default_port),
-        ]),
+        mcp_tools_a_guard.port(),
+        mcp_tools_b_guard.port(),
+        mcp_discovery_guard.port(),
+        a2a_send_a_guard.port(),
+        a2a_send_b_guard.port(),
+        a2a_tasks_guard.port(),
+        default_guard.port(),
     );
     let proxy = start_proxy(&config);
 
@@ -60,30 +57,24 @@ fn json_rpc_routing_routes_mcp_tools() {
 
 #[test]
 fn json_rpc_routing_routes_a2a_send() {
-    let mcp_tools_guard = start_backend_with_shutdown("mcp-tools-response");
-    let mcp_tools_port = mcp_tools_guard.port();
+    let mcp_tools_a_guard = start_backend_with_shutdown("mcp-tools-response");
+    let mcp_tools_b_guard = start_backend_with_shutdown("mcp-tools-response");
     let mcp_discovery_guard = start_backend_with_shutdown("mcp-discovery-response");
-    let mcp_discovery_port = mcp_discovery_guard.port();
-    let a2a_send_guard = start_backend_with_shutdown("a2a-send-response");
-    let a2a_send_port = a2a_send_guard.port();
+    let a2a_send_a_guard = start_backend_with_shutdown("a2a-send-response");
+    let a2a_send_b_guard = start_backend_with_shutdown("a2a-send-response");
     let a2a_tasks_guard = start_backend_with_shutdown("a2a-tasks-response");
-    let a2a_tasks_port = a2a_tasks_guard.port();
     let default_guard = start_backend_with_shutdown("default-response");
-    let default_port = default_guard.port();
     let proxy_port = free_port();
 
-    let config = load_example_config(
-        "json-rpc-routing.yaml",
+    let config = load_json_rpc_example_config(
         proxy_port,
-        HashMap::from([
-            ("127.0.0.1:9001", mcp_tools_port),
-            ("127.0.0.1:9002", mcp_tools_port),
-            ("127.0.0.1:9101", mcp_discovery_port),
-            ("127.0.0.1:9201", a2a_send_port),
-            ("127.0.0.1:9202", a2a_send_port),
-            ("127.0.0.1:9301", a2a_tasks_port),
-            ("127.0.0.1:9000", default_port),
-        ]),
+        mcp_tools_a_guard.port(),
+        mcp_tools_b_guard.port(),
+        mcp_discovery_guard.port(),
+        a2a_send_a_guard.port(),
+        a2a_send_b_guard.port(),
+        a2a_tasks_guard.port(),
+        default_guard.port(),
     );
     let proxy = start_proxy(&config);
 
@@ -104,30 +95,24 @@ fn json_rpc_routing_routes_a2a_send() {
 
 #[test]
 fn json_rpc_routing_falls_through_to_default() {
-    let mcp_tools_guard = start_backend_with_shutdown("mcp-tools-response");
-    let mcp_tools_port = mcp_tools_guard.port();
+    let mcp_tools_a_guard = start_backend_with_shutdown("mcp-tools-response");
+    let mcp_tools_b_guard = start_backend_with_shutdown("mcp-tools-response");
     let mcp_discovery_guard = start_backend_with_shutdown("mcp-discovery-response");
-    let mcp_discovery_port = mcp_discovery_guard.port();
-    let a2a_send_guard = start_backend_with_shutdown("a2a-send-response");
-    let a2a_send_port = a2a_send_guard.port();
+    let a2a_send_a_guard = start_backend_with_shutdown("a2a-send-response");
+    let a2a_send_b_guard = start_backend_with_shutdown("a2a-send-response");
     let a2a_tasks_guard = start_backend_with_shutdown("a2a-tasks-response");
-    let a2a_tasks_port = a2a_tasks_guard.port();
     let default_guard = start_backend_with_shutdown("default-response");
-    let default_port = default_guard.port();
     let proxy_port = free_port();
 
-    let config = load_example_config(
-        "json-rpc-routing.yaml",
+    let config = load_json_rpc_example_config(
         proxy_port,
-        HashMap::from([
-            ("127.0.0.1:9001", mcp_tools_port),
-            ("127.0.0.1:9002", mcp_tools_port),
-            ("127.0.0.1:9101", mcp_discovery_port),
-            ("127.0.0.1:9201", a2a_send_port),
-            ("127.0.0.1:9202", a2a_send_port),
-            ("127.0.0.1:9301", a2a_tasks_port),
-            ("127.0.0.1:9000", default_port),
-        ]),
+        mcp_tools_a_guard.port(),
+        mcp_tools_b_guard.port(),
+        mcp_discovery_guard.port(),
+        a2a_send_a_guard.port(),
+        a2a_send_b_guard.port(),
+        a2a_tasks_guard.port(),
+        default_guard.port(),
     );
     let proxy = start_proxy(&config);
 
@@ -726,6 +711,32 @@ fn a2a_agent_card_routing_default_fallback_for_send_message() {
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+#[expect(clippy::too_many_arguments, reason = "test utility with all json-rpc example ports")]
+fn load_json_rpc_example_config(
+    proxy_port: u16,
+    mcp_tools_port_a: u16,
+    mcp_tools_port_b: u16,
+    mcp_discovery_port: u16,
+    a2a_send_port_a: u16,
+    a2a_send_port_b: u16,
+    a2a_tasks_port: u16,
+    default_port: u16,
+) -> praxis_core::config::Config {
+    load_example_config(
+        "json-rpc-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", mcp_tools_port_a),
+            ("127.0.0.1:9002", mcp_tools_port_b),
+            ("127.0.0.1:9101", mcp_discovery_port),
+            ("127.0.0.1:9201", a2a_send_port_a),
+            ("127.0.0.1:9202", a2a_send_port_b),
+            ("127.0.0.1:9301", a2a_tasks_port),
+            ("127.0.0.1:9000", default_port),
+        ]),
+    )
+}
 
 #[expect(clippy::too_many_arguments, reason = "test utility with all A2A example ports")]
 fn load_a2a_example_config(
