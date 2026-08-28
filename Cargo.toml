@@ -32,10 +32,10 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6.6", features = ["derive"] }
 dashmap = "6.2.1"
 futures = "0.3.34"
-h2 = "0.4.18"
+h2 = "0.4.19"
 http = "1.5.0"
 http-body-util = "0.1.5"
-hyper = { version = "1.11.0", features = ["http1", "server"] }
+hyper = { version = "1.11.1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
 percent-encoding = "2.3.2"
@@ -55,7 +55,7 @@ serde_json_canonicalizer = "0.3.2"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 serde_json_path = "0.7.2"
 sha2 = "0.11.0"
-syn = { version = "3.0.3", features = ["full", "extra-traits", "visit"] }
+syn = { version = "3.0.4", features = ["full", "extra-traits", "visit"] }
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "sqlite", "postgres"] }
 tempfile = "3.27.0"
@@ -74,13 +74,13 @@ wiremock = "0.6.5"
 prost = "0.14.4"
 prost-build = "0.14.4"
 prost-types = "0.14.4"
-prost-wkt-types = { version = "0.7.1", features = ["vendored-protox"] }
+prost-wkt-types = { version = "0.7.2", features = ["vendored-protox"] }
 protox = "0.9.1"
 sync_wrapper = "1.0.2"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-prost-build = { version = "0.14.6", features = ["transport"] }
-tokio-stream = "0.1.18"
+tokio-stream = "0.1.19"
 zeroize = "1.9.0"
 
 # Praxis core dependencies
