@@ -2777,8 +2777,10 @@ dependencies = [
 name = "praxis-ai-proxy"
 version = "0.2.0"
 dependencies = [
+ "bytes",
  "cargo_metadata",
  "clap",
+ "http 1.5.0",
  "nix",
  "notify",
  "praxis-ai-apis",
@@ -2789,12 +2791,14 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "praxis-proxy-tls",
+ "quixotic-plecostomus-core",
  "serde",
  "tempfile",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "yaml_serde",
 ]
 
