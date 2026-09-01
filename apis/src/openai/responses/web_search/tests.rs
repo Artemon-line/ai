@@ -304,6 +304,7 @@ api_key: "{api_key}"
 default_context_size: medium
 timeout_ms: 5000
 base_url: "{base_url}"
+allow_private_base_url: true
 "#,
     ))
     .unwrap()
