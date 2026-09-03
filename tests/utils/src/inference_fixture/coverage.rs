@@ -1228,6 +1228,7 @@ mod tests {
                 vec!["messages_to_chat_completions"],
                 vec!["messages_to_chat_completions"],
                 vec!["messages_to_chat_completions"],
+                vec!["messages_to_chat_completions"],
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
@@ -1251,6 +1252,7 @@ mod tests {
                 CoverageStatus::LiveCovered,
                 CoverageStatus::SyntheticOnly,
                 CoverageStatus::SyntheticOnly,
+                CoverageStatus::SyntheticOnly,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
@@ -1263,15 +1265,16 @@ mod tests {
                 CoverageStatus::SyntheticOnly,
             ]
         );
-        assert_eq!(report.features_total, 14);
-        assert_eq!(report.scenarios_total, 12);
-        assert_eq!(report.recordings_total, 17);
+        assert_eq!(report.features_total, 15);
+        assert_eq!(report.scenarios_total, 13);
+        assert_eq!(report.recordings_total, 18);
         assert_eq!(
             scenarios.keys().collect::<Vec<_>>(),
             vec![
                 "messages/basic-nonstream",
                 "messages/basic-stream",
                 "messages/malformed-success",
+                "messages/malformed-tool-arguments",
                 "messages/native-basic-nonstream",
                 "messages/native-basic-stream",
                 "messages/native-tool-use",
@@ -1283,7 +1286,7 @@ mod tests {
                 "responses/native-tool-call",
             ]
         );
-        assert_eq!(manifest.features.len(), 14);
+        assert_eq!(manifest.features.len(), 15);
         assert_eq!(manifest.version, 1);
         assert_eq!(
             manifest
@@ -1313,6 +1316,10 @@ mod tests {
                 (
                     &"messages.error.malformed_success".to_owned(),
                     &vec!["messages/malformed-success".to_owned()]
+                ),
+                (
+                    &"messages.response.malformed_tool_arguments".to_owned(),
+                    &vec!["messages/malformed-tool-arguments".to_owned()]
                 ),
                 (
                     &"messages.native.request".to_owned(),
@@ -1392,23 +1399,17 @@ mod tests {
                 ("vllm", CoverageStatus::LiveCovered),
             ]
         );
-        assert_eq!(
-            manifest.features[2]
-                .providers
-                .iter()
-                .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
-                .collect::<Vec<_>>(),
-            vec![("synthetic", CoverageStatus::SyntheticOnly)]
-        );
-        assert_eq!(
-            manifest.features[3]
-                .providers
-                .iter()
-                .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
-                .collect::<Vec<_>>(),
-            vec![("synthetic", CoverageStatus::SyntheticOnly)]
-        );
-        for feature in &manifest.features[4..7] {
+        for feature in &manifest.features[2..5] {
+            assert_eq!(
+                feature
+                    .providers
+                    .iter()
+                    .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
+                    .collect::<Vec<_>>(),
+                vec![("synthetic", CoverageStatus::SyntheticOnly)]
+            );
+        }
+        for feature in &manifest.features[5..8] {
             assert_eq!(
                 feature
                     .providers
@@ -1418,7 +1419,7 @@ mod tests {
                 vec![("anthropic", CoverageStatus::LiveCovered)]
             );
         }
-        for feature in &manifest.features[7..10] {
+        for feature in &manifest.features[8..11] {
             assert_eq!(
                 feature
                     .providers
@@ -1431,7 +1432,7 @@ mod tests {
                 ]
             );
         }
-        for feature in &manifest.features[10..] {
+        for feature in &manifest.features[11..] {
             assert_eq!(
                 feature
                     .providers
@@ -1488,13 +1489,27 @@ mod tests {
             429,
             &[],
         );
-        let malformed = InferenceScenario::load(&root.join("scenarios/messages/malformed-success.yaml")).unwrap();
+        let malformed_success =
+            InferenceScenario::load(&root.join("scenarios/messages/malformed-success.yaml")).unwrap();
         assert_scenario(
-            &malformed,
+            &malformed_success,
             "messages/malformed-success",
             "Malformed Chat Completions success converted to an Anthropic API error envelope.",
             &["messages.error.malformed_success"],
             "What is 2+2? Reply with just the number.",
+            false,
+            BodyKind::Json,
+            200,
+            &[],
+        );
+        let malformed_tool_arguments =
+            InferenceScenario::load(&root.join("scenarios/messages/malformed-tool-arguments.yaml")).unwrap();
+        assert_scenario(
+            &malformed_tool_arguments,
+            "messages/malformed-tool-arguments",
+            "Malformed Chat Completions tool arguments convert to an Anthropic API error envelope instead of a fabricated tool_use.",
+            &["messages.response.malformed_tool_arguments"],
+            "Use the weather tool.",
             false,
             BodyKind::Json,
             200,
