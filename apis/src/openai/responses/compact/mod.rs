@@ -52,7 +52,7 @@ use tracing::{debug, warn};
 use self::config::{CompactFilterConfig, ValidatedConfig, build_config};
 use super::{error::responses_error_rejection, state::ResponsesState};
 use crate::{
-    openai::responses::config_validation::FailureMode,
+    callout_policy::OnFailure,
     subrequest::{self, SubRequest, SubRequestClient},
 };
 
@@ -121,7 +121,7 @@ struct CompactionParams {
 /// default_model: gpt-4o-mini
 /// tiktoken_encoding: cl100k_base
 /// timeout_ms: 30000
-/// callout_failure_mode: closed
+/// on_failure: closed
 /// status_on_error: 502
 /// ```
 pub struct CompactFilter {
@@ -218,9 +218,9 @@ impl CompactFilter {
 
     /// Apply the configured open/closed policy on a callout error.
     fn on_callout_error(&self, message: &str, streaming: bool) -> Result<Option<String>, FilterAction> {
-        match self.config.callout.failure_mode {
-            FailureMode::Open => Ok(None),
-            FailureMode::Closed => Err(FilterAction::Reject(responses_error_rejection(
+        match self.config.callout.on_failure {
+            OnFailure::Open => Ok(None),
+            OnFailure::Closed => Err(FilterAction::Reject(responses_error_rejection(
                 self.config.callout.status_on_error,
                 "server_error",
                 message,

@@ -6,7 +6,7 @@
 use praxis_filter::FilterError;
 use serde::Deserialize;
 
-use crate::openai::responses::config_validation::{self, CalloutSettings, FailureMode};
+use crate::callout_policy::{self, CalloutSettings, OnFailure};
 
 /// Default callout timeout (30 seconds — summarization can be slow).
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -51,7 +51,7 @@ pub(super) struct CompactFilterConfig {
 
     /// Failure mode for the inference callout.
     #[serde(default)]
-    pub callout_failure_mode: Option<FailureMode>,
+    pub on_failure: Option<OnFailure>,
 
     /// HTTP status code to return when rejecting on error.
     #[serde(default)]
@@ -114,9 +114,9 @@ pub(super) fn build_config(raw: &CompactFilterConfig) -> Result<ValidatedConfig,
     }
 
     let timeout_ms =
-        config_validation::validate_timeout_ms("openai_responses_compact", raw.timeout_ms, DEFAULT_TIMEOUT_MS)?;
+        callout_policy::validate_timeout_ms("openai_responses_compact", raw.timeout_ms, DEFAULT_TIMEOUT_MS)?;
 
-    let status_on_error = config_validation::validate_status_on_error(
+    let status_on_error = callout_policy::validate_status_on_error(
         "openai_responses_compact",
         raw.status_on_error,
         DEFAULT_STATUS_ON_ERROR,
@@ -128,7 +128,7 @@ pub(super) fn build_config(raw: &CompactFilterConfig) -> Result<ValidatedConfig,
         tiktoken_encoding: raw.tiktoken_encoding.clone(),
         callout: CalloutSettings {
             timeout_ms,
-            failure_mode: raw.callout_failure_mode.unwrap_or(FailureMode::Closed),
+            on_failure: raw.on_failure.unwrap_or(OnFailure::Closed),
             status_on_error,
         },
     })
@@ -152,26 +152,26 @@ mod yaml_tests {
     use super::*;
 
     #[test]
-    fn callout_failure_mode_open_deserializes_from_yaml() {
+    fn on_failure_open_deserializes_from_yaml() {
         let cfg: CompactFilterConfig =
-            serde_yaml::from_str("inference_url: http://localhost/v1/chat/completions\ncallout_failure_mode: open")
+            serde_yaml::from_str("inference_url: http://localhost/v1/chat/completions\non_failure: open")
                 .expect("should deserialize");
-        assert_eq!(cfg.callout_failure_mode, Some(FailureMode::Open));
+        assert_eq!(cfg.on_failure, Some(OnFailure::Open));
     }
 
     #[test]
-    fn callout_failure_mode_closed_deserializes_from_yaml() {
+    fn on_failure_closed_deserializes_from_yaml() {
         let cfg: CompactFilterConfig =
-            serde_yaml::from_str("inference_url: http://localhost/v1/chat/completions\ncallout_failure_mode: closed")
+            serde_yaml::from_str("inference_url: http://localhost/v1/chat/completions\non_failure: closed")
                 .expect("should deserialize");
-        assert_eq!(cfg.callout_failure_mode, Some(FailureMode::Closed));
+        assert_eq!(cfg.on_failure, Some(OnFailure::Closed));
     }
 
     #[test]
-    fn callout_failure_mode_absent_defaults_to_none() {
+    fn on_failure_absent_defaults_to_none() {
         let cfg: CompactFilterConfig =
             serde_yaml::from_str("inference_url: http://localhost/v1/chat/completions").expect("should deserialize");
-        assert_eq!(cfg.callout_failure_mode, None);
+        assert_eq!(cfg.on_failure, None);
     }
 
     #[test]

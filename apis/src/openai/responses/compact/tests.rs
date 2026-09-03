@@ -4,7 +4,7 @@
 use serde_json::json;
 
 use super::*;
-use crate::openai::responses::config_validation::FailureMode;
+use crate::callout_policy::OnFailure;
 
 // =============================================================================
 // Config tests
@@ -17,7 +17,7 @@ fn base_config() -> CompactFilterConfig {
         default_model: "gpt-4o-mini".to_owned(),
         tiktoken_encoding: "cl100k_base".to_owned(),
         timeout_ms: None,
-        callout_failure_mode: None,
+        on_failure: None,
         status_on_error: None,
     }
 }
@@ -29,7 +29,7 @@ fn build_config_applies_defaults() {
     assert_eq!(cfg.default_model, "gpt-4o-mini");
     assert_eq!(cfg.tiktoken_encoding, "cl100k_base");
     assert_eq!(cfg.callout.timeout_ms, 30_000);
-    assert_eq!(cfg.callout.failure_mode, FailureMode::Closed);
+    assert_eq!(cfg.callout.on_failure, OnFailure::Closed);
     assert_eq!(cfg.callout.status_on_error, 502);
 }
 
@@ -109,11 +109,11 @@ fn build_config_accepts_o200k_base_encoding() {
 fn build_config_custom_values() {
     let mut cfg = base_config();
     cfg.timeout_ms = Some(60_000);
-    cfg.callout_failure_mode = Some(FailureMode::Open);
+    cfg.on_failure = Some(OnFailure::Open);
     cfg.status_on_error = Some(503);
     let validated = build_config(&cfg).unwrap();
     assert_eq!(validated.callout.timeout_ms, 60_000);
-    assert_eq!(validated.callout.failure_mode, FailureMode::Open);
+    assert_eq!(validated.callout.on_failure, OnFailure::Open);
     assert_eq!(validated.callout.status_on_error, 503);
 }
 
@@ -467,9 +467,9 @@ fn conversation_text_skips_empty_compaction_summary() {
 // on_callout_error: open/closed failure mode
 // =============================================================================
 
-fn make_filter(failure_mode: &str) -> CompactFilter {
+fn make_filter(on_failure: &str) -> CompactFilter {
     let yaml = serde_yaml::from_str::<serde_yaml::Value>(&format!(
-        "allow_pre_security_callout: true\ninference_url: http://localhost/v1/chat/completions\ncallout_failure_mode: {failure_mode}"
+        "allow_pre_security_callout: true\ninference_url: http://localhost/v1/chat/completions\non_failure: {on_failure}"
     ))
     .unwrap();
     let cfg: CompactFilterConfig = serde_yaml::from_value(yaml).unwrap();
@@ -517,7 +517,7 @@ fn parse_failure_closed_mode_rejects_request() {
 }
 
 // =============================================================================
-// non-2xx summarization response respects callout_failure_mode
+// non-2xx summarization response respects on_failure
 // =============================================================================
 
 #[test]
