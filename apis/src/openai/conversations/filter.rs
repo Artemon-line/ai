@@ -92,6 +92,22 @@ impl OpenaiConversationsFilter {
         }
     }
 
+    /// Build a filter around a pre-initialized store for tests.
+    ///
+    /// Pre-seeding the `OnceCell` lets tests inject a fault-injecting store
+    /// (e.g. one whose `create_conversation_items` fails) without standing up a
+    /// real database, so append-back error handling can be exercised directly.
+    #[cfg(test)]
+    pub(super) fn with_store_for_test(config: ConversationsConfig, store: Arc<dyn ConversationItemStore>) -> Self {
+        Self {
+            config,
+            // Pre-initialize the cell so `get_or_init_store` returns this store
+            // without touching a real backend. The outer `Some` marks the cell
+            // initialized; the inner `Some` is the stored (available) store.
+            store: OnceCell::new_with(Some(Some(store))),
+        }
+    }
+
     /// Build the configured store backend.
     async fn build_store(&self) -> Result<Arc<dyn ConversationItemStore>, StoreError> {
         let responses_table = self.config.responses_table();
@@ -500,9 +516,22 @@ impl HttpFilter for OpenaiConversationsFilter {
         };
 
         let conv_id = items.conversation_id;
-        if let Err(e) = self.append_items_blocking(&items.tenant_id, &conv_id, ctx, items.all_items) {
-            warn!(error = %e, conversation_id = %conv_id, "conversation append-back failed");
-        }
+        // Fail closed on lost items. Append-back runs at end-of-stream while the
+        // completed response body is still buffered (StreamBuffer), before any
+        // byte is released downstream. Under the default `failure_mode: closed`,
+        // the buffered body is never released after a persistence failure, so the
+        // client cannot observe a clean success that hides items which never
+        // persisted (#837). The exact downstream outcome is Pingora-timing-dependent
+        // — a not-yet-flushed header yields a clean 500, an already-committed one
+        // yields a 2xx followed by a reset — but either way the body is withheld.
+        // `failure_mode: open` is an explicit operator opt-out of that guarantee:
+        // the pipeline logs this error and converts it to Continue, releasing the
+        // body even though items were lost. Only pre-commit failures (item insertion
+        // and earlier) reach this `?`: a post-commit message-cache refresh failure
+        // is tolerated inside `persist_items` because the cache is a self-healing
+        // projection (see `refresh_message_cache`).
+        self.append_items_blocking(&items.tenant_id, &conv_id, ctx, items.all_items)
+            .inspect_err(|e| warn!(error = %e, conversation_id = %conv_id, "conversation append-back failed"))?;
 
         Ok(FilterAction::Continue)
     }
@@ -616,6 +645,12 @@ async fn persist_items(
         .await
         .map_err(|e| -> FilterError { Box::new(e) })?;
 
+    // Item rows are durable past this point. The message cache is a self-healing
+    // projection rebuilt from the items table on the next successful sync, so a
+    // refresh failure is not data loss and must not fail the turn: propagating it
+    // would abort a request whose items already committed and drive a client retry
+    // that re-appends the same (typically id-less) input items as duplicates
+    // (#837). Log and continue; a later successful cache-refresh re-syncs the cache.
     refresh_message_cache(store, tenant_id, conversation_id).await;
     debug!(
         conversation_id,
@@ -626,11 +661,28 @@ async fn persist_items(
 }
 
 /// Refresh the denormalized conversation message cache after item mutation.
+///
+/// The cache is a projection of the items table that `openai_responses_rehydrate`
+/// replays on the next turn. It runs *after* the item rows have committed, so it
+/// is deliberately best-effort: the sync is idempotent — it rebuilds `messages`
+/// from the durable items table — so a later successful sync re-syncs whatever this
+/// attempt left behind (a later *append* is not sufficient: its own refresh may
+/// also fail). Failing the turn here would abort a request whose
+/// items already persisted and push the client into a retry that re-appends the
+/// same items as duplicates, so a refresh failure is logged and swallowed rather
+/// than propagated (#837). A transient stale-cache window remains until the next
+/// successful sync; closing it fully (atomic item-insert + projection) is tracked
+/// separately.
 async fn refresh_message_cache(store: &dyn ConversationItemStore, tenant_id: &str, conversation_id: &str) {
     // The append-back path holds no pre-mutation cache snapshot, so it syncs with
     // `None`; the refresh then re-reads the live cache as the swap's expected value.
     if let Err(e) = handlers::sync_conversation_messages(store, tenant_id, conversation_id, None).await {
-        warn!(error = %e, conversation_id, "conversation message sync failed after append-back");
+        warn!(
+            error = %e,
+            conversation_id,
+            "conversation message cache refresh failed after append-back; items are durable and the \
+             cache re-syncs on a later successful refresh (#837)"
+        );
     }
 }
 
