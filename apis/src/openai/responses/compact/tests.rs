@@ -200,6 +200,14 @@ fn extract_compaction_config_minimum_threshold_succeeds() {
     assert_eq!(params.compact_threshold, 1000);
 }
 
+#[test]
+fn extract_compaction_config_non_string_model_returns_error() {
+    let cm = Some(json!([{"type": "compaction", "compact_threshold": 5000, "compaction_model": 42}]));
+    let err = extract_compaction_config(&cm).unwrap_err();
+    assert!(err.contains("compaction_model"));
+}
+
+
 // =============================================================================
 // build_compaction_item tests
 // =============================================================================
