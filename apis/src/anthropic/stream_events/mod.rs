@@ -203,7 +203,11 @@ fn decode_and_process_chunk(
 ) -> Result<Option<Bytes>, FilterError> {
     let combined = combine_pending_utf8(ctx, bytes);
     let Some(valid_up_to) = valid_utf8_prefix_len(ctx, combined.as_slice(), end_of_stream) else {
-        return Ok(Some(passthrough_with_line_buffer(ctx, combined)));
+        // Never mix raw upstream bytes into an Anthropic event stream.
+        ctx.filter_metadata.remove(LINE_BUFFER_KEY);
+        return Err(FilterError::from(
+            "anthropic_stream_events: upstream SSE contains malformed UTF-8",
+        ));
     };
     let Some(valid_bytes) = combined.as_slice().get(..valid_up_to) else {
         return Ok(None);
@@ -252,17 +256,6 @@ fn valid_utf8_prefix_len(ctx: &mut HttpFilterContext<'_>, combined: &[u8], end_o
     }
 }
 
-/// Preserve buffered bytes when a malformed chunk cannot be parsed as UTF-8.
-fn passthrough_with_line_buffer(ctx: &mut HttpFilterContext<'_>, bytes: CombinedUtf8Chunk<'_>) -> Bytes {
-    let Some(buffer) = ctx.filter_metadata.remove(LINE_BUFFER_KEY) else {
-        return bytes.into_bytes();
-    };
-
-    let mut output = buffer.into_bytes();
-    output.extend_from_slice(bytes.as_slice());
-    Bytes::from(output)
-}
-
 /// Combined UTF-8 chunk data, borrowed unless a pending suffix had to be prefixed.
 enum CombinedUtf8Chunk<'a> {
     /// Current chunk borrowed directly from Pingora.
@@ -278,14 +271,6 @@ impl CombinedUtf8Chunk<'_> {
         match self {
             Self::Borrowed(bytes) => bytes.as_ref(),
             Self::Owned(bytes) => bytes.as_slice(),
-        }
-    }
-
-    /// Convert into output bytes without copying borrowed `Bytes`.
-    fn into_bytes(self) -> Bytes {
-        match self {
-            Self::Borrowed(bytes) => bytes.clone(),
-            Self::Owned(bytes) => Bytes::from(bytes),
         }
     }
 }
@@ -1362,44 +1347,51 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_passes_through_without_poisoning_next_chunk() {
+    fn invalid_utf8_rejected() {
         let (filter, mut ctx) = make_filter_and_context();
 
         let mut body1 = Some(Bytes::from(vec![0xFF]));
-        drop(filter.on_response_body(&mut ctx, &mut body1, false).unwrap());
-        assert_eq!(
-            body1.unwrap().as_ref(),
-            &[0xFF],
-            "malformed UTF-8 should pass through unchanged"
+        let error = filter.on_response_body(&mut ctx, &mut body1, false).unwrap_err();
+        assert!(
+            error.to_string().contains("upstream SSE contains malformed UTF-8"),
+            "malformed UTF-8 should fail the transformed stream"
         );
         assert!(
             !ctx.filter_metadata.contains_key(UTF8_BUFFER_KEY),
             "malformed UTF-8 should not be buffered as incomplete"
         );
+    }
 
-        let chunk2 =
+    #[test]
+    fn invalid_utf8_after_stream_start_rejected() {
+        let (filter, mut ctx) = make_filter_and_context();
+
+        let chunk =
             "data: {\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"index\":0}]}\n\n";
-        let mut body2 = Some(Bytes::from(chunk2));
-        drop(filter.on_response_body(&mut ctx, &mut body2, false).unwrap());
-
-        let out = String::from_utf8(body2.unwrap().to_vec()).unwrap();
+        let mut body1 = Some(Bytes::from(chunk));
+        drop(filter.on_response_body(&mut ctx, &mut body1, false).unwrap());
         assert!(
-            out.contains("text_delta"),
-            "valid chunk after malformed UTF-8 should still transform"
+            body1.unwrap().starts_with(b"event: message_start"),
+            "setup chunk should start an Anthropic event stream"
+        );
+
+        let mut body2 = Some(Bytes::from(vec![0xFF]));
+        let error = filter.on_response_body(&mut ctx, &mut body2, false).unwrap_err();
+        assert!(
+            error.to_string().contains("upstream SSE contains malformed UTF-8"),
+            "malformed UTF-8 should fail after transformed events were emitted"
         );
     }
 
     #[test]
-    fn truncated_utf8_at_end_of_stream_passes_through() {
+    fn truncated_utf8_at_end_of_stream_rejected() {
         let (filter, mut ctx) = make_filter_and_context();
 
         let mut body = Some(Bytes::from(vec![0xE2, 0x82]));
-        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
-
-        assert_eq!(
-            body.unwrap().as_ref(),
-            &[0xE2, 0x82],
-            "truncated final UTF-8 should pass through rather than being buffered"
+        let error = filter.on_response_body(&mut ctx, &mut body, true).unwrap_err();
+        assert!(
+            error.to_string().contains("upstream SSE contains malformed UTF-8"),
+            "truncated final UTF-8 should fail the transformed stream"
         );
         assert!(
             !ctx.filter_metadata.contains_key(UTF8_BUFFER_KEY),
@@ -1408,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_utf8_flushed_by_none_end_of_stream_body() {
+    fn pending_utf8_rejected_by_none_end_of_stream_body() {
         let (filter, mut ctx) = make_filter_and_context();
 
         let mut body1 = Some(Bytes::from(vec![0xE2]));
@@ -1419,21 +1411,19 @@ mod tests {
         );
 
         let mut body2 = None;
-        drop(filter.on_response_body(&mut ctx, &mut body2, true).unwrap());
-
-        assert_eq!(
-            body2.unwrap().as_ref(),
-            &[0xE2],
-            "missing final body should flush pending incomplete UTF-8"
+        let error = filter.on_response_body(&mut ctx, &mut body2, true).unwrap_err();
+        assert!(
+            error.to_string().contains("upstream SSE contains malformed UTF-8"),
+            "missing final body should reject pending incomplete UTF-8"
         );
         assert!(
             !ctx.filter_metadata.contains_key(UTF8_BUFFER_KEY),
-            "flushed pending UTF-8 should clear the buffer"
+            "rejected pending UTF-8 should clear the buffer"
         );
     }
 
     #[test]
-    fn malformed_utf8_flushes_partial_sse_buffer() {
+    fn malformed_utf8_discards_partial_sse_buffer() {
         let (filter, mut ctx) = make_filter_and_context();
 
         let mut chunk1 = Vec::new();
@@ -1445,16 +1435,14 @@ mod tests {
         assert_stream_buffers_present(&ctx, true);
 
         let mut body2 = Some(Bytes::from(vec![0xFF]));
-        drop(filter.on_response_body(&mut ctx, &mut body2, false).unwrap());
-
-        let output = body2.unwrap();
+        let error = filter.on_response_body(&mut ctx, &mut body2, false).unwrap_err();
         assert!(
-            output.starts_with(b"data: {\"id\":\"c1\""),
-            "malformed UTF-8 should flush previously buffered SSE data"
+            error.to_string().contains("upstream SSE contains malformed UTF-8"),
+            "malformed UTF-8 should fail the transformed stream"
         );
         assert!(
-            output.ends_with(&[0xE2, 0xFF]),
-            "malformed UTF-8 output should include buffered and current malformed bytes"
+            !ctx.filter_metadata.contains_key(LINE_BUFFER_KEY),
+            "malformed UTF-8 should discard buffered SSE data"
         );
         assert_stream_buffers_present(&ctx, false);
     }
