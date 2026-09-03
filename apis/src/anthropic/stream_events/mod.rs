@@ -52,6 +52,14 @@ const TOOL_BLOCK_INDEX_SUFFIX: &str = ".index";
 /// Metadata key suffix tracking whether a tool call's content block is open.
 const TOOL_BLOCK_OPEN_SUFFIX: &str = ".open";
 
+/// Metadata key counting distinct tool-call content blocks opened so far.
+///
+/// Each opened block pins per-block state (index and open/closed flag)
+/// for the response's lifetime; this count bounds that growth against
+/// `max_tool_blocks`. The trailing token is `tool_block_count`, not
+/// `tool_block.<key>`, so it never matches [`TOOL_BLOCK_KEY_PREFIX`].
+const TOOL_BLOCK_COUNT_KEY: &str = "anthropic_stream.tool_block_count";
+
 /// Metadata key for the finish reason from the upstream provider.
 const FINISH_REASON_KEY: &str = "anthropic_stream.finish_reason";
 
@@ -92,6 +100,7 @@ const ARMED_KEY: &str = "anthropic_stream.armed";
 /// ```yaml
 /// filter: anthropic_stream_events
 /// max_partial_event_bytes: 10485760
+/// max_tool_blocks: 10000
 /// ```
 pub struct AnthropicStreamEventsFilter {
     /// Parsed and validated configuration.
@@ -108,6 +117,28 @@ impl AnthropicStreamEventsFilter {
         let cfg: AnthropicStreamEventsConfig = parse_filter_config("anthropic_stream_events", config)?;
         let validated = build_config(cfg)?;
         Ok(Box::new(Self { config: validated }))
+    }
+
+    /// Decode and transform one response body chunk under the filter's
+    /// configured partial-event and tool-block limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if a partial SSE event or the retained
+    /// tool-call block count exceeds its configured limit.
+    fn process_response_chunk(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        bytes: &Bytes,
+        end_of_stream: bool,
+    ) -> Result<Option<Bytes>, FilterError> {
+        decode_and_process_chunk(
+            ctx,
+            bytes,
+            end_of_stream,
+            self.config.max_partial_event_bytes,
+            self.config.max_tool_blocks,
+        )
     }
 }
 
@@ -167,8 +198,8 @@ impl HttpFilter for AnthropicStreamEventsFilter {
 
         let Some(bytes) = body.as_ref() else {
             if end_of_stream {
-                let empty = Bytes::new();
-                let output = decode_and_process_chunk(ctx, &empty, true, self.config.max_partial_event_bytes)?
+                let output = self
+                    .process_response_chunk(ctx, &Bytes::new(), true)?
                     .unwrap_or_default();
                 if !output.is_empty() {
                     *body = Some(output);
@@ -177,8 +208,7 @@ impl HttpFilter for AnthropicStreamEventsFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let Some(output) = decode_and_process_chunk(ctx, bytes, end_of_stream, self.config.max_partial_event_bytes)?
-        else {
+        let Some(output) = self.process_response_chunk(ctx, bytes, end_of_stream)? else {
             *body = Some(Bytes::new());
             return Ok(FilterAction::Continue);
         };
@@ -200,6 +230,7 @@ fn decode_and_process_chunk(
     bytes: &Bytes,
     end_of_stream: bool,
     max_partial_event_bytes: usize,
+    max_tool_blocks: usize,
 ) -> Result<Option<Bytes>, FilterError> {
     let combined = combine_pending_utf8(ctx, bytes);
     let Some(valid_up_to) = valid_utf8_prefix_len(ctx, combined.as_slice(), end_of_stream) else {
@@ -220,7 +251,7 @@ fn decode_and_process_chunk(
         return Ok(None);
     }
 
-    process_sse_chunk(ctx, chunk_str, end_of_stream, max_partial_event_bytes).map(Some)
+    process_sse_chunk(ctx, chunk_str, end_of_stream, max_partial_event_bytes, max_tool_blocks).map(Some)
 }
 
 /// Prefix any incomplete UTF-8 bytes retained from the previous chunk.
@@ -287,6 +318,7 @@ fn process_sse_chunk(
     chunk_str: &str,
     end_of_stream: bool,
     max_partial_event_bytes: usize,
+    max_tool_blocks: usize,
 ) -> Result<Bytes, FilterError> {
     let leftover = ctx.filter_metadata.get(LINE_BUFFER_KEY).cloned().unwrap_or_default();
     let combined = format!("{leftover}{chunk_str}");
@@ -307,7 +339,7 @@ fn process_sse_chunk(
 
     while let Some((event_block, rest)) = remaining.split_once("\n\n") {
         remaining = rest;
-        process_event_block(ctx, event_block, &mut output);
+        process_event_block(ctx, event_block, &mut output, max_tool_blocks)?;
     }
 
     let to_buffer = if pending_cr {
@@ -395,7 +427,12 @@ fn is_streaming_request(ctx: &HttpFilterContext<'_>) -> bool {
 /// Collects all `data` fields into one newline-delimited payload before
 /// processing it. Accepts bare `data`, `data: value`, and `data:value`
 /// per the SSE specification.
-fn process_event_block(ctx: &mut HttpFilterContext<'_>, block: &str, output: &mut Vec<u8>) {
+fn process_event_block(
+    ctx: &mut HttpFilterContext<'_>,
+    block: &str,
+    output: &mut Vec<u8>,
+    max_tool_blocks: usize,
+) -> Result<(), FilterError> {
     let mut event_data = None::<Cow<'_, str>>;
 
     for line in block.lines() {
@@ -421,9 +458,11 @@ fn process_event_block(ctx: &mut HttpFilterContext<'_>, block: &str, output: &mu
         if data == OPENAI_DONE_SENTINEL {
             emit_done(ctx, output);
         } else if let Ok(chunk) = serde_json::from_str::<Value>(&data) {
-            transform_chunk(ctx, &chunk, output);
+            transform_chunk(ctx, &chunk, output, max_tool_blocks)?;
         }
     }
+
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -431,7 +470,12 @@ fn process_event_block(ctx: &mut HttpFilterContext<'_>, block: &str, output: &mu
 // -----------------------------------------------------------------------------
 
 /// Transform a single `OpenAI` SSE chunk into Anthropic events.
-fn transform_chunk(ctx: &mut HttpFilterContext<'_>, chunk: &Value, output: &mut Vec<u8>) {
+fn transform_chunk(
+    ctx: &mut HttpFilterContext<'_>,
+    chunk: &Value,
+    output: &mut Vec<u8>,
+    max_tool_blocks: usize,
+) -> Result<(), FilterError> {
     let started = ctx
         .filter_metadata
         .get(STREAM_STATE_KEY)
@@ -443,7 +487,7 @@ fn transform_chunk(ctx: &mut HttpFilterContext<'_>, chunk: &Value, output: &mut 
 
     if let Some(choice) = extract_first_choice(chunk) {
         if let Some(delta) = choice.get("delta") {
-            transform_delta(ctx, delta, output);
+            transform_delta(ctx, delta, output, max_tool_blocks)?;
         }
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             ctx.set_metadata(FINISH_REASON_KEY, reason.to_owned());
@@ -457,6 +501,8 @@ fn transform_chunk(ctx: &mut HttpFilterContext<'_>, chunk: &Value, output: &mut 
     {
         ctx.set_metadata(OUTPUT_TOKENS_KEY, ot.to_string());
     }
+
+    Ok(())
 }
 
 /// Emit the initial `message_start` event and mark the stream as started.
@@ -507,7 +553,12 @@ fn generate_timestamp_id() -> u128 {
 // -----------------------------------------------------------------------------
 
 /// Transform a delta object from a streaming chunk.
-fn transform_delta(ctx: &mut HttpFilterContext<'_>, delta: &Value, output: &mut Vec<u8>) {
+fn transform_delta(
+    ctx: &mut HttpFilterContext<'_>,
+    delta: &Value,
+    output: &mut Vec<u8>,
+    max_tool_blocks: usize,
+) -> Result<(), FilterError> {
     if let Some(content) = delta.get("content").and_then(Value::as_str) {
         emit_text_delta(ctx, content, output);
     }
@@ -515,9 +566,11 @@ fn transform_delta(ctx: &mut HttpFilterContext<'_>, delta: &Value, output: &mut 
     if let Some(Value::Array(tool_calls)) = delta.get("tool_calls") {
         close_text_block_if_open(ctx, output);
         for tc in tool_calls {
-            transform_tool_delta(ctx, tc, output);
+            transform_tool_delta(ctx, tc, output, max_tool_blocks)?;
         }
     }
+
+    Ok(())
 }
 
 /// Emit a text content delta, opening a new block if needed.
@@ -554,16 +607,21 @@ fn emit_text_delta(ctx: &mut HttpFilterContext<'_>, content: &str, output: &mut 
 // -----------------------------------------------------------------------------
 
 /// Transform a tool call delta into Anthropic content block events.
-fn transform_tool_delta(ctx: &mut HttpFilterContext<'_>, tc: &Value, output: &mut Vec<u8>) {
+fn transform_tool_delta(
+    ctx: &mut HttpFilterContext<'_>,
+    tc: &Value,
+    output: &mut Vec<u8>,
+    max_tool_blocks: usize,
+) -> Result<(), FilterError> {
     let tool_call_key = tool_call_key(tc);
 
-    if let Some(id) = tc.get("id").and_then(Value::as_str)
-        && !is_tool_block_open(ctx, &tool_call_key)
-    {
-        emit_tool_block_start(ctx, &tool_call_key, tc, id, output);
+    if tc.get("id").and_then(Value::as_str).is_some() && !is_tool_block_open(ctx, &tool_call_key) {
+        emit_tool_block_start(ctx, &tool_call_key, tc, output, max_tool_blocks)?;
     }
 
     emit_tool_arguments_delta(ctx, &tool_call_key, tc, output);
+
+    Ok(())
 }
 
 /// Close any open text content block and advance the block index.
@@ -590,14 +648,29 @@ fn tool_call_key(tc: &Value) -> String {
 }
 
 /// Emit a `content_block_start` for a tool-use block.
+///
+/// # Errors
+///
+/// Fails closed with a [`FilterError`] before opening the
+/// `max_tool_blocks + 1`th block, bounding the per-response tool-call
+/// state that would otherwise grow with every unique upstream index.
 fn emit_tool_block_start(
     ctx: &mut HttpFilterContext<'_>,
     tool_call_key: &str,
     tc: &Value,
-    id: &str,
     output: &mut Vec<u8>,
-) {
+    max_tool_blocks: usize,
+) -> Result<(), FilterError> {
+    let opened = get_tool_block_count(ctx);
+    if opened >= max_tool_blocks {
+        return Err(format!(
+            "anthropic_stream_events: streaming tool-call content blocks exceed max_tool_blocks ({max_tool_blocks})"
+        )
+        .into());
+    }
+
     let idx = get_block_index(ctx);
+    let id = tc.get("id").and_then(Value::as_str).unwrap_or_default();
     let name = tc
         .get("function")
         .and_then(|f| f.get("name"))
@@ -617,6 +690,9 @@ fn emit_tool_block_start(
     set_tool_block_index(ctx, tool_call_key, idx);
     set_tool_block_open(ctx, tool_call_key, true);
     increment_block_index(ctx);
+    ctx.set_metadata(TOOL_BLOCK_COUNT_KEY, (opened + 1).to_string());
+
+    Ok(())
 }
 
 /// Emit an `input_json_delta` if the tool call has non-empty arguments.
@@ -756,6 +832,14 @@ fn get_block_index(ctx: &HttpFilterContext<'_>) -> u32 {
 fn increment_block_index(ctx: &mut HttpFilterContext<'_>) {
     let current = get_block_index(ctx);
     ctx.set_metadata(BLOCK_INDEX_KEY, (current + 1).to_string());
+}
+
+/// Return how many tool-call content blocks have opened this response.
+fn get_tool_block_count(ctx: &HttpFilterContext<'_>) -> usize {
+    ctx.filter_metadata
+        .get(TOOL_BLOCK_COUNT_KEY)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Build the metadata key for a tool call's Anthropic block index.
@@ -1682,6 +1766,51 @@ mod tests {
         assert!(
             result.is_err(),
             "streaming filter should reject a limit above MAX_JSON_BODY_BYTES"
+        );
+    }
+
+    #[test]
+    fn custom_max_tool_blocks_parses() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("max_tool_blocks: 5").unwrap();
+        let result = AnthropicStreamEventsFilter::from_config(&yaml);
+
+        assert!(
+            result.is_ok(),
+            "streaming filter should accept a custom max_tool_blocks"
+        );
+    }
+
+    #[test]
+    fn zero_max_tool_blocks_rejected() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("max_tool_blocks: 0").unwrap();
+        let result = AnthropicStreamEventsFilter::from_config(&yaml);
+
+        assert!(result.is_err(), "streaming filter should reject a zero max_tool_blocks");
+    }
+
+    #[test]
+    fn exceeding_max_tool_blocks_fails_closed() {
+        let (filter, mut ctx) = make_filter_and_context_from_yaml("max_tool_blocks: 2");
+
+        let block = |index: u64| {
+            format!(
+                "data: {{\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{index},\"id\":\"call_{index}\",\"function\":{{\"name\":\"f{index}\",\"arguments\":\"{{}}\"}}}}]}},\"index\":0}}]}}\n\n"
+            )
+        };
+
+        let mut body0 = Some(Bytes::from(block(0)));
+        drop(filter.on_response_body(&mut ctx, &mut body0, false).unwrap());
+
+        let mut body1 = Some(Bytes::from(block(1)));
+        drop(filter.on_response_body(&mut ctx, &mut body1, false).unwrap());
+
+        let mut body2 = Some(Bytes::from(block(2)));
+        let result = filter.on_response_body(&mut ctx, &mut body2, false);
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("max_tool_blocks"),
+            "exceeding the tool-block cap should fail closed and mention max_tool_blocks, got: {err}"
         );
     }
 

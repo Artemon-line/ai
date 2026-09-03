@@ -206,6 +206,60 @@ fn streaming_collects_full_text() {
 }
 
 #[test]
+fn streaming_tool_calls_within_cap_completes() {
+    let backend = Backend::fixed(&tool_call_stream_sse())
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .start_with_shutdown();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&transform_yaml(proxy_port, backend.port(), 5)).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &anthropic_post(
+            "/v1/messages",
+            r#"{"model":"mock-model","messages":[{"role":"user","content":"call tools"}],"max_tokens":64,"stream":true}"#,
+        ),
+    );
+    let body = parse_body(&raw);
+
+    // Three distinct tool-call indices open three blocks, all under the
+    // cap of 5, so the transform runs to completion.
+    assert!(
+        body.contains("event: message_stop"),
+        "a tool-call stream within max_tool_blocks should complete with message_stop; body: {body}"
+    );
+}
+
+#[test]
+fn streaming_tool_calls_exceeding_cap_fails_closed() {
+    let backend = Backend::fixed(&tool_call_stream_sse())
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .start_with_shutdown();
+    let proxy_port = free_port();
+    // Same stream as the within-cap test; only the cap changes. The third
+    // distinct tool-call index exceeds max_tool_blocks and fails closed.
+    let config = Config::from_yaml(&transform_yaml(proxy_port, backend.port(), 2)).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &anthropic_post(
+            "/v1/messages",
+            r#"{"model":"mock-model","messages":[{"role":"user","content":"call tools"}],"max_tokens":64,"stream":true}"#,
+        ),
+    );
+    let body = parse_body(&raw);
+
+    assert!(
+        !body.contains("event: message_stop"),
+        "exceeding max_tool_blocks should fail the stream closed before message_stop; body: {body}"
+    );
+}
+
+#[test]
 fn non_streaming_with_temperature() {
     let recording = Recording::load("anthropic/messages/temperature.json");
     let response_body = recording.response_body();
@@ -580,6 +634,58 @@ filter_chains:
 insecure_options:
   allow_private_endpoints: true
 "#
+    )
+}
+
+fn transform_yaml(proxy_port: u16, backend_port: u16, max_tool_blocks: usize) -> String {
+    format!(
+        r#"
+listeners:
+  - name: test
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [transform]
+
+filter_chains:
+  - name: transform
+    filters:
+      - filter: anthropic_messages_format
+        on_invalid: continue
+      - filter: anthropic_to_openai
+        max_body_bytes: 1048576
+      - filter: anthropic_stream_events
+        max_tool_blocks: {max_tool_blocks}
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: mock
+      - filter: load_balancer
+        clusters:
+          - name: mock
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
+
+/// OpenAI Chat Completions SSE with three tool-call deltas at distinct
+/// indices, a finish chunk, and the `[DONE]` sentinel. Each distinct
+/// index opens a new Anthropic tool-use content block in the transform,
+/// so the stream pins three blocks of per-block metadata.
+fn tool_call_stream_sse() -> String {
+    let block = |index: u64| {
+        format!(
+            "data: {{\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{index},\"id\":\"call_{index}\",\"function\":{{\"name\":\"f{index}\",\"arguments\":\"{{}}\"}}}}]}},\"index\":0}}]}}\n\n"
+        )
+    };
+
+    format!(
+        "{}{}{}data: {{\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{{\"delta\":{{}},\"index\":0,\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n",
+        block(0),
+        block(1),
+        block(2),
     )
 }
 
