@@ -1227,6 +1227,7 @@ mod tests {
                 vec!["messages_to_chat_completions"],
                 vec!["messages_to_chat_completions"],
                 vec!["messages_to_chat_completions"],
+                vec!["messages_to_chat_completions"],
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
@@ -1249,6 +1250,7 @@ mod tests {
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::SyntheticOnly,
+                CoverageStatus::SyntheticOnly,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
@@ -1261,14 +1263,15 @@ mod tests {
                 CoverageStatus::SyntheticOnly,
             ]
         );
-        assert_eq!(report.features_total, 13);
-        assert_eq!(report.scenarios_total, 11);
-        assert_eq!(report.recordings_total, 16);
+        assert_eq!(report.features_total, 14);
+        assert_eq!(report.scenarios_total, 12);
+        assert_eq!(report.recordings_total, 17);
         assert_eq!(
             scenarios.keys().collect::<Vec<_>>(),
             vec![
                 "messages/basic-nonstream",
                 "messages/basic-stream",
+                "messages/malformed-success",
                 "messages/native-basic-nonstream",
                 "messages/native-basic-stream",
                 "messages/native-tool-use",
@@ -1280,7 +1283,7 @@ mod tests {
                 "responses/native-tool-call",
             ]
         );
-        assert_eq!(manifest.features.len(), 13);
+        assert_eq!(manifest.features.len(), 14);
         assert_eq!(manifest.version, 1);
         assert_eq!(
             manifest
@@ -1306,6 +1309,10 @@ mod tests {
                 (
                     &"messages.error.upstream".to_owned(),
                     &vec!["messages/upstream-error".to_owned()]
+                ),
+                (
+                    &"messages.error.malformed_success".to_owned(),
+                    &vec!["messages/malformed-success".to_owned()]
                 ),
                 (
                     &"messages.native.request".to_owned(),
@@ -1393,7 +1400,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("synthetic", CoverageStatus::SyntheticOnly)]
         );
-        for feature in &manifest.features[3..6] {
+        assert_eq!(
+            manifest.features[3]
+                .providers
+                .iter()
+                .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
+                .collect::<Vec<_>>(),
+            vec![("synthetic", CoverageStatus::SyntheticOnly)]
+        );
+        for feature in &manifest.features[4..7] {
             assert_eq!(
                 feature
                     .providers
@@ -1403,7 +1418,7 @@ mod tests {
                 vec![("anthropic", CoverageStatus::LiveCovered)]
             );
         }
-        for feature in &manifest.features[6..9] {
+        for feature in &manifest.features[7..10] {
             assert_eq!(
                 feature
                     .providers
@@ -1416,7 +1431,7 @@ mod tests {
                 ]
             );
         }
-        for feature in &manifest.features[9..] {
+        for feature in &manifest.features[10..] {
             assert_eq!(
                 feature
                     .providers
@@ -1471,6 +1486,18 @@ mod tests {
             false,
             BodyKind::Json,
             429,
+            &[],
+        );
+        let malformed = InferenceScenario::load(&root.join("scenarios/messages/malformed-success.yaml")).unwrap();
+        assert_scenario(
+            &malformed,
+            "messages/malformed-success",
+            "Malformed Chat Completions success converted to an Anthropic API error envelope.",
+            &["messages.error.malformed_success"],
+            "What is 2+2? Reply with just the number.",
+            false,
+            BodyKind::Json,
+            200,
             &[],
         );
 
