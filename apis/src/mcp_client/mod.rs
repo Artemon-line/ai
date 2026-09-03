@@ -200,6 +200,13 @@ pub(crate) enum McpClientError {
     InvalidAuthorization,
 }
 
+/// Parse a server URL into a safe display URL, or return invalid fallback.
+fn parse_display_url(server_url: &str) -> McpDisplayUrl {
+    server_url
+        .parse::<http::Uri>()
+        .map_or_else(|_| McpDisplayUrl::invalid(), |uri| McpDisplayUrl::from_uri(&uri))
+}
+
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
@@ -224,23 +231,34 @@ pub(crate) async fn list_tools(
     max_tools: usize,
     allow_loopback: bool,
 ) -> Result<Vec<serde_json::Value>, McpClientError> {
-    let resolved = resolve_and_validate(server_url, timeout, allow_loopback).await?;
-    let transport = StreamableHttpClientTransport::with_client(
-        build_pinned_client(&resolved)?,
-        build_transport_config(server_url, headers, authorization)?,
-    );
-    let display_url = resolved.display_url;
-    let client = tokio::time::timeout(timeout, Box::pin(().serve(transport)))
+    let display_url = parse_display_url(server_url);
+
+    let work = async {
+        let resolved = resolve_and_validate(server_url, timeout, allow_loopback).await?;
+        let transport = StreamableHttpClientTransport::with_client(
+            build_pinned_client(&resolved)?,
+            build_transport_config(server_url, headers, authorization)?,
+        );
+        let display_url = resolved.display_url;
+        let client = tokio::time::timeout(timeout, Box::pin(().serve(transport)))
+            .await
+            .map_err(|_elapsed| McpClientError::Timeout {
+                url: display_url.clone(),
+                timeout,
+            })?
+            .map_err(|_source| McpClientError::Connection {
+                url: display_url.clone(),
+            })?;
+        let tools = paginate_tools(&client, timeout, max_tools, &display_url).await?;
+        tools_to_json(tools)
+    };
+
+    tokio::time::timeout(timeout, Box::pin(work))
         .await
         .map_err(|_elapsed| McpClientError::Timeout {
-            url: display_url.clone(),
+            url: display_url,
             timeout,
         })?
-        .map_err(|_source| McpClientError::Connection {
-            url: display_url.clone(),
-        })?;
-    let tools = paginate_tools(&client, timeout, max_tools, &display_url).await?;
-    tools_to_json(tools)
 }
 
 /// Call `tools/call` on an MCP server and return the result.
@@ -265,43 +283,54 @@ pub(crate) async fn call_tool(
     timeout: Duration,
     allow_loopback: bool,
 ) -> Result<rmcp::model::CallToolResult, McpClientError> {
-    let resolved = resolve_and_validate(server_url, timeout, allow_loopback).await?;
-    let transport = StreamableHttpClientTransport::with_client(
-        build_pinned_client(&resolved)?,
-        build_transport_config(server_url, headers, authorization)?,
-    );
-    let display_url = resolved.display_url;
+    let display_url = parse_display_url(server_url);
 
-    let client = tokio::time::timeout(timeout, Box::pin(().serve(transport)))
-        .await
-        .map_err(|_elapsed| McpClientError::Timeout {
-            url: display_url.clone(),
-            timeout,
-        })?
-        .map_err(|_source| McpClientError::Connection {
-            url: display_url.clone(),
-        })?;
+    let work = async {
+        let resolved = resolve_and_validate(server_url, timeout, allow_loopback).await?;
+        let transport = StreamableHttpClientTransport::with_client(
+            build_pinned_client(&resolved)?,
+            build_transport_config(server_url, headers, authorization)?,
+        );
+        let display_url = resolved.display_url;
 
-    let parsed_args = match &arguments {
-        serde_json::Value::Object(obj) => Some(obj.clone()),
-        serde_json::Value::String(s) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s).ok(),
-        _ => None,
+        let client = tokio::time::timeout(timeout, Box::pin(().serve(transport)))
+            .await
+            .map_err(|_elapsed| McpClientError::Timeout {
+                url: display_url.clone(),
+                timeout,
+            })?
+            .map_err(|_source| McpClientError::Connection {
+                url: display_url.clone(),
+            })?;
+
+        let parsed_args = match &arguments {
+            serde_json::Value::Object(obj) => Some(obj.clone()),
+            serde_json::Value::String(s) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s).ok(),
+            _ => None,
+        };
+        let mut params = CallToolRequestParams::new(tool_name.to_owned());
+        if let Some(args_obj) = parsed_args {
+            params = params.with_arguments(args_obj);
+        }
+
+        tokio::time::timeout(timeout, Box::pin(client.call_tool(params)))
+            .await
+            .map_err(|_elapsed| McpClientError::Timeout {
+                url: display_url.clone(),
+                timeout,
+            })?
+            .map_err(|_source| McpClientError::CallTool {
+                url: display_url.clone(),
+                tool_name: tool_name.to_owned(),
+            })
     };
-    let mut params = CallToolRequestParams::new(tool_name.to_owned());
-    if let Some(args_obj) = parsed_args {
-        params = params.with_arguments(args_obj);
-    }
 
-    tokio::time::timeout(timeout, Box::pin(client.call_tool(params)))
+    tokio::time::timeout(timeout, Box::pin(work))
         .await
         .map_err(|_elapsed| McpClientError::Timeout {
-            url: display_url.clone(),
+            url: display_url,
             timeout,
         })?
-        .map_err(|_source| McpClientError::CallTool {
-            url: display_url.clone(),
-            tool_name: tool_name.to_owned(),
-        })
 }
 
 /// Cap on pagination rounds to prevent infinite loops from
