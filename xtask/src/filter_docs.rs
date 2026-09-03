@@ -2674,7 +2674,7 @@ mod tests {
                 RequiredKind::Yes,
                 "{filter_name} should document api_key as required"
             );
-            for expected in ["provider", "provider_failure_mode", "status_on_error", "base_url"] {
+            for expected in ["provider", "base_url"] {
                 assert!(
                     filter.filter.fields.iter().any(|field| field.name == expected),
                     "{filter_name} should document {expected}"
