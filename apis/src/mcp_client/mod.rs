@@ -240,16 +240,12 @@ pub(crate) async fn list_tools(
             build_transport_config(server_url, headers, authorization)?,
         );
         let display_url = resolved.display_url;
-        let client = tokio::time::timeout(timeout, Box::pin(().serve(transport)))
+        let client = Box::pin(().serve(transport))
             .await
-            .map_err(|_elapsed| McpClientError::Timeout {
-                url: display_url.clone(),
-                timeout,
-            })?
             .map_err(|_source| McpClientError::Connection {
                 url: display_url.clone(),
             })?;
-        let tools = paginate_tools(&client, timeout, max_tools, &display_url).await?;
+        let tools = Box::pin(paginate_tools(&client, max_tools, &display_url)).await?;
         tools_to_json(tools)
     };
 
@@ -293,12 +289,8 @@ pub(crate) async fn call_tool(
         );
         let display_url = resolved.display_url;
 
-        let client = tokio::time::timeout(timeout, Box::pin(().serve(transport)))
+        let client = Box::pin(().serve(transport))
             .await
-            .map_err(|_elapsed| McpClientError::Timeout {
-                url: display_url.clone(),
-                timeout,
-            })?
             .map_err(|_source| McpClientError::Connection {
                 url: display_url.clone(),
             })?;
@@ -313,12 +305,8 @@ pub(crate) async fn call_tool(
             params = params.with_arguments(args_obj);
         }
 
-        tokio::time::timeout(timeout, Box::pin(client.call_tool(params)))
+        Box::pin(client.call_tool(params))
             .await
-            .map_err(|_elapsed| McpClientError::Timeout {
-                url: display_url.clone(),
-                timeout,
-            })?
             .map_err(|_source| McpClientError::CallTool {
                 url: display_url.clone(),
                 tool_name: tool_name.to_owned(),
@@ -339,10 +327,8 @@ const MAX_PAGES: usize = 100;
 
 /// Paginate `tools/list`, bounded by both `max_tools` and
 /// [`MAX_PAGES`].
-#[expect(clippy::too_many_lines, reason = "pagination loop with error branches")]
 async fn paginate_tools(
     client: &Peer<RoleClient>,
-    timeout: Duration,
     max_tools: usize,
     url: &McpDisplayUrl,
 ) -> Result<Vec<rmcp::model::Tool>, McpClientError> {
@@ -350,12 +336,8 @@ async fn paginate_tools(
     let mut cursor = None;
     for _ in 0..MAX_PAGES {
         let params = PaginatedRequestParams::default().with_cursor(cursor);
-        let page = tokio::time::timeout(timeout, Box::pin(client.list_tools(Some(params))))
+        let page = Box::pin(client.list_tools(Some(params)))
             .await
-            .map_err(|_elapsed| McpClientError::Timeout {
-                url: url.clone(),
-                timeout,
-            })?
             .map_err(|_source| McpClientError::ListTools { url: url.clone() })?;
         all_tools.extend(page.tools);
         if all_tools.len() > max_tools {
