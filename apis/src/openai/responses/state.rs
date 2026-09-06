@@ -57,6 +57,13 @@ pub(crate) struct ResponsesState {
     /// optional sections to populate.
     pub include: Vec<String>,
 
+    /// Stable response ID used while several streamed inference rounds are
+    /// exposed as one logical Responses stream.
+    pub logical_stream_response_id: Option<String>,
+
+    /// Next downstream sequence number for a logical Responses stream.
+    pub logical_stream_sequence: u64,
+
     /// Whether stored history was successfully resolved into this state.
     ///
     /// The proxy uses this to distinguish locally consumed history identifiers
@@ -194,6 +201,7 @@ pub(crate) enum RequestBodyRebuild {
 }
 
 impl Default for ResponsesState {
+    #[expect(clippy::too_many_lines, reason = "exhaustive struct field initialization")]
     fn default() -> Self {
         Self {
             citation_files: HashMap::new(),
@@ -201,6 +209,8 @@ impl Default for ResponsesState {
             conversation: None,
             file_search_output_items: Vec::new(),
             include: Vec::new(),
+            logical_stream_response_id: None,
+            logical_stream_sequence: 0,
             history_rehydrated: false,
             input: Vec::new(),
             iteration: 0,
