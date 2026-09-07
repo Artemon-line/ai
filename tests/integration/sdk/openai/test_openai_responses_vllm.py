@@ -803,6 +803,100 @@ class TestAgenticLoopVLLM:
             f"rounds; got: {output_types}"
         )
 
+    def test_mcp_tool_streams_terminal_round_as_one_logical_response(
+        self, agentic_client, agentic_proxy,
+    ):
+        """Streaming sibling of test_mcp_tool_auto_executes_and_returns.
+
+        With stream=True the proxy auto-executes the intermediate MCP
+        tool round internally and buffers it, then streams only the
+        terminal round to the client as ONE logical SSE response
+        (response.created -> ... -> response.completed). The
+        logical-stream finalizer replaces that terminal event's output
+        with the cross-round accumulated trace, so the single
+        response.completed carries the same execution trace the buffered
+        test observes: function_call, mcp_call, and the final message.
+        """
+        _, mcp_port, _ = agentic_proxy
+        mcp_url = f"http://127.0.0.1:{mcp_port}/mcp"
+
+        stream = agentic_client.responses.create(
+            model=VLLM_MODEL,
+            input=(
+                "You MUST call the get_weather function for Paris. "
+                "Do not answer directly. /no_think"
+            ),
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "weather",
+                    "server_url": mcp_url,
+                    "allowed_tools": ["get_weather"],
+                    "require_approval": "never",
+                }
+            ],
+            store=False,
+            stream=True,
+            max_output_tokens=512,
+        )
+
+        event_types = []
+        text_parts = []
+        final_response = None
+
+        for event in stream:
+            event_types.append(event.type)
+            if event.type == "response.output_text.delta":
+                text_parts.append(event.delta)
+            if event.type == "response.completed":
+                final_response = event.response
+
+        # One coherent lifecycle framing, exactly as the single-round
+        # test_streaming_through_irr asserts: created first, completed last.
+        assert event_types[0] == "response.created", event_types
+        assert event_types[-1] == "response.completed", event_types
+        assert final_response is not None, (
+            "stream must terminate with a response.completed event; "
+            f"got: {event_types}"
+        )
+        assert final_response.status in ("completed", "incomplete"), (
+            f"expected completed or incomplete (token limit); got: {final_response.status}"
+        )
+
+        # The terminal event's output is the cross-round accumulated trace,
+        # so it mirrors the buffered test: the auto-executed function_call
+        # and the MCP result (mcp_call) both surface in the one stream.
+        output_types = [item.type for item in final_response.output]
+        assert "function_call" in output_types, (
+            "streamed terminal output should contain the auto-executed "
+            f"function_call; got: {output_types}"
+        )
+        assert "mcp_call" in output_types, (
+            "streamed terminal output should contain the MCP tool result "
+            f"(mcp_call); got: {output_types}"
+        )
+        rounds = sum(
+            1 for t in output_types
+            if t in ("function_call", "message", "reasoning")
+        )
+        assert rounds >= 2, (
+            "streamed terminal output should span at least two inference "
+            f"rounds; got: {output_types}"
+        )
+
+        # MCPHandler returns f"72F and sunny in {city}"; the city argument
+        # is model-chosen, so assert only the stable, non-templated prefix.
+        # The mcp_call output item carries this tool result verbatim, so it
+        # is present whether or not the model echoes it in the streamed text.
+        haystack = (
+            json.dumps(final_response.model_dump(), default=str)
+            + "".join(text_parts)
+        )
+        assert "72F and sunny in" in haystack, (
+            "the MCP get_weather result should be reflected in the "
+            f"accumulated output or streamed text; got: {haystack}"
+        )
+
     def test_client_function_exits_openai(self, agentic_client):
         """Client-side function tools exit the agentic loop without
         auto-execution, even when the IRR is active.
