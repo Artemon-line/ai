@@ -218,9 +218,7 @@ async fn execute_with_addresses(
         .map_err(|error| SubRequestError::Connect(error.to_string()))?;
     let mut request = request;
     request.uri = parsed.uri;
-    if !request.headers.contains_key(http::header::HOST) {
-        request.headers.insert(http::header::HOST, parsed.authority);
-    }
+    request.headers.insert(http::header::HOST, parsed.authority);
 
     let mut last_connect_error = None;
     for addr in &addrs {
@@ -482,6 +480,45 @@ mod tests {
         assert!(
             wire.contains(&format!("host: {authority}")),
             "Host header should use original authority, not resolved IP: {wire}"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "sequential setup, execution, and wire assertions")]
+    async fn execute_overwrites_conflicting_host_header() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = capture_raw_request(listener);
+        let authority = format!("expected.example.com:{}", addr.port());
+        let parsed = parse_url_components(&format!("http://{authority}/test")).unwrap();
+        let mut request = empty_request();
+        request.headers.insert(
+            http::header::HOST,
+            http::HeaderValue::from_static("attacker.example.com"),
+        );
+
+        Box::pin(execute_with_addresses(
+            &test_client(),
+            parsed,
+            request,
+            1024,
+            Duration::from_secs(5),
+            AddressPolicy::AllowPrivate,
+            None,
+            vec![addr],
+        ))
+        .await
+        .unwrap();
+
+        let wire = captured.join().unwrap().to_lowercase();
+        let host_headers = wire
+            .lines()
+            .filter(|line| line.starts_with("host:"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            host_headers,
+            [format!("host: {authority}").as_str()],
+            "only the URL authority should be sent as Host: {wire}"
         );
     }
 }
