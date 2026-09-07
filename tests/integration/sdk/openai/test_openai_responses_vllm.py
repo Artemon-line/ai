@@ -1216,13 +1216,35 @@ def _write_file_search_chat_config(praxis_port: int) -> str:
     Exercises the real example config (per repo test requirements) while
     retargeting the vector-store callout at OGX and the model backend at
     vLLM's /v1/chat/completions endpoint.
+
+    IRR / callout / backend read deadlines are widened to match
+    FILE_SEARCH_CONFIG_TEMPLATE: CPU-only vLLM plus OGX is slower when
+    the postgres store job co-locates those containers, and a 60s step
+    budget can expire before vLLM returns.
     """
     with open(FILE_SEARCH_CHAT_CONFIG_PATH) as f:
         config = f.read()
 
     config = config.replace("127.0.0.1:8080", f"127.0.0.1:{praxis_port}")
-    config = config.replace("127.0.0.1:3001", _vllm_endpoint())
     config = config.replace("127.0.0.1:8001", _ogx_endpoint())
+    vllm = _vllm_endpoint()
+    config = config.replace(
+        '                  - name: "chat-completions-backend"\n'
+        "                    endpoints:\n"
+        '                      - "127.0.0.1:3001"',
+        f'                  - name: "chat-completions-backend"\n'
+        f"                    read_timeout_ms: 300000\n"
+        f"                    endpoints:\n"
+        f'                      - "{vllm}"',
+    )
+    config = config.replace("timeout_ms: 120000", "timeout_ms: 300000")
+    config = config.replace("step_timeout_ms: 60000", "step_timeout_ms: 300000")
+    config = config.replace("timeout_ms: 5000", "timeout_ms: 30000")
+    if f'- "{vllm}"' not in config:
+        raise RuntimeError(
+            "file-search-chat-completions.yaml cluster block did not match; "
+            "vLLM endpoint was not patched"
+        )
 
     fd, path = tempfile.mkstemp(suffix=".yaml")
     with os.fdopen(fd, "w") as f:
@@ -1348,4 +1370,8 @@ class TestFileSearchChatCompletionsVLLM:
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"] + sys.argv[1:]))
+    sys.exit(
+        pytest.main(
+            [__file__, "-v", "--tb=short", "-ra", "--durations=20"] + sys.argv[1:]
+        )
+    )
