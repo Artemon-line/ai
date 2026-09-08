@@ -908,6 +908,70 @@ def agentic_client(agentic_proxy):
 # ---------------------------------------------------------------------------
 
 
+def _assert_multi_round_usage_and_trace(response, *, transport):
+    """Assert a terminal agentic response carries a multi-round accumulated
+    output trace and an internally consistent, summed usage object.
+
+    Shared by the buffered and streaming #983 tests so both transports assert
+    exactly the same shape (criterion e: buffered and streaming expose
+    equivalent accumulated terminal output and usage). ``response`` is the
+    buffered ``Response`` or the streamed ``response.completed`` event's
+    ``response`` -- both expose ``.status``, ``.output``, and ``.usage``.
+
+    Deliberately does NOT assert exact per-round token counts: against a real
+    model those are not predictable. The deterministic exact-sum contract is
+    covered by the Rust integration test ``two_tool_rounds_accumulate_*``
+    (tests/integration/tests/suite/examples/openai_agentic_loop.rs) with a
+    StatefulCapturingBackend. Here we assert the accumulation *machinery* end
+    to end over a genuine multi-round loop.
+    """
+    assert response.status in ("completed", "incomplete"), (
+        f"[{transport}] expected completed or incomplete (token limit); "
+        f"got: {response.status}"
+    )
+
+    output_types = [item.type for item in response.output]
+    assert "function_call" in output_types, (
+        f"[{transport}] accumulated output should contain an auto-executed "
+        f"function_call; got: {output_types}"
+    )
+    assert "mcp_call" in output_types, (
+        f"[{transport}] accumulated output should contain an MCP tool result "
+        f"(mcp_call); got: {output_types}"
+    )
+    rounds = sum(
+        1 for t in output_types
+        if t in ("function_call", "message", "reasoning")
+    )
+    assert rounds >= 2, (
+        f"[{transport}] accumulated output should span at least two inference "
+        f"rounds; got: {output_types}"
+    )
+
+    # Usage is summed across every inference round into one terminal object.
+    # We cannot predict the totals, but the summed object must be present,
+    # positive, and internally consistent -- if merge_usage accumulated some
+    # fields but not others, total would drift from input + output.
+    usage = response.usage
+    assert usage is not None, (
+        f"[{transport}] terminal response must carry an accumulated usage "
+        "object"
+    )
+    assert usage.input_tokens > 0, (
+        f"[{transport}] accumulated input_tokens should be positive; "
+        f"got: {usage.input_tokens}"
+    )
+    assert usage.output_tokens > 0, (
+        f"[{transport}] accumulated output_tokens should be positive; "
+        f"got: {usage.output_tokens}"
+    )
+    assert usage.total_tokens == usage.input_tokens + usage.output_tokens, (
+        f"[{transport}] accumulated usage must be internally consistent "
+        f"(total == input + output); got: {usage.input_tokens} + "
+        f"{usage.output_tokens} != {usage.total_tokens}"
+    )
+
+
 class TestAgenticLoopVLLM:
     """Integration tests for the agentic loop against a vLLM backend."""
 
@@ -1101,6 +1165,108 @@ class TestAgenticLoopVLLM:
             f"got output types: {[i.type for i in response.output]}"
         )
         assert function_calls[0].name == "get_weather"
+
+    def test_agentic_loop_accumulates_usage_across_rounds(
+        self, agentic_client, agentic_proxy,
+    ):
+        """Issue #983: usage accumulates across consecutive inference rounds.
+
+        Buffered variant. A single auto-executed MCP tool drives a
+        model -> tool -> model loop; the terminal response exposes the
+        cross-round accumulated output trace (function_call + mcp_call + the
+        final message) and one usage object summed across every inference
+        round.
+
+        The deterministic exact-sum contract over *two sequential tool rounds*
+        lives in the Rust test ``two_tool_rounds_accumulate_output_and_usage``
+        (tests/integration/tests/suite/examples/openai_agentic_loop.rs) with a
+        StatefulCapturingBackend. That scenario is not reproducible live: a
+        small model batches multiple tool calls into one round, which
+        openai_agentic_loop rejects (``exactly one function call per round``),
+        so this live counterpart drives one reliable tool round and asserts the
+        accumulation *machinery* end to end -- a genuine multi-round trace plus
+        a present, positive, internally consistent summed usage -- against a
+        real backend.
+        """
+        _, mcp_port, _ = agentic_proxy
+        mcp_url = f"http://127.0.0.1:{mcp_port}/mcp"
+
+        response = agentic_client.responses.create(
+            model=VLLM_MODEL,
+            input=(
+                "You MUST call the get_weather function for Paris. "
+                "Do not answer directly. /no_think"
+            ),
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "weather",
+                    "server_url": mcp_url,
+                    "allowed_tools": ["get_weather"],
+                    "require_approval": "never",
+                }
+            ],
+            store=False,
+            max_output_tokens=512,
+        )
+
+        _assert_multi_round_usage_and_trace(response, transport="buffered")
+
+    def test_agentic_loop_streaming_accumulates_usage_across_rounds(
+        self, agentic_client, agentic_proxy,
+    ):
+        """Issue #983: streaming sibling of
+        test_agentic_loop_accumulates_usage_across_rounds.
+
+        With stream=True the proxy auto-executes the intermediate tool round
+        internally and streams only the terminal round to the client as ONE
+        logical SSE response (response.created -> ... -> response.completed).
+        The logical-stream finalizer stamps that terminal event with the
+        cross-round accumulated output and the summed usage, so the single
+        response.completed exposes the same multi-round trace and internally
+        consistent usage the buffered variant observes -- criterion e:
+        buffered and streaming expose equivalent accumulated terminal output
+        and usage.
+        """
+        _, mcp_port, _ = agentic_proxy
+        mcp_url = f"http://127.0.0.1:{mcp_port}/mcp"
+
+        stream = agentic_client.responses.create(
+            model=VLLM_MODEL,
+            input=(
+                "You MUST call the get_weather function for Paris. "
+                "Do not answer directly. /no_think"
+            ),
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "weather",
+                    "server_url": mcp_url,
+                    "allowed_tools": ["get_weather"],
+                    "require_approval": "never",
+                }
+            ],
+            store=False,
+            stream=True,
+            max_output_tokens=512,
+        )
+
+        event_types = []
+        final_response = None
+        for event in stream:
+            event_types.append(event.type)
+            if event.type == "response.completed":
+                final_response = event.response
+
+        # One coherent SSE lifecycle framing across the whole multi-round loop.
+        assert event_types[0] == "response.created", event_types
+        assert event_types[-1] == "response.completed", event_types
+        assert final_response is not None, (
+            "stream must terminate with a response.completed event; "
+            f"got: {event_types}"
+        )
+
+        _assert_multi_round_usage_and_trace(final_response, transport="streaming")
 
 
 # ---------------------------------------------------------------------------
