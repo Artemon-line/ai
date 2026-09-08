@@ -1136,7 +1136,10 @@ fn combined_output_fits(state: &ResponsesState, incoming_response: &Value, max_b
 }
 
 /// Return whether an output item is a provider-hosted built-in tool call.
-fn is_builtin_tool_call(item: &Value) -> bool {
+///
+/// Shared with `openai_web_search`, which counts non-web built-in calls against
+/// the same client-declared `max_tool_calls` budget.
+pub(crate) fn is_builtin_tool_call(item: &Value) -> bool {
     matches!(
         item.get("type").and_then(Value::as_str),
         Some(
@@ -1309,7 +1312,11 @@ fn unsupported_streaming_rejection(ctx: &HttpFilterContext<'_>) -> Option<Filter
 }
 
 /// Return whether one output item still requires local file-search execution.
-fn is_pending_file_search_call(item: &Value) -> bool {
+///
+/// Shared with `openai_web_search`, which must exclude these pending
+/// placeholders when counting non-web built-in calls against the shared
+/// `max_tool_calls` budget, mirroring [`remaining_file_search_call_budget`].
+pub(crate) fn is_pending_file_search_call(item: &Value) -> bool {
     item.get("type").and_then(Value::as_str) == Some("file_search_call")
         && matches!(
             item.get("status").and_then(Value::as_str),
