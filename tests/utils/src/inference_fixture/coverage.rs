@@ -1245,6 +1245,7 @@ mod tests {
                 vec!["responses_agentic_loop"],
                 vec!["responses_agentic_loop"],
                 vec!["responses_to_chat_completions"],
+                vec!["responses_to_chat_completions"],
             ]
         );
         assert_eq!(
@@ -1275,11 +1276,12 @@ mod tests {
                 CoverageStatus::SyntheticOnly,
                 CoverageStatus::SyntheticOnly,
                 CoverageStatus::SyntheticOnly,
+                CoverageStatus::SyntheticOnly,
             ]
         );
-        assert_eq!(report.features_total, 21);
-        assert_eq!(report.scenarios_total, 19);
-        assert_eq!(report.recordings_total, 24);
+        assert_eq!(report.features_total, 22);
+        assert_eq!(report.scenarios_total, 20);
+        assert_eq!(report.recordings_total, 25);
         assert_eq!(
             scenarios.keys().collect::<Vec<_>>(),
             vec![
@@ -1296,6 +1298,7 @@ mod tests {
                 "responses/chat-basic-nonstream",
                 "responses/chat-basic-stream",
                 "responses/chat-file-search",
+                "responses/chat-malformed-compaction",
                 "responses/chat-web-search",
                 "responses/irr-terminal-streaming",
                 "responses/native-basic-nonstream",
@@ -1304,7 +1307,7 @@ mod tests {
                 "responses/native-tool-call",
             ]
         );
-        assert_eq!(manifest.features.len(), 21);
+        assert_eq!(manifest.features.len(), 22);
         assert_eq!(manifest.version, 1);
         assert_eq!(
             manifest
@@ -1422,6 +1425,10 @@ mod tests {
                 (
                     &"responses.chat.continuation".to_owned(),
                     &vec!["responses/chat-basic-nonstream".to_owned()]
+                ),
+                (
+                    &"responses.chat.malformed_compaction".to_owned(),
+                    &vec!["responses/chat-malformed-compaction".to_owned()]
                 ),
             ]
         );
@@ -1930,6 +1937,51 @@ mod tests {
         assert!(
             turn.expect.upstream_sse_events.is_empty(),
             "Chat Completions upstream chunks are data-only frames"
+        );
+
+        let malformed_compaction =
+            InferenceScenario::load(&root.join("scenarios/responses/chat-malformed-compaction.yaml")).unwrap();
+        assert_eq!(malformed_compaction.version, 1);
+        assert_eq!(malformed_compaction.id, "responses/chat-malformed-compaction");
+        assert_eq!(
+            malformed_compaction.description,
+            "Malformed Responses compaction encrypted_content fails closed before Chat Completions translation."
+        );
+        assert_eq!(malformed_compaction.protocol, InferenceProtocol::OpenaiResponses);
+        assert_eq!(
+            malformed_compaction.example_config,
+            "openai/responses/responses-to-chat-completions.yaml"
+        );
+        assert_eq!(malformed_compaction.upstream_authority, "127.0.0.1:3001");
+        assert_eq!(malformed_compaction.features, ["responses.chat.malformed_compaction"]);
+        assert_eq!(malformed_compaction.turns.len(), 1);
+        let turn = &malformed_compaction.turns[0];
+        assert_eq!(turn.name, "initial");
+        assert_eq!(turn.request.method, "POST");
+        assert_eq!(turn.request.path, "/v1/responses");
+        assert_eq!(turn.expect.client_status, 400);
+        assert_eq!(turn.expect.client_body_kind, BodyKind::Json);
+        assert_eq!(turn.expect.upstream_path, "");
+        assert_eq!(turn.expect.upstream_body_kind, BodyKind::Empty);
+        let RecordedBody::Json { value } = &turn.request.body else {
+            panic!("malformed compaction request body must be JSON");
+        };
+        assert_eq!(value["model"], "${MODEL}");
+        assert_eq!(value["input"][0]["type"], "compaction");
+        assert_eq!(value["input"][0]["id"], "compact_1");
+        assert_eq!(value["input"][0]["encrypted_content"], "%%%not-base64%%%");
+        assert_eq!(value["input"][1]["role"], "user");
+        assert_eq!(value["input"][1]["content"], "What did we decide?");
+        assert_eq!(value["store"], false);
+        assert_eq!(value["stream"], false);
+        assert_eq!(value.as_object().map(serde_json::Map::len), Some(4));
+        assert!(
+            turn.expect.client_sse_events.is_empty(),
+            "finite compaction rejection must have no client SSE events"
+        );
+        assert!(
+            turn.expect.upstream_sse_events.is_empty(),
+            "finite compaction rejection must have no upstream SSE events"
         );
     }
 

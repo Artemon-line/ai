@@ -775,6 +775,72 @@ mod tests {
     }
 
     #[test]
+    fn missing_compaction_encrypted_content_returns_error() {
+        let error = map_error(&json!({
+            "model": "m",
+            "input": [
+                {"type": "compaction", "id": "compact_1"},
+                {"role": "user", "content": "What did we decide?"}
+            ]
+        }));
+
+        assert_eq!(
+            error,
+            "Responses compaction input item is missing required field `encrypted_content`"
+        );
+    }
+
+    #[test]
+    fn non_string_compaction_encrypted_content_returns_error() {
+        let error = map_error(&json!({
+            "model": "m",
+            "input": [
+                {"type": "compaction", "id": "compact_1", "encrypted_content": 42},
+                {"role": "user", "content": "What did we decide?"}
+            ]
+        }));
+
+        assert_eq!(
+            error,
+            "Responses compaction input item field `encrypted_content` must be a string"
+        );
+    }
+
+    #[test]
+    fn invalid_base64_compaction_encrypted_content_returns_error() {
+        let error = map_error(&json!({
+            "model": "m",
+            "input": [
+                {"type": "compaction", "id": "compact_1", "encrypted_content": "%%%not-base64%%%"},
+                {"role": "user", "content": "What did we decide?"}
+            ]
+        }));
+
+        assert_eq!(
+            error,
+            "Responses compaction input item field `encrypted_content` must be valid base64"
+        );
+    }
+
+    #[test]
+    fn non_utf8_compaction_encrypted_content_returns_error() {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode([0xFF, 0xFE]);
+        let error = map_error(&json!({
+            "model": "m",
+            "input": [
+                {"type": "compaction", "id": "compact_1", "encrypted_content": encoded},
+                {"role": "user", "content": "What did we decide?"}
+            ]
+        }));
+
+        assert_eq!(
+            error,
+            "Responses compaction input item field `encrypted_content` must be valid UTF-8"
+        );
+    }
+
+    #[test]
     fn tool_history_items_map_to_chat_messages() {
         let mapped = map(&json!({
             "model": "gpt-4o-mini",

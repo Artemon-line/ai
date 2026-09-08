@@ -115,6 +115,41 @@ fn responses_to_chat_completions_rejects_malformed_input_before_upstream() {
 }
 
 #[test]
+fn responses_to_chat_completions_rejects_malformed_compaction_before_upstream() {
+    let backend = StatefulCapturingBackend::new(vec![(200, r#"{}"#.to_owned())]).start_with_shutdown();
+    let proxy_port = free_port();
+    let (config, _db) = load_test_config(
+        "malformed_compaction",
+        proxy_port,
+        &HashMap::from([("127.0.0.1:3001", backend.port())]),
+    );
+    let proxy = start_proxy(&config);
+    let request = serde_json::json!({
+        "model": "gpt-4.1-mini",
+        "input": [
+            {"type": "compaction", "id": "compact_1", "encrypted_content": "%%%not-base64%%%"},
+            {"role": "user", "content": "What did we decide?"}
+        ],
+        "stream": false,
+        "store": false
+    });
+
+    let raw = http_send(proxy.addr(), &json_post("/v1/responses", &request.to_string()));
+    let response: serde_json::Value = serde_json::from_str(&parse_body(&raw)).expect("error response should be JSON");
+
+    assert_eq!(parse_status(&raw), 400);
+    assert_eq!(response["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        response["error"]["message"],
+        "Responses compaction input item field `encrypted_content` must be valid base64"
+    );
+    assert!(
+        backend.requests().is_empty(),
+        "malformed compaction must not reach the backend"
+    );
+}
+
+#[test]
 fn responses_to_chat_completions_normalizes_finite_provider_error() {
     let backend = Backend::status(429, r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#)
         .header("content-type", "application/json")

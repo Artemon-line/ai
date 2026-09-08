@@ -213,6 +213,9 @@ pub(crate) enum TranslationError {
         /// String field whose value had another JSON type.
         field: &'static str,
     },
+    /// A compaction item's `encrypted_content` is not valid base64 or UTF-8.
+    #[error("Responses compaction input item field `encrypted_content` {0}")]
+    InvalidCompactionContent(&'static str),
     /// A Responses message `content` field is neither a string nor an array of parts.
     #[error("Responses message input item field `content` must be a string or array of content parts")]
     InvalidMessageContent,
@@ -512,7 +515,7 @@ fn append_input_item(messages: &mut Vec<Value>, item: &Value) -> Result<(), Tran
     match input_item_type(obj)? {
         Some("function_call_output") => append_tool_output(messages, obj)?,
         Some("message") => append_message_item(messages, obj)?,
-        Some("compaction") => append_compaction_item(messages, obj),
+        Some("compaction") => append_compaction_item(messages, obj)?,
         None if obj.contains_key("role") || obj.contains_key("content") => append_message_item(messages, obj)?,
         None => return Err(TranslationError::UnsupportedInputItemType("unknown".to_owned())),
         Some(input_type) => return Err(TranslationError::UnsupportedInputItemType(input_type.to_owned())),
@@ -550,20 +553,26 @@ fn append_message_item(messages: &mut Vec<Value>, obj: &Map<String, Value>) -> R
 ///
 /// Uses assistant role (not system) to avoid elevating the summary's
 /// instruction priority — it is informational context, not instructions.
-fn append_compaction_item(messages: &mut Vec<Value>, obj: &Map<String, Value>) {
-    use base64::Engine as _;
-    let summary = obj
-        .get("encrypted_content")
-        .and_then(Value::as_str)
-        .and_then(|e| base64::engine::general_purpose::STANDARD.decode(e).ok())
-        .and_then(|b| String::from_utf8(b).ok())
-        .unwrap_or_default();
+/// Empty decoded summaries are omitted; malformed content fails closed.
+fn append_compaction_item(messages: &mut Vec<Value>, obj: &Map<String, Value>) -> Result<(), TranslationError> {
+    let encoded = required_input_item_string(obj, "compaction", "encrypted_content")?;
+    let summary = decode_compaction_summary(encoded)?;
     if !summary.is_empty() {
         messages.push(json!({
             "role": "assistant",
             "content": format!("[Previous conversation summary]\n\n{summary}")
         }));
     }
+    Ok(())
+}
+
+/// Decode compaction `encrypted_content` as standard base64 UTF-8 text.
+fn decode_compaction_summary(encoded: &str) -> Result<String, TranslationError> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_decode| TranslationError::InvalidCompactionContent("must be valid base64"))?;
+    String::from_utf8(bytes).map_err(|_utf8| TranslationError::InvalidCompactionContent("must be valid UTF-8"))
 }
 
 /// Convert one Responses function-call item to a Chat tool-call object.

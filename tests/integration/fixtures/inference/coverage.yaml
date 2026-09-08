@@ -217,3 +217,12 @@ features:
     providers:
       synthetic:
         status: synthetic_only
+  - id: responses.chat.malformed_compaction
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-malformed-compaction
+    providers:
+      synthetic:
+        status: synthetic_only
