@@ -2496,6 +2496,129 @@ class TestAgenticLoopVLLM:
 
 
 # ---------------------------------------------------------------------------
+# Streaming MCP discovery failure (issue #320)
+# ---------------------------------------------------------------------------
+
+
+def _retrieve_with_retry(client, response_id, attempts=15, delay=0.4):
+    """Retrieve a stored response, tolerating brief post-stream write latency.
+
+    Streaming persistence completes as the proxy finishes serving the response
+    body; a retrieve issued the instant the client's stream iterator returns
+    can race that write. Retry a bounded number of times, treating a 404 as
+    "not persisted yet" rather than a hard failure.
+    """
+    from openai import NotFoundError
+
+    last_exc = None
+    for _ in range(attempts):
+        try:
+            return client.responses.retrieve(response_id)
+        except NotFoundError as exc:
+            last_exc = exc
+            time.sleep(delay)
+    raise AssertionError(
+        f"response {response_id} not retrievable after {attempts} attempts: "
+        f"{last_exc}"
+    )
+
+
+class TestStreamingMcpDiscoveryFailureVLLM:
+    """Issue #320: a streaming Responses request whose MCP ``tools/list``
+    discovery fails at runtime must surface to the official OpenAI SDK as a
+    single, well-formed Responses SSE lifecycle terminating in
+    ``response.failed`` -- never an HTTP error, an exception, or a hung
+    stream -- and, when ``store`` is effective, the failed resource must be
+    retrievable via the SDK.
+
+    The failure is triggered with an MCP ``server_url`` pointing at a dead
+    loopback port. The agentic config sets ``allow_loopback: true`` on
+    ``openai_mcp_tool_resolve``, so the refused connection is classified as a
+    genuine *runtime* discovery failure (-> 200 SSE lifecycle) rather than a
+    local SSRF policy rejection (-> HTTP error). Discovery failures
+    short-circuit in the request phase, so vLLM is never contacted -- this
+    test validates the proxy + SDK streaming contract, not model inference.
+
+    Complements the Rust integration suite, which asserts the raw SSE bytes:
+    here we prove the official OpenAI Python SDK parses those frames into a
+    clean event stream and a retrievable failed resource.
+    """
+
+    def test_streaming_discovery_failure_surfaces_failed_lifecycle(
+        self, agentic_client, agentic_proxy,
+    ):
+        dead_port = _free_port()
+        mcp_url = f"http://127.0.0.1:{dead_port}/mcp"
+
+        stream = agentic_client.responses.create(
+            model=VLLM_MODEL,
+            input="What is the weather in Paris? /no_think",
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "weather",
+                    "server_url": mcp_url,
+                    "allowed_tools": ["get_weather"],
+                    "require_approval": "never",
+                }
+            ],
+            store=True,
+            stream=True,
+            max_output_tokens=128,
+        )
+
+        event_types = []
+        response_id = None
+        failed_response = None
+        for event in stream:
+            event_types.append(event.type)
+            if event.type == "response.created":
+                response_id = event.response.id
+            if event.type == "response.failed":
+                failed_response = event.response.model_dump()
+
+        # One ordered lifecycle: created first, failed last, with the MCP
+        # discovery-failure event in between.
+        assert event_types, "the stream must yield at least one event"
+        assert event_types[0] == "response.created", event_types
+        assert event_types[-1] == "response.failed", event_types
+        assert "response.mcp_list_tools.failed" in event_types, event_types
+
+        # The terminal response carries the failure, not a partial success.
+        assert failed_response is not None, event_types
+        assert failed_response["status"] == "failed", failed_response
+        assert failed_response["error"]["code"] == "server_error", (
+            failed_response
+        )
+
+        mcp_items = [
+            item
+            for item in failed_response.get("output", [])
+            if item.get("type") == "mcp_list_tools"
+        ]
+        assert mcp_items, (
+            "the failed response must include the mcp_list_tools output item; "
+            f"got output types: "
+            f"{[i.get('type') for i in failed_response.get('output', [])]}"
+        )
+        item = mcp_items[0]
+        assert item["server_label"] == "weather", item
+        assert item["tools"] == [], item
+        assert item["error"], "the failed listing item must carry an error"
+
+        # store=True -> the failed resource is persisted and retrievable
+        # through the SDK, echoing the same failed status and error.
+        assert response_id, "response.created must carry an id for retrieval"
+        retrieved = _retrieve_with_retry(agentic_client, response_id)
+        rd = retrieved.model_dump()
+        assert rd["status"] == "failed", rd
+        assert rd["error"]["code"] == "server_error", rd
+        assert any(
+            it.get("type") == "mcp_list_tools" for it in rd.get("output", [])
+        ), rd
+
+
+# ---------------------------------------------------------------------------
 # File search: dedicated proxy config, fixtures, and tests
 # ---------------------------------------------------------------------------
 
