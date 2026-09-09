@@ -950,6 +950,59 @@ class TestOpenAIResponsesVLLM:
         assert exc_info.value.status_code == 400
         assert "resp_missing_sdk_integration" in str(exc_info.value)
 
+    def test_streaming_validation_failure_returns_json_not_sse(self, openai_client):
+        """Issue #1001: a request that fails pre-stream validation must return
+        the JSON ``{"error": {...}}`` envelope with a non-2xx status -- never a
+        nonconforming ``text/event-stream`` SSE error event on an uncommitted
+        stream -- even when the caller set ``stream: true``.
+
+        OpenAI raises the typed error from the JSON body before opening the
+        stream, so the official client surfaces this as a ``BadRequestError``
+        rather than a live event stream. Praxis matches that transport: locally
+        generated pre-commitment rejections always use ``application/json``.
+        This is the streaming sibling of
+        ``test_invalid_previous_response_id_is_rejected`` and the live-backend
+        counterpart of the Rust unit coverage in the ``responses::error`` and
+        ``responses::validate`` modules.
+        """
+        # The official SDK surfaces the pre-stream failure as a typed error, not
+        # a stream object -- proving it parsed a JSON error body, not an SSE one.
+        with pytest.raises(BadRequestError) as exc_info:
+            openai_client.responses.create(
+                model=VLLM_MODEL,
+                input="This request must not reach vLLM.",
+                previous_response_id="resp_missing_sdk_integration",
+                stream=True,
+                store=True,
+            )
+        assert exc_info.value.status_code == 400
+        assert "resp_missing_sdk_integration" in str(exc_info.value)
+
+        # Assert the wire shape precisely: a stream:true rejection must be an
+        # application/json error envelope, not an SSE error event.
+        raw = httpx.post(
+            f"{str(openai_client.base_url).rstrip('/')}/responses",
+            headers={"Authorization": "Bearer test"},
+            json={
+                "model": VLLM_MODEL,
+                "input": "This request must not reach vLLM.",
+                "previous_response_id": "resp_missing_sdk_integration",
+                "stream": True,
+                "store": True,
+            },
+            timeout=10,
+        )
+        assert raw.status_code == 400
+        content_type = raw.headers.get("content-type", "")
+        assert content_type.startswith("application/json"), (
+            "a stream:true pre-stream rejection must use application/json, not "
+            f"text/event-stream; got: {content_type!r}"
+        )
+        error = raw.json()["error"]
+        assert isinstance(error["message"], str) and error["message"]
+        assert isinstance(error["type"], str) and error["type"]
+        assert "resp_missing_sdk_integration" in error["message"]
+
     def test_malformed_request_has_sdk_compatible_error(self, openai_client):
         response = httpx.post(
             f"{str(openai_client.base_url).rstrip('/')}/responses",
