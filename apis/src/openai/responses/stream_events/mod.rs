@@ -360,7 +360,7 @@ fn parse_and_accumulate(
         record_completion(state, &event, now)?;
         accumulate_event(ctx, state, &event);
         if state.logical_stream {
-            append_logical_event(state, ctx, &event, &mut logical_output);
+            append_logical_event(state, ctx, event, &mut logical_output);
         }
     }
 
@@ -374,13 +374,14 @@ fn parse_and_accumulate(
 fn append_logical_event(
     state: &mut StreamEventsState,
     ctx: &mut HttpFilterContext<'_>,
-    event: &ResponsesEvent,
+    event: ResponsesEvent,
     output: &mut Vec<u8>,
 ) {
     if event.is_terminal() {
+        let event_type = event.event_type().to_owned();
         state.deferred_terminal = Some(DeferredTerminalEvent {
-            event_type: event.event_type().to_owned(),
-            payload: event.payload().clone(),
+            event_type,
+            payload: event.into_payload(),
         });
         return;
     }
@@ -395,9 +396,10 @@ fn append_logical_event(
         return;
     }
 
-    let mut payload = event.payload().clone();
+    let event_type = event.event_type().to_owned();
+    let mut payload = event.into_payload();
     normalize_logical_payload(ctx, &mut payload, state.output_index_offset);
-    encode_sse_event(event.event_type(), &payload, output);
+    encode_sse_event(&event_type, &payload, output);
 }
 
 /// Normalize response identity, sequence numbers, and output indices.
@@ -446,8 +448,26 @@ fn encode_sse_event(event_type: &str, payload: &Value, output: &mut Vec<u8>) {
     output.extend_from_slice(b"event: ");
     output.extend_from_slice(event_type.as_bytes());
     output.extend_from_slice(b"\ndata: ");
-    output.extend_from_slice(payload.to_string().as_bytes());
+    // Serialize into the output buffer so logical-stream emission does not
+    // allocate an intermediate `String` via `Display`. Truncate on failure so
+    // a partial JSON write cannot be followed by the SSE delimiter.
+    if let Err(error) = write_json_or_rollback(output, |out| serde_json::to_writer(out, payload)) {
+        debug!(%error, "logical-stream payload serialization failed");
+        return;
+    }
     output.extend_from_slice(b"\n\n");
+}
+
+/// Write into `output`, restoring the pre-write length if `write` fails.
+fn write_json_or_rollback<E>(output: &mut Vec<u8>, write: impl FnOnce(&mut Vec<u8>) -> Result<(), E>) -> Result<(), E> {
+    let start = output.len();
+    match write(output) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            output.truncate(start);
+            Err(error)
+        },
+    }
 }
 
 /// Emit the held terminal event only when the current IRR step is terminal.

@@ -73,6 +73,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 utoipa = "5.5.0"
 wiremock = "0.6.5"
+allocation-counter = "0.8.1"
 prost = "0.14.4"
 prost-build = "0.14.4"
 prost-types = "0.14.4"
