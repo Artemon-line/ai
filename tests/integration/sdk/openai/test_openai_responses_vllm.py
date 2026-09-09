@@ -1234,6 +1234,98 @@ class TestOpenAIResponsesVLLM:
         assert exc_info.value.status_code == 400
         assert "conv_00000000000000000000000000000000" in str(exc_info.value)
 
+    def test_streaming_rehydrated_response_echoes_previous_response_id(
+        self, openai_client
+    ):
+        """Issue #932 (streaming half): a rehydrated ``stream=True`` turn must
+        echo the caller's previous_response_id back inside the SSE lifecycle
+        frames.
+
+        Streaming sibling of
+        ``test_rehydrated_response_echoes_previous_response_id``. Same contract,
+        same full-flow pipeline (store -> stream_events -> rehydrate), but
+        stream=True: the proxy replays prior turns via the ``input`` array and
+        strips previous_response_id from the upstream request, so vLLM streams
+        ``previous_response_id: null`` in every response-lifecycle frame. The
+        rehydrate filter restores the caller's id into each lifecycle frame as
+        it streams -- without buffering the stream -- so the client's terminal
+        ``response.completed`` event carries the id it sent.
+
+        The assertions are metadata-only and independent of model output, so
+        they stay deterministic despite running against a real vLLM backend.
+
+        Manifest linkage: this is the live vLLM regression counterpart of the
+        committed synthetic inference fixture -- coverage feature
+        ``responses.native.continuation``, scenario
+        ``responses/native-continuation-stream`` (see
+        tests/integration/fixtures/inference/). No live recording is committed
+        for that feature -- it stays ``synthetic_only`` because a live recording
+        requires explicit authorization -- so this SDK test provides the
+        real-backend confidence for the streaming path.
+        """
+        first = openai_client.responses.create(
+            model=VLLM_MODEL,
+            input="Say exactly: STREAM-ECHO-BASE /no_think",
+            store=True,
+            max_output_tokens=128,
+        )
+
+        assert first.status == "completed"
+        assert first.id
+
+        stream = openai_client.responses.create(
+            model=VLLM_MODEL,
+            input="Say exactly: STREAM-ECHO-NEXT /no_think",
+            previous_response_id=first.id,
+            store=True,
+            stream=True,
+            max_output_tokens=128,
+        )
+
+        event_types = []
+        lifecycle_previous_ids = []
+        final_response = None
+
+        for event in stream:
+            event_types.append(event.type)
+            # Only response-lifecycle events (created, in_progress, completed)
+            # carry a full response resource; delta/item events do not.
+            response_obj = getattr(event, "response", None)
+            if response_obj is not None:
+                lifecycle_previous_ids.append(
+                    getattr(response_obj, "previous_response_id", None)
+                )
+            if event.type == "response.completed":
+                final_response = event.response
+
+        assert event_types[0] == "response.created", event_types
+        assert event_types[-1] == "response.completed", event_types
+        assert final_response is not None, (
+            "stream must terminate with a response.completed event; "
+            f"got: {event_types}"
+        )
+        assert final_response.status == "completed", final_response.status
+
+        # Core #932 streaming contract: the terminal event the client observes
+        # carries the caller's previous_response_id, not the backend's null.
+        assert final_response.previous_response_id == first.id, (
+            "the streamed terminal response must echo the caller's "
+            "previous_response_id even though the proxy strips it from the "
+            "rehydrated upstream request; got: "
+            f"{final_response.previous_response_id!r}"
+        )
+
+        # The restore rewrites every response-lifecycle frame incrementally, so
+        # no streamed frame may still echo the backend's null id.
+        assert lifecycle_previous_ids, (
+            "the stream must contain at least one response-lifecycle frame; "
+            f"got event types: {event_types}"
+        )
+        assert all(pid == first.id for pid in lifecycle_previous_ids), (
+            "every streamed lifecycle frame must carry the restored "
+            f"previous_response_id; got: {lifecycle_previous_ids}"
+        )
+
     def test_doc_extract_inline_file_to(self, openai_client):
         """Issue #397: inline file_data is extracted to input_text and
         consumed by vLLM inference.
