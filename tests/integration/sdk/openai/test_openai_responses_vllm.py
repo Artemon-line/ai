@@ -364,15 +364,47 @@ class MCPHandler(BaseHTTPRequestHandler):
                                 "required": ["city"],
                                 "additionalProperties": False,
                             },
-                        }
+                        },
+                        {
+                            "name": "get_weather_map",
+                            "description": "Get a weather map image link for a city",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"],
+                                "additionalProperties": False,
+                            },
+                        },
                     ]
                 },
             )
         elif method == "tools/call":
-            city = req.get("params", {}).get("arguments", {}).get("city", "unknown")
-            self._json_rpc(
-                rid, {"content": [{"type": "text", "text": f"72F and sunny in {city}"}]}
-            )
+            params = req.get("params", {})
+            tool_name = params.get("name")
+            city = params.get("arguments", {}).get("city", "unknown")
+            if tool_name == "get_weather_map":
+                # Non-text MCP content: a resource_link block. The tool result is
+                # server-controlled and deterministic, so this exercises the
+                # proxy's lossless non-text serialization end to end -- through
+                # the wire and into the mcp_call output item the OpenAI SDK
+                # deserializes -- independent of the model's choices.
+                self._json_rpc(
+                    rid,
+                    {
+                        "content": [
+                            {
+                                "type": "resource_link",
+                                "uri": "file:///weather/paris-map.png",
+                                "name": "paris-weather-map",
+                                "mimeType": "image/png",
+                            }
+                        ]
+                    },
+                )
+            else:
+                self._json_rpc(
+                    rid, {"content": [{"type": "text", "text": f"72F and sunny in {city}"}]}
+                )
         elif method == "ping":
             self._json_rpc(rid, {})
         else:
@@ -2149,6 +2181,68 @@ class TestAgenticLoopVLLM:
         assert rounds >= 2, (
             "accumulated output should span at least two inference "
             f"rounds; got: {output_types}"
+        )
+
+    def test_mcp_non_text_content_survives_to_openai_client(
+        self,
+        agentic_client,
+        agentic_proxy,
+    ):
+        """A non-text MCP tool result reaches the client via the openai SDK.
+
+        The Rust unit tests cover the ``content_blocks_to_output`` transform in
+        isolation; this proves the complementary layer the unit test cannot
+        reach: a non-text content block (``resource_link``) serializes over the
+        wire and is exposed on the ``mcp_call`` output item exactly as the
+        OpenAI SDK deserializes the response. The tool *result* is
+        server-controlled and deterministic, so only tool *selection* depends
+        on the model -- the same reliability profile as
+        ``test_mcp_tool_auto_executes_and_returns``.
+        """
+        _, mcp_port, _ = agentic_proxy
+        mcp_url = f"http://127.0.0.1:{mcp_port}/mcp"
+
+        response = agentic_client.responses.create(
+            model=VLLM_MODEL,
+            input=(
+                "You MUST call the get_weather_map function for Paris. "
+                "Do not answer directly. /no_think"
+            ),
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "weather",
+                    "server_url": mcp_url,
+                    "allowed_tools": ["get_weather_map"],
+                    "require_approval": "never",
+                }
+            ],
+            store=False,
+            max_output_tokens=512,
+        )
+
+        assert response.status in ("completed", "incomplete"), (
+            f"expected completed or incomplete (token limit); got: {response.status}"
+        )
+
+        mcp_calls = [item.model_dump() for item in response.output if item.type == "mcp_call"]
+        assert mcp_calls, (
+            "accumulated output should contain the auto-executed MCP tool "
+            f"result (mcp_call); got: {[item.type for item in response.output]}"
+        )
+
+        # The resource_link block survives serialization end to end: its type
+        # and identifying fields land verbatim in the mcp_call output the SDK
+        # deserialized, proving non-text MCP content is not flattened or dropped.
+        output_text = mcp_calls[0].get("output") or ""
+        assert "resource_link" in output_text, (
+            f"mcp_call output must carry the resource_link block; got: {output_text}"
+        )
+        assert "file:///weather/paris-map.png" in output_text, (
+            f"resource uri must survive to the client; got: {output_text}"
+        )
+        assert "paris-weather-map" in output_text, (
+            f"resource name must survive to the client; got: {output_text}"
         )
 
     def test_mcp_approval_request_stops_before_dispatch(
