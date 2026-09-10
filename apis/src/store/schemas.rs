@@ -35,9 +35,23 @@ pub(crate) const SCHEMA_VERSION: i64 = 1;
 /// version table name.
 const SCHEMA_VERSION_SUFFIX: &str = "_schema_version";
 
+/// Suffix appended to the responses table name to derive the
+/// server-owned pending-approval table name.
+const PENDING_APPROVALS_SUFFIX: &str = "_pending_approvals";
+
 /// Derive the schema version table name from the responses table name.
 pub(crate) fn schema_version_table(responses: &str) -> String {
     format!("{responses}{SCHEMA_VERSION_SUFFIX}")
+}
+
+/// Derive the pending-approvals table name from the responses table
+/// name.
+///
+/// Like the schema version table, this is an internal derived table
+/// (not configured directly), so it is always created and never
+/// exposed as a YAML option.
+pub(crate) fn pending_approvals_table(responses: &str) -> String {
+    format!("{responses}{PENDING_APPROVALS_SUFFIX}")
 }
 
 // -----------------------------------------------------------------------------
@@ -55,6 +69,7 @@ pub(crate) fn schema_version_table(responses: &str) -> String {
 ///
 /// Returns [`StoreError::Database`] if table names contain
 /// invalid characters.
+#[expect(clippy::too_many_lines, reason = "linear DDL statement assembly per table")]
 pub(crate) fn generate_ddl(tables: &TableNames) -> Result<Vec<String>, StoreError> {
     let (r, c) = validate_table_names(tables)?;
 
@@ -68,6 +83,21 @@ pub(crate) fn generate_ddl(tables: &TableNames) -> Result<Vec<String>, StoreErro
         let i = validate_items_table(items, r, c)?;
         append_items_ddl(&mut stmts, i);
     }
+
+    let a = pending_approvals_table(r);
+    if a.eq_ignore_ascii_case(c) {
+        return Err(StoreError::Database(format!(
+            "derived pending-approvals table name collides with conversation table: {a}"
+        )));
+    }
+    if let Some(items) = &tables.items
+        && a.eq_ignore_ascii_case(items)
+    {
+        return Err(StoreError::Database(format!(
+            "derived pending-approvals table name collides with items table: {a}"
+        )));
+    }
+    stmts.push(pending_approvals_ddl(&a));
 
     let v = schema_version_table(r);
     if v.eq_ignore_ascii_case(c) {
@@ -110,6 +140,11 @@ pub(crate) fn validate_postgres_identifiers(tables: &TableNames) -> Result<(), S
     let (r, c) = validate_table_names(tables)?;
 
     validate_postgres_identifier_len("response table name", r, POSTGRES_MAX_RESPONSES_TABLE_LEN)?;
+    validate_postgres_identifier_len(
+        "response table name (pending-approvals suffix)",
+        r,
+        POSTGRES_MAX_RESPONSES_TABLE_LEN_FOR_APPROVALS,
+    )?;
     validate_postgres_identifier_len("conversation table name", c, POSTGRES_MAX_CONVERSATION_TABLE_LEN)?;
     validate_postgres_identifier_case("response table name", r)?;
     validate_postgres_identifier_case("conversation table name", c)?;
@@ -204,6 +239,39 @@ fn append_items_ddl(stmts: &mut Vec<String>, i: &str) {
     ));
 }
 
+/// DDL for the server-owned pending-approval table.
+///
+/// A row is written from proxy **output** the moment an
+/// `mcp_approval_request` is emitted, capturing the issuing `response_id`, the
+/// complete pending call (server label, tool name, arguments), and the resolved
+/// target fingerprint. `consumed_at` is `NULL` while the approval is outstanding
+/// and is stamped exactly once when the matching `mcp_approval_response`
+/// is honored, so a replayed response cannot trigger a second tool
+/// execution. The composite primary key makes insert-if-absent atomic and
+/// idempotent, and consumption never resets it back to `NULL`.
+///
+/// `response_id` is part of the key so an approval is bound to the response that
+/// issued it: a client must supply the originating `previous_response_id` to
+/// load or consume it, so a fresh, unrelated request cannot claim a known
+/// outstanding approval and the same model-generated call id reused across two
+/// responses stays distinct.
+fn pending_approvals_ddl(a: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {a} (
+            tenant_id          TEXT NOT NULL,
+            response_id        TEXT NOT NULL,
+            approval_id        TEXT NOT NULL,
+            server_label       TEXT NOT NULL,
+            tool_name          TEXT NOT NULL,
+            arguments          TEXT NOT NULL,
+            target_fingerprint TEXT NOT NULL,
+            created_at         BIGINT NOT NULL,
+            consumed_at        BIGINT,
+            PRIMARY KEY (tenant_id, response_id, approval_id)
+        )"
+    )
+}
+
 /// Validate the configured table names and return them as borrowed identifiers.
 fn validate_table_names(tables: &TableNames) -> Result<(&str, &str), StoreError> {
     let r = tables.responses.as_str();
@@ -238,6 +306,13 @@ const POSTGRES_MAX_ITEMS_TABLE_LEN: usize = POSTGRES_MAX_IDENTIFIER_LEN - 17;
 /// Maximum responses table name length that leaves room for the
 /// `_schema_version` suffix in the derived version table name.
 const POSTGRES_MAX_RESPONSES_TABLE_LEN: usize = POSTGRES_MAX_IDENTIFIER_LEN - SCHEMA_VERSION_SUFFIX.len();
+
+/// Maximum responses table name length that leaves room for the
+/// `_pending_approvals` suffix in the derived pending-approvals table
+/// name. This suffix is longer than `_schema_version`, so it is the
+/// binding constraint on the responses table name for `PostgreSQL`.
+const POSTGRES_MAX_RESPONSES_TABLE_LEN_FOR_APPROVALS: usize =
+    POSTGRES_MAX_IDENTIFIER_LEN - PENDING_APPROVALS_SUFFIX.len();
 
 /// Reject identifiers that could cause SQL injection or invalid DDL.
 pub(crate) fn validate_identifier(name: &str) -> Result<(), StoreError> {
@@ -336,6 +411,19 @@ pub(crate) const CONVERSATIONS_COLUMNS: &[&str] =
 
 /// Expected column names for the schema version table.
 pub(crate) const VERSION_COLUMNS: &[&str] = &["version"];
+
+/// Expected column names for the server-owned pending-approvals table.
+pub(crate) const PENDING_APPROVALS_COLUMNS: &[&str] = &[
+    "tenant_id",
+    "response_id",
+    "approval_id",
+    "server_label",
+    "tool_name",
+    "arguments",
+    "target_fingerprint",
+    "created_at",
+    "consumed_at",
+];
 
 /// Expected column names for the items table.
 pub(crate) const ITEMS_COLUMNS: &[&str] = &[
@@ -464,8 +552,8 @@ mod tests {
         let ddl = generate_ddl(&tables).expect("valid names should produce DDL");
         assert_eq!(
             ddl.len(),
-            4,
-            "should produce 4 DDL statements (responses, conversations, tenant_id index, version)"
+            5,
+            "should produce 5 DDL statements (responses, conversations, tenant_id index, pending_approvals, version)"
         );
         assert!(
             ddl[0].contains("test_responses"),
@@ -669,6 +757,94 @@ mod tests {
     }
 
     #[test]
+    fn pending_approvals_table_derives_name() {
+        assert_eq!(
+            pending_approvals_table("openai_responses"),
+            "openai_responses_pending_approvals"
+        );
+    }
+
+    #[test]
+    fn generate_ddl_includes_pending_approvals_table() {
+        let tables = TableNames {
+            responses: "test_responses".to_owned(),
+            conversations: "test_conversations".to_owned(),
+            items: None,
+        };
+        let ddl = generate_ddl(&tables).expect("valid names should produce DDL");
+        // The pending-approvals table is created just before the version
+        // table, which must remain last.
+        let approvals_ddl = &ddl[ddl.len() - 2];
+        assert!(
+            approvals_ddl.contains("test_responses_pending_approvals"),
+            "second-to-last DDL should create the pending-approvals table: {approvals_ddl}"
+        );
+        // The issuing response_id scopes every approval, and the primary key
+        // binds each single-use token to (tenant_id, response_id, approval_id).
+        for expected in [
+            "response_id        TEXT NOT NULL",
+            "approval_id        TEXT NOT NULL",
+            "target_fingerprint TEXT NOT NULL",
+            "consumed_at        BIGINT",
+            "PRIMARY KEY (tenant_id, response_id, approval_id)",
+        ] {
+            assert!(
+                approvals_ddl.contains(expected),
+                "pending-approvals DDL should contain `{expected}`: {approvals_ddl}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_ddl_rejects_pending_approvals_collision_with_conversations() {
+        let tables = TableNames {
+            responses: "test".to_owned(),
+            conversations: "test_pending_approvals".to_owned(),
+            items: None,
+        };
+        let err = generate_ddl(&tables).unwrap_err();
+        assert!(
+            err.to_string().contains("collides with conversation table"),
+            "should reject collision: {err}"
+        );
+    }
+
+    #[test]
+    fn generate_ddl_rejects_pending_approvals_collision_with_items() {
+        let tables = TableNames {
+            responses: "test".to_owned(),
+            conversations: "test_conversations".to_owned(),
+            items: Some("test_pending_approvals".to_owned()),
+        };
+        let err = generate_ddl(&tables).unwrap_err();
+        assert!(
+            err.to_string().contains("collides with items table"),
+            "should reject collision: {err}"
+        );
+    }
+
+    #[test]
+    fn postgres_identifier_rejects_long_responses_for_pending_approvals_table() {
+        // A responses name that fits the version-table suffix but not the
+        // longer pending-approvals suffix must still be rejected.
+        let responses = "r".repeat(POSTGRES_MAX_RESPONSES_TABLE_LEN_FOR_APPROVALS + 1);
+        assert!(
+            responses.len() <= POSTGRES_MAX_RESPONSES_TABLE_LEN,
+            "test premise: name should fit the shorter version suffix"
+        );
+        let tables = TableNames {
+            responses,
+            conversations: "c".to_owned(),
+            items: None,
+        };
+        let err = validate_postgres_identifiers(&tables).unwrap_err();
+        assert!(
+            err.to_string().contains("PostgreSQL identifier limit"),
+            "should reject responses name that makes the pending-approvals table too long: {err}"
+        );
+    }
+
+    #[test]
     fn postgres_identifier_rejects_long_responses_for_version_table() {
         let tables = TableNames {
             responses: "r".repeat(POSTGRES_MAX_RESPONSES_TABLE_LEN + 1),
@@ -720,8 +896,9 @@ mod tests {
         let ddl = generate_ddl(&tables).expect("valid names with items should produce DDL");
         assert_eq!(
             ddl.len(),
-            7,
-            "should produce 7 DDL statements (responses, conversations, tenant_id index, items, items indexes, version)"
+            8,
+            "should produce 8 DDL statements (responses, conversations, tenant_id index, items, items indexes, \
+             pending_approvals, version)"
         );
         assert!(
             ddl[3].contains("test_items"),

@@ -442,6 +442,20 @@ fn commit_chunk_events(
     logical_output
 }
 
+/// Whether an event is a response lifecycle-creation event
+/// (`response.created`/`queued`/`in_progress`).
+///
+/// These open the logical response and must be emitted exactly once, ahead of any
+/// output item: at `iteration > 0` a resumed round suppresses them (the first round
+/// already sent them), and at `iteration 0` they precede a locally executed item's
+/// synthesized flush.
+fn is_response_lifecycle_creation(event: &ResponsesEvent) -> bool {
+    matches!(
+        event,
+        ResponsesEvent::ResponseCreated(_) | ResponsesEvent::ResponseQueued(_) | ResponsesEvent::ResponseInProgress(_)
+    )
+}
+
 /// Append one provider event to the logical stream or defer/suppress it.
 #[expect(
     clippy::too_many_lines,
@@ -534,14 +548,7 @@ fn append_logical_event(
         });
         return;
     }
-    if state.iteration > 0
-        && matches!(
-            event,
-            ResponsesEvent::ResponseCreated(_)
-                | ResponsesEvent::ResponseQueued(_)
-                | ResponsesEvent::ResponseInProgress(_)
-        )
-    {
+    if state.iteration > 0 && is_response_lifecycle_creation(&event) {
         return;
     }
 
@@ -575,7 +582,7 @@ fn commit_local_tool_milestones(
     // via `emitted_output_items`, this is what a resumed round's flush consults.
     record_model_output_item(ctx, event);
 
-    // #276: ahead of the first resumed model output event, stream any locally
+    // #276: ahead of the first model output *content* event, stream any locally
     // generated tool items (MCP calls/approvals, or web searches absent from the
     // upstream stream) that the tool-dispatch filters appended to
     // `accumulated_output` but never emitted incrementally. They must precede the
@@ -583,7 +590,18 @@ fn commit_local_tool_milestones(
     // `accumulated_output` is fixed for the round, so the flush runs once here
     // rather than re-serializing every local item ahead of each event; the EOS
     // flush still catches items whose round produced no resumed model event.
-    if state.iteration > 0 && !state.local_items_flushed {
+    //
+    // The flush is deferred past `response.created`/`queued`/`in_progress` rather
+    // than gated on `iteration > 0`: an MCP approval resume (#1029) executes the
+    // approved tool during `on_request_body`, before any inference round, so its
+    // local `mcp_call` sits at `accumulated_output[0]` while `iteration` is still 0
+    // and the round still forwards its own lifecycle-creation events. Gating on the
+    // round number left that index-0 item unannounced ahead of the model output
+    // shifted to index 1, tripping client stream accumulators. At `iteration > 0`
+    // the creation events never reach here (suppressed above), so the first event
+    // seen is already content and the behavior is unchanged. When no local item is
+    // pending — the common first round — `flush_local_output_items` is a no-op.
+    if !state.local_items_flushed && !is_response_lifecycle_creation(event) {
         flush_local_output_items(ctx, output);
         state.local_items_flushed = true;
     }

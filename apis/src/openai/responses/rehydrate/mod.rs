@@ -158,10 +158,8 @@ impl RehydrateFilter {
         };
         let previous_tools = collect_mcp_tool_listings(&record);
         let previous_usage = record.response_object.get("usage").filter(|u| !u.is_null()).cloned();
-        let mut state = build_state(parsed_body, stored, previous_tools, previous_usage);
-        state.response_id = ctx.get_metadata("responses.response_id").map(ToOwned::to_owned);
-        write_previous_usage_metadata(ctx, state.previous_usage.as_ref());
-        ctx.extensions.insert(state);
+        let state = build_state(parsed_body, stored, previous_tools, previous_usage);
+        install_rehydrated_state(ctx, state);
         debug!(previous_response_id = %prev_id, "previous response validated, state populated");
         ctx.set_metadata("responses.previous_response_id", prev_id);
         Ok(FilterAction::Release)
@@ -190,10 +188,8 @@ impl RehydrateFilter {
             Ok(s) => s,
             Err(action) => return Ok(action),
         };
-        let mut state = build_state(parsed_body, stored, vec![], None);
-        state.response_id = ctx.get_metadata("responses.response_id").map(ToOwned::to_owned);
-        write_previous_usage_metadata(ctx, state.previous_usage.as_ref());
-        ctx.extensions.insert(state);
+        let state = build_state(parsed_body, stored, vec![], None);
+        install_rehydrated_state(ctx, state);
         debug!(conversation_id = %conv_id, "conversation rehydrated, state populated");
         Ok(FilterAction::Release)
     }
@@ -1418,6 +1414,31 @@ fn mcp_tool_names(tools: &[Value]) -> Vec<String> {
         .iter()
         .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(ToOwned::to_owned))
         .collect()
+}
+
+/// Install the rehydrated state, preserving request-phase markers that earlier
+/// filters set on the pre-rehydrate state.
+///
+/// [`build_state`] reconstructs [`ResponsesState`] from the request body, so
+/// markers not derivable from the body alone must be carried across the
+/// replacement. Currently that is the store filter's
+/// [`ResponsesState::store_persist_armed`] flag, which `openai_response_store`
+/// sets before rehydrate runs. Dropping it here would make `mcp_dispatch`
+/// falsely reject a continuation-turn `mcp_approval_request` as unresumable,
+/// even though the store is configured and will persist the response.
+///
+/// It also seeds [`ResponsesState::response_id`] from the `responses.response_id`
+/// metadata (assigned upstream), since the reconstructed state cannot derive it
+/// from the request body.
+fn install_rehydrated_state(ctx: &mut HttpFilterContext<'_>, mut state: ResponsesState) {
+    let store_persist_armed = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .is_some_and(|prev| prev.store_persist_armed);
+    state.store_persist_armed = store_persist_armed;
+    state.response_id = ctx.get_metadata("responses.response_id").map(ToOwned::to_owned);
+    write_previous_usage_metadata(ctx, state.previous_usage.as_ref());
+    ctx.extensions.insert(state);
 }
 
 /// Extract token usage from the previous response and set

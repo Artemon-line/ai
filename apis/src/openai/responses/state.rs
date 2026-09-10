@@ -197,7 +197,10 @@ pub(crate) enum McpApprovalState {
 /// [`RequestExtensions`]: praxis_filter::RequestExtensions
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "request, transport, and deferred lifecycle flags are independent"
+    reason = "request-scoped state bag; the request, transport, and deferred \
+              lifecycle bool flags (history_rehydrated, parallel_tool_calls, \
+              store_persist_armed) are independent request facts, not a state \
+              machine or refactorable enum"
 )]
 pub(crate) struct ResponsesState {
     /// Maps file IDs to filenames for citation annotation extraction.
@@ -309,6 +312,30 @@ pub(crate) struct ResponsesState {
     /// [`Self::messages`] because it is not forwarded to backend
     /// inference.
     pub persisted_messages: Vec<serde_json::Value>,
+
+    /// Server-owned pending MCP approvals emitted during this request.
+    ///
+    /// Populated by `mcp_dispatch` when it pauses on an
+    /// `mcp_approval_request`, this is drained by the store filter and
+    /// persisted as the authoritative record for correlating a later
+    /// `mcp_approval_response`. Consent provenance lives here and in the
+    /// store, never in the (client-influenced) conversation history.
+    pub pending_approvals: Vec<crate::store::PendingApprovalRecord>,
+
+    /// Whether the store filter armed persistence for this exchange.
+    ///
+    /// Set by `openai_response_store` during the request phase only after it
+    /// initializes and registers a backend AND classifies this request as one
+    /// whose response will be persisted. `mcp_dispatch` reads this
+    /// exchange-scoped marker before emitting an `mcp_approval_request`: unlike
+    /// pipeline-scoped registry membership, it proves the store filter actually
+    /// ran and intends to persist THIS response, so it also catches a store
+    /// filter that is absent, request-conditioned out, or ordered after
+    /// dispatch. It cannot observe a response-phase persistence skip (a
+    /// `response_conditions`-gated store filter, a non-2xx status, etc.); that
+    /// narrower residual is unsupported for approval pipelines and still fails
+    /// closed at resume.
+    pub store_persist_armed: bool,
 
     /// ID of a previous response to continue from.
     ///
@@ -523,6 +550,8 @@ impl Default for ResponsesState {
             messages: Vec::new(),
             parallel_tool_calls: true,
             persisted_messages: Vec::new(),
+            pending_approvals: Vec::new(),
+            store_persist_armed: false,
             previous_response_id: None,
             previous_tools: Vec::new(),
             previous_usage: None,
@@ -1145,6 +1174,7 @@ mod tests {
         assert!(state.output_items().is_empty());
         assert!(state.parallel_tool_calls);
         assert!(state.persisted_messages.is_empty());
+        assert!(!state.store_persist_armed);
         assert!(state.previous_response_id.is_none());
         assert!(state.previous_tools.is_empty());
         assert!(state.previous_usage.is_none());

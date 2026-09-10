@@ -3,7 +3,7 @@
 
 //! Unit tests for the `openai_mcp_dispatch` filter.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use praxis_filter::FilterAction;
@@ -18,13 +18,19 @@ use super::{
 };
 use crate::{
     openai::responses::{
+        DEFAULT_TENANT_ID,
         mcp_dispatch::{
-            approval::{ApprovalPolicy, parse_approval_policy, requires_approval},
+            approval::{
+                ApprovalError, ApprovalPolicy, ResolvedApproval, build_approved_tool_call, build_denial_message,
+                extract_approval_responses, is_approval_response, parse_approval_policy, parse_approval_response,
+                requires_approval, resolve_approval, target_fingerprint,
+            },
             config::{McpDispatchConfig, build_config},
         },
         openai_mcp_tool_resolve::{McpToolIndex, encode_function_name},
         state::{McpApprovalState, ResponsesState},
     },
+    store::{PendingApprovalRecord, ResponseStore, ResponseStoreRegistry, SqliteResponseStore},
     test_utils::{make_filter_context, make_request},
 };
 
@@ -483,7 +489,7 @@ fn find_approval_required_ambiguous_tool_requires_approval() {
 
 #[test]
 fn build_success_result_message_format() {
-    let result = build_success_result("call_1", "weather", "get_weather", "{}", "Sunny, 22°C", false);
+    let result = build_success_result("call_1", "weather", "get_weather", "{}", "Sunny, 22°C", false, None);
 
     assert_eq!(result.message["type"], "function_call_output");
     assert_eq!(result.message["call_id"], "call_1");
@@ -496,7 +502,7 @@ fn build_success_result_message_format() {
 
 #[test]
 fn build_success_result_with_tool_error() {
-    let result = build_success_result("call_1", "weather", "get_weather", "{}", "Not found", true);
+    let result = build_success_result("call_1", "weather", "get_weather", "{}", "Not found", true, None);
 
     assert_eq!(result.message["type"], "function_call_output");
     assert_eq!(result.message["output"], "Error: Not found");
@@ -516,6 +522,7 @@ fn build_success_result_output_item_format() {
         "{\"city\":\"Paris\"}",
         "result",
         false,
+        None,
     );
 
     assert_eq!(result.output_item["type"], "mcp_call");
@@ -532,7 +539,7 @@ fn build_success_result_output_item_format() {
 
 #[test]
 fn build_error_result_includes_error_message() {
-    let result = build_error_result("call_1", "weather", "get_weather", "{}", "connection refused");
+    let result = build_error_result("call_1", "weather", "get_weather", "{}", "connection refused", None);
 
     assert_eq!(result.message["type"], "function_call_output");
     assert_eq!(result.message["output"], "Error: connection refused");
@@ -683,8 +690,8 @@ fn content_blocks_to_output_rejects_oversized_text_before_joining() {
 
 #[test]
 fn retained_result_batch_stops_at_aggregate_byte_limit() {
-    let first = build_success_result("c1", "srv", "tool", "{}", "result", false);
-    let second = build_success_result("c2", "srv", "tool", "{}", "result", false);
+    let first = build_success_result("c1", "srv", "tool", "{}", "result", false, None);
+    let second = build_success_result("c2", "srv", "tool", "{}", "result", false, None);
     let limit = first.retained_bytes().unwrap();
     let mut retained_bytes = 0;
     let mut results = Vec::new();
@@ -810,7 +817,7 @@ fn process_call_result_preserves_mixed_content_in_both_representations() {
         ),
     ];
     let call_result = rmcp::model::CallToolResult::success(blocks.clone());
-    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", TEST_MAX_RESULT_BYTES);
+    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", None, TEST_MAX_RESULT_BYTES);
 
     let model_facing = result.message["output"]
         .as_str()
@@ -838,7 +845,7 @@ fn process_call_result_preserves_mixed_content_in_both_representations() {
 #[test]
 fn resolve_tool_entry_returns_entry_for_unique_tool() {
     let map = sample_tool_map();
-    let (key, entry) = resolve_tool_entry(&McpToolIndex::new(&map), "weather__get_weather", "call_1").unwrap();
+    let (key, entry) = resolve_tool_entry(&McpToolIndex::new(&map), "weather__get_weather", "call_1", None).unwrap();
     assert_eq!(entry.get("server_label").unwrap(), "weather");
     assert_eq!(key.1, "get_weather", "key should contain the original tool name");
 }
@@ -846,14 +853,14 @@ fn resolve_tool_entry_returns_entry_for_unique_tool() {
 #[test]
 fn resolve_tool_entry_returns_none_for_unknown_tool() {
     let map = sample_tool_map();
-    let result = resolve_tool_entry(&McpToolIndex::new(&map), "nonexistent", "call_1");
+    let result = resolve_tool_entry(&McpToolIndex::new(&map), "nonexistent", "call_1", None);
     assert!(matches!(result, Err(None)), "unknown tool should return Err(None)");
 }
 
 #[test]
 fn resolve_tool_entry_returns_error_for_ambiguous_tool() {
     let map = lossy_collision_tool_map();
-    let result = resolve_tool_entry(&McpToolIndex::new(&map), "my_server__get", "call_1");
+    let result = resolve_tool_entry(&McpToolIndex::new(&map), "my_server__get", "call_1", None);
     let err = result.unwrap_err().expect("should return error result for ambiguity");
     assert!(
         err.output_item["error"].as_str().unwrap().contains("ambiguous"),
@@ -868,7 +875,7 @@ fn resolve_tool_entry_returns_error_for_ambiguous_tool() {
 #[test]
 fn parse_call_arguments_object_passthrough() {
     let tc = serde_json::json!({"name": "tool", "arguments": {"key": "value"}});
-    let (args, args_str) = parse_call_arguments(&tc, "c1", "srv", "tool").unwrap();
+    let (args, args_str) = parse_call_arguments(&tc, "c1", "srv", "tool", None).unwrap();
     assert!(args.is_object());
     assert!(args_str.contains("key"));
 }
@@ -876,21 +883,21 @@ fn parse_call_arguments_object_passthrough() {
 #[test]
 fn parse_call_arguments_string_parsed() {
     let tc = serde_json::json!({"name": "tool", "arguments": "{\"a\": 1}"});
-    let (args, _) = parse_call_arguments(&tc, "c1", "srv", "tool").unwrap();
+    let (args, _) = parse_call_arguments(&tc, "c1", "srv", "tool", None).unwrap();
     assert_eq!(args["a"], 1);
 }
 
 #[test]
 fn parse_call_arguments_malformed_string_returns_error() {
     let tc = serde_json::json!({"name": "tool", "arguments": "not-json"});
-    let err = parse_call_arguments(&tc, "c1", "srv", "tool").unwrap_err();
+    let err = parse_call_arguments(&tc, "c1", "srv", "tool", None).unwrap_err();
     assert!(err.output_item["error"].as_str().unwrap().contains("malformed"));
 }
 
 #[test]
 fn parse_call_arguments_absent_defaults_to_empty_object() {
     let tc = serde_json::json!({"name": "tool"});
-    let (args, args_str) = parse_call_arguments(&tc, "c1", "srv", "tool").unwrap();
+    let (args, args_str) = parse_call_arguments(&tc, "c1", "srv", "tool", None).unwrap();
     assert!(args.is_object());
     assert!(args.as_object().unwrap().is_empty());
     assert_eq!(
@@ -902,7 +909,7 @@ fn parse_call_arguments_absent_defaults_to_empty_object() {
 #[test]
 fn parse_call_arguments_string_not_double_encoded() {
     let tc = serde_json::json!({"name": "tool", "arguments": "{\"a\": 1}"});
-    let (_, args_str) = parse_call_arguments(&tc, "c1", "srv", "tool").unwrap();
+    let (_, args_str) = parse_call_arguments(&tc, "c1", "srv", "tool", None).unwrap();
     assert_eq!(
         args_str, "{\"a\": 1}",
         "string arguments keep their original representation verbatim"
@@ -912,7 +919,7 @@ fn parse_call_arguments_string_not_double_encoded() {
 #[test]
 fn parse_call_arguments_malformed_string_error_keeps_raw_arguments() {
     let tc = serde_json::json!({"name": "tool", "arguments": "not-json"});
-    let err = parse_call_arguments(&tc, "c1", "srv", "tool").unwrap_err();
+    let err = parse_call_arguments(&tc, "c1", "srv", "tool", None).unwrap_err();
     assert_eq!(
         err.output_item["arguments"], "not-json",
         "the malformed raw string must survive into the error body"
@@ -926,7 +933,7 @@ fn parse_call_arguments_malformed_string_error_keeps_raw_arguments() {
 #[test]
 fn process_call_result_success() {
     let call_result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("hello")]);
-    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", TEST_MAX_RESULT_BYTES);
+    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", None, TEST_MAX_RESULT_BYTES);
     assert_eq!(result.message["output"], "hello");
     assert_eq!(result.output_item["type"], "mcp_call");
     assert!(result.output_item.get("error").is_none() || result.output_item["error"].is_null());
@@ -936,7 +943,7 @@ fn process_call_result_success() {
 fn process_call_result_tool_error() {
     let mut call_result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("oops")]);
     call_result.is_error = Some(true);
-    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", TEST_MAX_RESULT_BYTES);
+    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", None, TEST_MAX_RESULT_BYTES);
     assert!(result.message["output"].as_str().unwrap().starts_with("Error:"));
     assert_eq!(result.output_item["error"], "oops");
 }
@@ -947,7 +954,7 @@ fn process_call_result_transport_error() {
         url: crate::mcp_client::McpDisplayUrl::from_uri(&"http://example.com/mcp".parse().unwrap()),
         tool_name: "tool".to_owned(),
     };
-    let result = process_call_result(Err(err), "c1", "srv", "tool", "{}", TEST_MAX_RESULT_BYTES);
+    let result = process_call_result(Err(err), "c1", "srv", "tool", "{}", None, TEST_MAX_RESULT_BYTES);
     assert!(result.message["output"].as_str().unwrap().contains("Error:"));
     assert!(
         result.output_item["error"]
@@ -1258,7 +1265,7 @@ async fn execute_mcp_calls_rejects_an_aggregate_result_overflow() {
 #[test]
 fn process_call_result_empty_content_produces_empty_output() {
     let call_result = rmcp::model::CallToolResult::success(vec![]);
-    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", TEST_MAX_RESULT_BYTES);
+    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", None, TEST_MAX_RESULT_BYTES);
     assert_eq!(result.message["output"], "");
 }
 
@@ -1268,7 +1275,7 @@ fn process_call_result_multi_text_joins_with_newline() {
         rmcp::model::ContentBlock::text("hello"),
         rmcp::model::ContentBlock::text("world"),
     ]);
-    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", TEST_MAX_RESULT_BYTES);
+    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", None, TEST_MAX_RESULT_BYTES);
     assert_eq!(result.message["output"], "hello\nworld");
 }
 
@@ -1276,7 +1283,7 @@ fn process_call_result_multi_text_joins_with_newline() {
 fn process_call_result_image_content_is_preserved() {
     let call_result =
         rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::image("base64data", "image/png")]);
-    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", TEST_MAX_RESULT_BYTES);
+    let result = process_call_result(Ok(call_result), "c1", "srv", "tool", "{}", None, TEST_MAX_RESULT_BYTES);
 
     let model_output = result.message["output"].as_str().unwrap();
     assert!(
@@ -1524,17 +1531,20 @@ fn on_response_body_ends_stream_for_mcp_batch_over_hard_cap() {
     assert!(ctx.extensions.get::<ResponsesState>().unwrap().tool_calls.is_empty());
 }
 
-#[test]
-fn on_response_body_approval_required_sets_done_metadata() {
+#[tokio::test]
+async fn on_response_body_approval_required_sets_done_metadata() {
     let filter = make_dispatch_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(&req);
     let state = ResponsesState {
         mcp_tool_map: sample_tool_map(),
         tool_calls: vec![json!({"name": "weather__get_weather", "call_id": "c1"})],
+        // The store filter armed persistence for this exchange.
+        store_persist_armed: true,
         ..ResponsesState::default()
     };
     ctx.extensions.insert(state);
+    register_store(&mut ctx, make_approval_store().await);
     let mut body = None;
     let result = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
     assert!(matches!(result, FilterAction::Continue));
@@ -1545,8 +1555,8 @@ fn on_response_body_approval_required_sets_done_metadata() {
     assert_dispatch_action(&ctx, "done");
 }
 
-#[test]
-fn on_response_body_approval_emits_correct_arguments() {
+#[tokio::test]
+async fn on_response_body_approval_emits_correct_arguments() {
     let filter = make_dispatch_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(&req);
@@ -1557,9 +1567,12 @@ fn on_response_body_approval_emits_correct_arguments() {
             "call_id": "c1",
             "arguments": "{\"city\":\"Paris\"}"
         })],
+        // The store filter armed persistence for this exchange.
+        store_persist_armed: true,
         ..ResponsesState::default()
     };
     ctx.extensions.insert(state);
+    register_store(&mut ctx, make_approval_store().await);
     let mut body = None;
     drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
 
@@ -1573,8 +1586,8 @@ fn on_response_body_approval_emits_correct_arguments() {
     );
 }
 
-#[test]
-fn on_response_body_approval_serializes_approval_request_into_body() {
+#[tokio::test]
+async fn on_response_body_approval_serializes_approval_request_into_body() {
     let filter = make_dispatch_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(&req);
@@ -1589,9 +1602,12 @@ fn on_response_body_approval_serializes_approval_request_into_body() {
             "id": "resp_123",
             "output": []
         }),
+        // The store filter armed persistence for this exchange.
+        store_persist_armed: true,
         ..ResponsesState::default()
     };
     ctx.extensions.insert(state);
+    register_store(&mut ctx, make_approval_store().await);
 
     let mut body = Some(Bytes::from(r#"{"id":"resp_123","output":[]}"#));
     let result = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
@@ -1606,6 +1622,226 @@ fn on_response_body_approval_serializes_approval_request_into_body() {
         "output item should be mcp_approval_request"
     );
     assert_eq!(output[0]["id"], "c1");
+}
+
+#[test]
+fn on_response_body_approval_required_with_store_disabled_is_rejected() {
+    // An approval round trip is only completable if this response is persisted:
+    // the resume turn correlates its mcp_approval_response to the server-owned
+    // pending record via previous_response_id. With store=false nothing is
+    // persisted, so the proxy must fail closed here instead of emitting an
+    // mcp_approval_request the mandatory follow-up can never resume.
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    let state = ResponsesState {
+        mcp_tool_map: sample_tool_map(),
+        tool_calls: vec![json!({"name": "weather__get_weather", "call_id": "c1"})],
+        request_body: json!({"model": "gpt-4.1", "store": false}),
+        ..ResponsesState::default()
+    };
+    ctx.extensions.insert(state);
+    let mut body = Some(Bytes::from(r#"{"id":"resp_123","output":[]}"#));
+    let rejection = expect_reject(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    assert_eq!(
+        rejection.status, 400,
+        "combining require_approval with store=false is a client error"
+    );
+    assert!(
+        reject_message(&rejection).contains("store"),
+        "the error should explain approvals require store=true: {}",
+        reject_message(&rejection)
+    );
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.pending_approvals.is_empty(),
+        "no pending approval may be recorded when the response won't be stored"
+    );
+    assert!(
+        state.accumulated_output.is_empty(),
+        "no mcp_approval_request may be emitted when it can never be resumed"
+    );
+}
+
+#[tokio::test]
+async fn on_response_body_approval_required_with_store_enabled_still_emits() {
+    // The gate is specifically store=false or a store that did not arm
+    // persistence for this exchange, not "the store field is present": an
+    // explicit store=true with the store filter armed must still pause for
+    // approval and record the server-owned pending row.
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    let state = ResponsesState {
+        mcp_tool_map: sample_tool_map(),
+        tool_calls: vec![json!({"name": "weather__get_weather", "call_id": "c1"})],
+        request_body: json!({"model": "gpt-4.1", "store": true}),
+        // The store filter armed persistence for this exchange during the
+        // request phase.
+        store_persist_armed: true,
+        ..ResponsesState::default()
+    };
+    ctx.extensions.insert(state);
+    register_store(&mut ctx, make_approval_store().await);
+    let mut body = Some(Bytes::from(r#"{"id":"resp_123","output":[]}"#));
+    let result = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+    assert!(
+        matches!(result, FilterAction::Continue),
+        "store=true must still pause for approval"
+    );
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert_eq!(
+        state.pending_approvals.len(),
+        1,
+        "store=true records the server-owned pending approval"
+    );
+}
+
+#[test]
+fn on_response_body_approval_required_without_registered_store_is_rejected() {
+    // store defaults to true, but no store filter ran to arm persistence for
+    // this exchange (store_persist_armed stays false) and no backend is
+    // registered. Persisting the server-owned pending record is then impossible,
+    // so the mandatory mcp_approval_response follow-up could never resume via
+    // previous_response_id. The proxy must fail closed here instead of emitting
+    // an mcp_approval_request that can never be resumed. This mirrors the resume
+    // path, which returns the same 500 when the store is unavailable.
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    let state = ResponsesState {
+        mcp_tool_map: sample_tool_map(),
+        tool_calls: vec![json!({"name": "weather__get_weather", "call_id": "c1"})],
+        // No explicit store field: it defaults to true, so the client opted in.
+        request_body: json!({"model": "gpt-4.1"}),
+        ..ResponsesState::default()
+    };
+    ctx.extensions.insert(state);
+    // Deliberately do NOT register a ResponseStoreRegistry.
+    let mut body = Some(Bytes::from(r#"{"id":"resp_123","output":[]}"#));
+    let rejection = expect_reject(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    assert_eq!(
+        rejection.status, 500,
+        "a missing store backend is a server configuration error, not a client error"
+    );
+    assert!(
+        reject_message(&rejection).contains("store"),
+        "the error should explain a store is required to persist the approval: {}",
+        reject_message(&rejection)
+    );
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.pending_approvals.is_empty(),
+        "no pending approval may be recorded when no store can persist it"
+    );
+    assert!(
+        state.accumulated_output.is_empty(),
+        "no mcp_approval_request may be emitted when it can never be resumed"
+    );
+}
+
+#[tokio::test]
+async fn on_response_body_approval_required_registered_but_not_armed_is_rejected() {
+    // Registry membership is pipeline-scoped, not exchange-scoped: a store
+    // backend can be registered (by a store filter that is response-conditioned,
+    // mis-ordered relative to dispatch, or otherwise skips persistence for THIS
+    // exchange) while this response is never persisted. Emitting an
+    // mcp_approval_request in that state strands the client with an approval the
+    // mandatory follow-up can never resume. The proxy must gate on the
+    // exchange-scoped persistence-armed marker the store filter sets only when it
+    // will persist THIS response, not on registry membership alone.
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    let state = ResponsesState {
+        mcp_tool_map: sample_tool_map(),
+        tool_calls: vec![json!({"name": "weather__get_weather", "call_id": "c1"})],
+        // store defaults to true (client opted in), yet the store filter never
+        // armed persistence for this exchange (store_persist_armed stays false).
+        request_body: json!({"model": "gpt-4.1"}),
+        ..ResponsesState::default()
+    };
+    ctx.extensions.insert(state);
+    // A backend IS registered in the pipeline registry, but that only proves
+    // pipeline-scoped membership — not that persistence will run for this
+    // exchange.
+    register_store(&mut ctx, make_approval_store().await);
+    let mut body = Some(Bytes::from(r#"{"id":"resp_123","output":[]}"#));
+    let rejection = expect_reject(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    assert_eq!(
+        rejection.status, 500,
+        "a registered-but-unarmed store cannot persist this exchange; fail closed"
+    );
+    assert!(
+        reject_message(&rejection).contains("store"),
+        "the error should explain a store is required to persist the approval: {}",
+        reject_message(&rejection)
+    );
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.pending_approvals.is_empty(),
+        "no pending approval may be recorded when this exchange will not persist"
+    );
+    assert!(
+        state.accumulated_output.is_empty(),
+        "no mcp_approval_request may be emitted when it can never be resumed"
+    );
+}
+
+#[tokio::test]
+async fn on_response_body_unresumable_approval_on_committed_stream_emits_sse_error() {
+    // The persistence guard fires from the response-body hook. On a committed
+    // stream (subrequest_response_mode == Streaming) the SSE headers and model
+    // events are already on the wire, so returning FilterAction::Reject would be
+    // converted into a transport error after a truncated success — the client
+    // never learns why. Instead the guard must hand a terminal error to the
+    // logical-stream finalizer via the committed-stream metadata and skip
+    // persistence, without emitting an unresumable mcp_approval_request.
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    ctx.set_subrequest_response_mode(praxis_filter::SubRequestResponseMode::Streaming);
+    let state = ResponsesState {
+        mcp_tool_map: sample_tool_map(),
+        tool_calls: vec![json!({"name": "weather__get_weather", "call_id": "c1"})],
+        // store defaults to true (client opted in), yet the store filter never
+        // armed persistence for this exchange, so the approval is unresumable.
+        request_body: json!({"model": "gpt-4.1", "stream": true}),
+        ..ResponsesState::default()
+    };
+    ctx.extensions.insert(state);
+    register_store(&mut ctx, make_approval_store().await);
+    let mut body = Some(Bytes::from(r#"{"id":"resp_123","output":[]}"#));
+    let result = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+    assert!(
+        matches!(result, FilterAction::Continue),
+        "a committed stream must not fail closed with FilterAction::Reject; the error \
+         reaches the client through the logical-stream finalizer instead"
+    );
+    assert_eq!(
+        ctx.get_metadata("responses.stream_error_code"),
+        Some("server_error"),
+        "the committed-stream error code must be published for the finalizer"
+    );
+    assert!(
+        ctx.get_metadata("responses.stream_error_message")
+            .is_some_and(|m| m.contains("store")),
+        "the committed-stream error message must explain a store is required"
+    );
+    assert_eq!(
+        ctx.get_metadata("responses.skip_persist"),
+        Some("true"),
+        "an unresumable approval must not persist the committed response"
+    );
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.pending_approvals.is_empty(),
+        "no pending approval may be recorded when this exchange will not persist"
+    );
+    assert!(
+        state.accumulated_output.is_empty(),
+        "no mcp_approval_request may be emitted when it can never be resumed"
+    );
 }
 
 #[tokio::test]
@@ -1625,8 +1861,11 @@ async fn approval_only_batch_returns_after_web_search_sibling_reentry() {
         ],
         web_search_calls: vec![json!({"type":"web_search_call", "id":"ws_1", "status":"completed"})],
         response_object: json!({"id":"resp_batch", "output":[]}),
+        // Approvals are server-owned: arm persistence so the round is resumable.
+        store_persist_armed: true,
         ..ResponsesState::default()
     });
+    register_store(&mut ctx, make_approval_store().await);
     let mut body = Some(Bytes::from_static(br#"{"id":"resp_batch","output":[]}"#));
 
     let action = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
@@ -1663,7 +1902,7 @@ fn oversized_completed_result_becomes_a_bounded_per_call_error() {
         "name": "tool_name_far_beyond_the_normal_schema_boundary_but_still_bounded_by_the_fallback",
         "call_id": "call_id_far_beyond_the_normal_schema_boundary_but_still_bounded_by_the_fallback"
     });
-    let result = build_success_result("c1", "srv", "tool", "{}", &"x".repeat(4096), false);
+    let result = build_success_result("c1", "srv", "tool", "{}", &"x".repeat(4096), false, None);
 
     let bounded = super::fit_result_or_limit_error(&call, result, super::MIN_RETAINED_RESULT_BYTES);
 
@@ -1754,8 +1993,11 @@ async fn mixed_approval_batch_executes_ungated_sibling_before_returning_approval
         tool_calls: calls.clone(),
         accumulated_output: calls.clone(),
         response_object: json!({"id":"resp_batch", "object":"response", "status":"completed", "output":calls}),
+        // Approvals are server-owned: arm persistence so the round is resumable.
+        store_persist_armed: true,
         ..ResponsesState::default()
     });
+    register_store(&mut ctx, make_approval_store().await);
     let mut response_body = Some(Bytes::from_static(br#"{"id":"resp_batch","output":[]}"#));
 
     let response_action = filter.on_response_body(&mut ctx, &mut response_body, true).unwrap();
@@ -2019,4 +2261,960 @@ async fn resolve_to_dispatch_execute_with_original_name() {
     );
     assert_eq!(output[0]["server_label"], label);
     assert!(state.tool_calls.is_empty(), "should clear executed MCP tool calls");
+}
+
+// =========================================================================
+// Approval Response Round Trip
+// =========================================================================
+
+/// A tool map whose single entry requires approval and points at an
+/// unreachable server, so an approved call resolves and executes (failing
+/// fast with a connection error) without contacting a real host.
+/// The resolved tool-map entry for the `weather` server shared by the approval
+/// tests.
+///
+/// A loopback URL under the default `allow_loopback=false` policy makes any
+/// executed approved call fail closed instantly via the SSRF guard — no
+/// network round trip, no timeout wait. The resume/consume/inject logic is
+/// what these tests exercise; `build_error_result` still preserves the
+/// call identity (id, name, `server_label`, arguments, `approval_request_id`)
+/// that the "preserved call" assertions read, so a fast SSRF failure and a
+/// real tool response are equivalent for their purpose.
+fn weather_entry() -> serde_json::Value {
+    json!({
+        "server_label": "weather",
+        "server_url": "http://127.0.0.1:1/mcp",
+        "headers": null,
+        "authorization": null,
+        "tool_definition": {"name": "get_weather"},
+        "require_approval": "always",
+    })
+}
+
+fn approval_tool_map() -> HashMap<(String, String), serde_json::Value> {
+    let mut map = HashMap::new();
+    map.insert(("weather".to_owned(), "get_weather".to_owned()), weather_entry());
+    map
+}
+
+/// The stored `mcp_approval_request` Request 1 emitted, as it survives into
+/// Request 2's `persisted_messages` (the source of truth for target binding).
+///
+/// Carries the `target_fingerprint` of [`weather_entry`] so resolution against
+/// [`approval_tool_map`] binds the same target identity it was granted for; a
+/// missing or divergent fingerprint fails closed.
+fn stored_approval_request(id: &str, label: &str, name: &str, arguments: &str) -> serde_json::Value {
+    json!({
+        "type": "mcp_approval_request",
+        "id": id,
+        "name": name,
+        "server_label": label,
+        "arguments": arguments,
+        "target_fingerprint": target_fingerprint(&weather_entry()),
+    })
+}
+
+/// A client-supplied `mcp_approval_response` decision.
+fn approval_response(id: &str, approve: bool, reason: Option<&str>) -> serde_json::Value {
+    let mut item = json!({
+        "type": "mcp_approval_response",
+        "approval_request_id": id,
+        "approve": approve,
+    });
+    if let Some(reason) = reason {
+        item["reason"] = json!(reason);
+    }
+    item
+}
+
+/// Build a server-owned pending-approval record as the proxy would have written
+/// it when it emitted the `mcp_approval_request`.
+fn pending_record(id: &str, label: &str, name: &str, arguments: &str, fingerprint: String) -> PendingApprovalRecord {
+    PendingApprovalRecord {
+        approval_id: id.to_owned(),
+        server_label: label.to_owned(),
+        tool_name: name.to_owned(),
+        arguments: arguments.to_owned(),
+        target_fingerprint: fingerprint,
+    }
+}
+
+/// The response id that issued the seeded approvals. A pending approval is
+/// scoped to its originating response, so resume tests set
+/// [`ResponsesState::previous_response_id`] to this value to be in scope.
+const APPROVAL_PREV_ID: &str = "resp_prev";
+
+/// Seed `store` with the pending approval the proxy would have recorded for a
+/// weather call under `response_id`. Its fingerprint binds to [`weather_entry`]
+/// so a resume against [`approval_tool_map`] matches; correlation is
+/// server-owned, never inferred from conversation history.
+async fn seed_weather_approval(store: &dyn ResponseStore, response_id: &str, id: &str, arguments: &str) {
+    let record = pending_record(
+        id,
+        "weather",
+        "get_weather",
+        arguments,
+        target_fingerprint(&weather_entry()),
+    );
+    store
+        .record_pending_approvals(DEFAULT_TENANT_ID, response_id, std::slice::from_ref(&record), 1000)
+        .await
+        .expect("seeding the pending approval should succeed");
+}
+
+/// A fresh in-memory SQLite store for the approval-consumption path.
+async fn make_approval_store() -> Arc<dyn ResponseStore> {
+    Arc::new(
+        SqliteResponseStore::new("sqlite::memory:", "resp", "conv", None, None)
+            .await
+            .expect("in-memory store should initialize"),
+    )
+}
+
+/// Insert a registry exposing `store` under the default name into `ctx`.
+fn register_store(ctx: &mut praxis_filter::HttpFilterContext<'_>, store: Arc<dyn ResponseStore>) {
+    let registry = ResponseStoreRegistry::new();
+    registry
+        .register(&Arc::from("default"), store)
+        .expect("register should succeed");
+    ctx.extensions.insert(registry);
+}
+
+/// Unwrap a rejecting filter action.
+fn expect_reject(action: FilterAction) -> praxis_filter::Rejection {
+    match action {
+        FilterAction::Reject(rejection) => rejection,
+        _ => panic!("expected FilterAction::Reject, resume did not fail closed"),
+    }
+}
+
+/// Parse the `error.message` from a non-streaming rejection body.
+fn reject_message(rejection: &praxis_filter::Rejection) -> String {
+    let body = rejection.body.clone().expect("rejection carries a body");
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("rejection body is JSON");
+    parsed["error"]["message"]
+        .as_str()
+        .expect("error.message is a string")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn resume_approval_approve_executes_once_and_preserves_call() {
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    let store = make_approval_store().await;
+    let args = "{\"city\":\"Paris\"}";
+    seed_weather_approval(store.as_ref(), APPROVAL_PREV_ID, "call_1", args).await;
+    register_store(&mut ctx, store);
+
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let result = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(result, FilterAction::Continue),
+        "approval should resume, not reject"
+    );
+
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        !state.messages.iter().any(is_approval_response),
+        "mcp_approval_response must be stripped from backend-bound messages"
+    );
+    assert_eq!(state.accumulated_output.len(), 1, "exactly one tools/call must run");
+    let call = &state.accumulated_output[0];
+    assert_eq!(call["type"], "mcp_call");
+    assert_eq!(call["id"], "call_1", "call id preserved across the round trip");
+    assert_eq!(call["name"], "get_weather", "original tool name preserved");
+    assert_eq!(call["server_label"], "weather", "server label preserved");
+    assert!(
+        call["arguments"].as_str().unwrap().contains("Paris"),
+        "arguments preserved from the stored request"
+    );
+    assert_eq!(
+        call["approval_request_id"], "call_1",
+        "mcp_call must reference the authorizing approval"
+    );
+    assert!(state.tool_calls.is_empty(), "executed approved call must be cleared");
+}
+
+#[tokio::test]
+async fn resume_approval_deny_resumes_without_tool_call() {
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    let store = make_approval_store().await;
+    seed_weather_approval(store.as_ref(), APPROVAL_PREV_ID, "call_1", "{}").await;
+    register_store(&mut ctx, store);
+
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", false, Some("too risky"))],
+        ..ResponsesState::default()
+    });
+
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let result = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(result, FilterAction::Continue),
+        "denial should resume inference"
+    );
+
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.accumulated_output.is_empty(),
+        "denial must perform zero tools/call (no mcp_call output)"
+    );
+    assert!(
+        !state.messages.iter().any(is_approval_response),
+        "mcp_approval_response must be stripped"
+    );
+    assert!(
+        !state.messages.iter().any(|m| m["type"] == "mcp_call"),
+        "denial must not fabricate an mcp_call item"
+    );
+    let denial = state
+        .messages
+        .iter()
+        .find(|m| m["type"] == "function_call_output")
+        .expect("denial should append a function_call_output");
+    assert_eq!(denial["call_id"], "call_1", "denial correlates to the original call id");
+    let output = denial["output"].as_str().unwrap();
+    assert!(
+        output.contains("denied"),
+        "denial output should state the tool was denied"
+    );
+    assert!(output.contains("too risky"), "denial output should surface the reason");
+    assert!(
+        state
+            .persisted_messages
+            .iter()
+            .any(|m| m["type"] == "function_call_output"),
+        "denial should be persisted for the durable trace"
+    );
+}
+
+#[tokio::test]
+async fn resume_approval_replay_is_rejected() {
+    let store = make_approval_store().await;
+    seed_weather_approval(store.as_ref(), APPROVAL_PREV_ID, "call_1", "{}").await;
+    let filter = make_dispatch_filter();
+
+    // First request approves and executes.
+    let req1 = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx1 = make_filter_context(&req1);
+    register_store(&mut ctx1, Arc::clone(&store));
+    ctx1.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body1 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let first = filter.on_request_body(&mut ctx1, &mut body1, true).await.unwrap();
+    assert!(matches!(first, FilterAction::Continue), "first approval should succeed");
+
+    // Second request replays the same approval and must fail closed.
+    let req2 = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx2 = make_filter_context(&req2);
+    register_store(&mut ctx2, Arc::clone(&store));
+    ctx2.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx2, &mut body2, true).await.unwrap());
+    assert_eq!(rejection.status, 400, "replay is a client error");
+    assert!(
+        reject_message(&rejection).contains("already been used"),
+        "replay error should explain the approval was already used"
+    );
+
+    let state = ctx2.extensions.get::<ResponsesState>().unwrap();
+    assert!(state.tool_calls.is_empty(), "replay must not execute the tool again");
+    assert!(
+        state.accumulated_output.is_empty(),
+        "replay must produce no second mcp_call"
+    );
+}
+
+#[tokio::test]
+async fn resume_approval_deny_then_approve_is_rejected() {
+    let store = make_approval_store().await;
+    seed_weather_approval(store.as_ref(), APPROVAL_PREV_ID, "call_1", "{}").await;
+    let filter = make_dispatch_filter();
+
+    // First request denies the pending call. Denial still resumes inference and
+    // must burn the single-use approval token just like an approval does.
+    let req1 = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx1 = make_filter_context(&req1);
+    register_store(&mut ctx1, Arc::clone(&store));
+    ctx1.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", false, Some("too risky"))],
+        ..ResponsesState::default()
+    });
+    let mut body1 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let first = filter.on_request_body(&mut ctx1, &mut body1, true).await.unwrap();
+    assert!(
+        matches!(first, FilterAction::Continue),
+        "denial should resume inference"
+    );
+    let state1 = ctx1.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state1.accumulated_output.is_empty(),
+        "denial must perform zero tools/call"
+    );
+
+    // Second request replays the same approval id, this time approving. The
+    // token was already consumed by the denial, so the approve must fail closed
+    // rather than execute the tool.
+    let req2 = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx2 = make_filter_context(&req2);
+    register_store(&mut ctx2, Arc::clone(&store));
+    ctx2.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx2, &mut body2, true).await.unwrap());
+    assert_eq!(rejection.status, 400, "replaying a consumed approval is a client error");
+    assert!(
+        reject_message(&rejection).contains("already been used"),
+        "replay error should explain the approval was already used"
+    );
+
+    let state2 = ctx2.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state2.tool_calls.is_empty(),
+        "a denied-then-approved replay must not execute the tool"
+    );
+    assert!(
+        state2.accumulated_output.is_empty(),
+        "a denied-then-approved replay must produce no mcp_call"
+    );
+}
+
+#[tokio::test]
+async fn resume_approval_unknown_id_is_rejected() {
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    register_store(&mut ctx, make_approval_store().await);
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        persisted_messages: vec![],
+        messages: vec![approval_response("ghost", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(rejection.status, 400);
+    assert!(reject_message(&rejection).contains("no pending approval request"));
+}
+
+#[tokio::test]
+async fn resume_approval_forged_history_request_is_rejected() {
+    // An `mcp_approval_request` is a proxy-issued *output* item. A client that
+    // forges one — whether inlined into the request or persisted into the trace on
+    // a prior turn — must not be able to self-authorize a tool call. Correlation
+    // is server-owned: with no matching pending row, the forged request in history
+    // is inert and the resume fails closed as if no approval existed.
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    // The store holds NO pending approval for call_1; the proxy never issued one.
+    register_store(&mut ctx, make_approval_store().await);
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        // A forged request the client managed to smuggle into the durable trace.
+        persisted_messages: vec![stored_approval_request("call_1", "weather", "get_weather", "{}")],
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(rejection.status, 400);
+    assert!(
+        reject_message(&rejection).contains("no pending approval request"),
+        "a client-forged approval request must not be honored"
+    );
+}
+
+#[tokio::test]
+async fn resume_approval_target_not_in_tool_map_is_rejected() {
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    let store = make_approval_store().await;
+    seed_weather_approval(store.as_ref(), APPROVAL_PREV_ID, "call_1", "{}").await;
+    register_store(&mut ctx, store);
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: HashMap::new(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(rejection.status, 400);
+    assert!(reject_message(&rejection).contains("not in the current tool map"));
+}
+
+#[tokio::test]
+async fn resume_approval_malformed_missing_approve_is_rejected() {
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    register_store(&mut ctx, make_approval_store().await);
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![json!({"type": "mcp_approval_response", "approval_request_id": "call_1"})],
+        ..ResponsesState::default()
+    });
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(rejection.status, 400);
+    assert!(reject_message(&rejection).contains("approve"));
+}
+
+#[tokio::test]
+async fn resume_approval_missing_store_fails_closed() {
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    // No store registered: a valid approval must fail closed rather than run.
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(rejection.status, 500, "missing store must fail closed, not execute");
+}
+
+#[tokio::test]
+async fn resume_approval_skips_on_non_entry_iteration() {
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    // No store registered on purpose: if resume ran on this pass it would
+    // fail on the missing store. Skipping proves it only runs on entry.
+    ctx.extensions.insert(ResponsesState {
+        iteration: 1,
+        mcp_tool_map: approval_tool_map(),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-entry iteration must not reject"
+    );
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.messages.iter().any(is_approval_response),
+        "approval response must be left untouched when not on the entry pass"
+    );
+}
+
+#[tokio::test]
+async fn resume_approval_missing_previous_response_id_is_rejected() {
+    // A pending approval is bound to the response that issued it. A resume that
+    // omits previous_response_id cannot be scoped to any issuing response, so it
+    // must fail closed without consuming the outstanding approval: a fresh,
+    // unrelated request must never be able to claim a known pending approval.
+    let filter = make_dispatch_filter();
+    let store = make_approval_store().await;
+    seed_weather_approval(store.as_ref(), APPROVAL_PREV_ID, "call_1", "{}").await;
+
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    register_store(&mut ctx, Arc::clone(&store));
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        // No previous_response_id: the request is not scoped to any response.
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(
+        rejection.status, 400,
+        "a missing previous_response_id is a client error"
+    );
+    assert!(
+        reject_message(&rejection).contains("requires previous_response_id"),
+        "the error should explain previous_response_id is required"
+    );
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.accumulated_output.is_empty(),
+        "no tool must run without a scoped approval"
+    );
+
+    // The outstanding approval must remain claimable: a correctly scoped resume
+    // still succeeds, proving the unscoped attempt burned nothing.
+    let req2 = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx2 = make_filter_context(&req2);
+    register_store(&mut ctx2, Arc::clone(&store));
+    ctx2.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let action = filter.on_request_body(&mut ctx2, &mut body2, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the correctly scoped resume should still succeed"
+    );
+    let state2 = ctx2.extensions.get::<ResponsesState>().unwrap();
+    assert_eq!(
+        state2.accumulated_output.len(),
+        1,
+        "the still-outstanding approval should execute exactly once"
+    );
+}
+
+#[tokio::test]
+async fn resume_approval_wrong_previous_response_id_is_rejected() {
+    // An approval issued by response R1 must not be consumable by a resume that
+    // claims a different originating response R2. Scoping is server-owned: under
+    // R2 there is no matching pending row, so the resume fails closed and R1's
+    // approval stays outstanding.
+    let filter = make_dispatch_filter();
+    let store = make_approval_store().await;
+    seed_weather_approval(store.as_ref(), APPROVAL_PREV_ID, "call_1", "{}").await;
+
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    register_store(&mut ctx, Arc::clone(&store));
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some("resp_other".to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(
+        rejection.status, 400,
+        "an approval scoped to a different response is a client error"
+    );
+    assert!(
+        reject_message(&rejection).contains("no pending approval request"),
+        "a cross-response approval must be treated as unknown"
+    );
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.accumulated_output.is_empty(),
+        "no tool must run for a cross-response approval"
+    );
+
+    // The approval issued by APPROVAL_PREV_ID must remain claimable.
+    let req2 = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx2 = make_filter_context(&req2);
+    register_store(&mut ctx2, Arc::clone(&store));
+    ctx2.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let action = filter.on_request_body(&mut ctx2, &mut body2, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the correctly scoped resume should succeed"
+    );
+    let state2 = ctx2.extensions.get::<ResponsesState>().unwrap();
+    assert_eq!(
+        state2.accumulated_output.len(),
+        1,
+        "the correctly scoped approval should execute exactly once"
+    );
+}
+
+#[tokio::test]
+async fn resume_approval_batch_exceeding_cap_is_rejected() {
+    // The agentic loop issues exactly one function call per round, so a resume
+    // turn carries a single approval. A larger batch is rejected before any
+    // store work: it both violates that invariant and, left unbounded, could
+    // exceed PostgreSQL's 16-bit Bind parameter ceiling in the consume query.
+    let filter = make_dispatch_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+    let store = make_approval_store().await;
+    seed_weather_approval(store.as_ref(), APPROVAL_PREV_ID, "call_1", "{}").await;
+    seed_weather_approval(store.as_ref(), APPROVAL_PREV_ID, "call_2", "{}").await;
+    register_store(&mut ctx, Arc::clone(&store));
+
+    ctx.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![
+            approval_response("call_1", true, None),
+            approval_response("call_2", true, None),
+        ],
+        ..ResponsesState::default()
+    });
+
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let rejection = expect_reject(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(rejection.status, 400, "an oversized approval batch is a client error");
+    assert!(
+        reject_message(&rejection).contains("at most"),
+        "the error should state the per-request approval cap: {}",
+        reject_message(&rejection)
+    );
+
+    // Nothing was consumed or applied: the batch fails closed before any side
+    // effect, so a corrected single-approval retry can still resume.
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.tool_calls.is_empty(),
+        "no approved tool call may be injected when the batch is rejected"
+    );
+    assert!(
+        state.accumulated_output.is_empty(),
+        "no tool may run when the batch is rejected"
+    );
+
+    // The still-outstanding approval remains claimable by a compliant retry.
+    let req2 = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx2 = make_filter_context(&req2);
+    register_store(&mut ctx2, Arc::clone(&store));
+    ctx2.extensions.insert(ResponsesState {
+        mcp_tool_map: approval_tool_map(),
+        previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
+        messages: vec![approval_response("call_1", true, None)],
+        ..ResponsesState::default()
+    });
+    let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
+    let action = filter.on_request_body(&mut ctx2, &mut body2, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a single-approval retry should resume after the oversized batch was rejected"
+    );
+    let state2 = ctx2.extensions.get::<ResponsesState>().unwrap();
+    assert_eq!(
+        state2.accumulated_output.len(),
+        1,
+        "the compliant retry executes the approved call exactly once"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// approval.rs pure functions
+// -----------------------------------------------------------------------------
+
+#[test]
+fn resolve_approval_binds_complete_stored_call() {
+    let map = approval_tool_map();
+    let input = parse_approval_response(&approval_response("call_1", true, Some("go ahead"))).expect("parse");
+    let pending = pending_record(
+        "call_1",
+        "weather",
+        "get_weather",
+        "{\"city\":\"Paris\"}",
+        target_fingerprint(&weather_entry()),
+    );
+    let resolved = resolve_approval(&input, &pending, &map).expect("should resolve");
+    assert_eq!(
+        resolved,
+        ResolvedApproval {
+            approval_id: "call_1".to_owned(),
+            approve: true,
+            reason: Some("go ahead".to_owned()),
+            server_label: "weather".to_owned(),
+            tool_name: "get_weather".to_owned(),
+            encoded_name: "weather__get_weather".to_owned(),
+            arguments: "{\"city\":\"Paris\"}".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn parse_approval_response_missing_approval_request_id_is_malformed() {
+    let response = json!({"type": "mcp_approval_response", "approve": true});
+    let err = parse_approval_response(&response).unwrap_err();
+    assert!(matches!(err, ApprovalError::Malformed(_)));
+    assert!(err.message().contains("approval_request_id"));
+}
+
+#[test]
+fn parse_approval_response_missing_approve_is_malformed() {
+    let response = json!({"type": "mcp_approval_response", "approval_request_id": "call_1"});
+    let err = parse_approval_response(&response).unwrap_err();
+    assert!(matches!(err, ApprovalError::Malformed(_)));
+    assert!(err.message().contains("approve"));
+}
+
+#[test]
+fn resolve_approval_target_missing_from_map_is_unresolvable() {
+    let map = HashMap::new();
+    let input = parse_approval_response(&approval_response("call_1", true, None)).expect("parse");
+    let pending = pending_record(
+        "call_1",
+        "weather",
+        "get_weather",
+        "{}",
+        target_fingerprint(&weather_entry()),
+    );
+    let err = resolve_approval(&input, &pending, &map).unwrap_err();
+    assert!(matches!(err, ApprovalError::TargetUnresolvable(_)));
+}
+
+#[test]
+fn resolve_approval_ambiguous_encoded_target_is_rejected() {
+    // Two distinct (label, name) pairs collide to the same encoded name. The
+    // ambiguity is caught while binding the target, before the fingerprint check.
+    let map = lossy_collision_tool_map();
+    let input = parse_approval_response(&approval_response("call_1", true, None)).expect("parse");
+    let pending = pending_record("call_1", "my.server", "get", "{}", "unchecked".to_owned());
+    let err = resolve_approval(&input, &pending, &map).unwrap_err();
+    assert!(matches!(err, ApprovalError::AmbiguousTarget(_)));
+}
+
+#[test]
+fn resolve_approval_diverging_identity_is_unresolvable() {
+    // Stored ("weather.v1","get_weather") encodes identically to the single
+    // tool-map entry ("weather_v1","get_weather") but is not the same target.
+    let mut map = HashMap::new();
+    map.insert(
+        ("weather_v1".to_owned(), "get_weather".to_owned()),
+        json!({
+            "server_label": "weather_v1",
+            "server_url": "http://192.0.2.1:1/mcp",
+            "headers": null,
+            "authorization": null,
+            "tool_definition": {"name": "get_weather"},
+            "require_approval": "always",
+        }),
+    );
+    let input = parse_approval_response(&approval_response("call_1", true, None)).expect("parse");
+    let pending = pending_record("call_1", "weather.v1", "get_weather", "{}", "unchecked".to_owned());
+    let err = resolve_approval(&input, &pending, &map).unwrap_err();
+    assert!(
+        matches!(err, ApprovalError::TargetUnresolvable(_)),
+        "identity divergence must fail closed even when the encoded name collides"
+    );
+}
+
+#[test]
+fn resolve_approval_rejects_redirected_target() {
+    // The approval was granted for the loopback weather server. The resume turn
+    // keeps the same (server_label, tool_name) but points the URL elsewhere, so
+    // the fingerprint diverges and the call must fail closed.
+    let mut map = HashMap::new();
+    map.insert(
+        ("weather".to_owned(), "get_weather".to_owned()),
+        json!({
+            "server_label": "weather",
+            "server_url": "http://evil.example/mcp",
+            "headers": null,
+            "authorization": null,
+            "tool_definition": {"name": "get_weather"},
+            "require_approval": "always",
+        }),
+    );
+    let input = parse_approval_response(&approval_response("call_1", true, None)).expect("parse");
+    let pending = pending_record(
+        "call_1",
+        "weather",
+        "get_weather",
+        "{}",
+        target_fingerprint(&weather_entry()),
+    );
+    let err = resolve_approval(&input, &pending, &map).unwrap_err();
+    assert!(
+        matches!(err, ApprovalError::TargetIdentityMismatch(_)),
+        "a redirected target must fail closed: {err:?}"
+    );
+    assert!(err.message().contains("different target"));
+}
+
+#[test]
+fn resolve_approval_rejects_swapped_authorization() {
+    // Same URL, but the resume turn injects a different authorization credential.
+    let mut map = HashMap::new();
+    map.insert(
+        ("weather".to_owned(), "get_weather".to_owned()),
+        json!({
+            "server_label": "weather",
+            "server_url": "http://127.0.0.1:1/mcp",
+            "headers": null,
+            "authorization": "Bearer attacker-token",
+            "tool_definition": {"name": "get_weather"},
+            "require_approval": "always",
+        }),
+    );
+    let input = parse_approval_response(&approval_response("call_1", true, None)).expect("parse");
+    let pending = pending_record(
+        "call_1",
+        "weather",
+        "get_weather",
+        "{}",
+        target_fingerprint(&weather_entry()),
+    );
+    let err = resolve_approval(&input, &pending, &map).unwrap_err();
+    assert!(
+        matches!(err, ApprovalError::TargetIdentityMismatch(_)),
+        "a swapped authorization credential must fail closed: {err:?}"
+    );
+}
+
+#[test]
+fn resolve_approval_missing_stored_fingerprint_fails_closed() {
+    // A pending record that carries no target fingerprint cannot be verified, so
+    // it must be rejected rather than trusted.
+    let map = approval_tool_map();
+    let input = parse_approval_response(&approval_response("call_1", true, None)).expect("parse");
+    let pending = pending_record("call_1", "weather", "get_weather", "{}", String::new());
+    let err = resolve_approval(&input, &pending, &map).unwrap_err();
+    assert!(
+        matches!(err, ApprovalError::TargetIdentityMismatch(_)),
+        "a fingerprint-less pending approval must fail closed: {err:?}"
+    );
+    assert!(err.message().contains("missing its target fingerprint"));
+}
+
+#[test]
+fn target_fingerprint_is_header_order_independent_and_identity_sensitive() {
+    let base = json!({
+        "server_url": "http://127.0.0.1:1/mcp",
+        "authorization": "Bearer token",
+        "headers": {"X-A": "1", "X-B": "2"},
+    });
+    // Same fields, headers in a different insertion order → identical digest.
+    let reordered = json!({
+        "server_url": "http://127.0.0.1:1/mcp",
+        "authorization": "Bearer token",
+        "headers": {"X-B": "2", "X-A": "1"},
+    });
+    assert_eq!(
+        target_fingerprint(&base),
+        target_fingerprint(&reordered),
+        "header key order must not change the fingerprint"
+    );
+
+    for mutated in [
+        json!({"server_url": "http://127.0.0.1:2/mcp", "authorization": "Bearer token", "headers": {"X-A": "1", "X-B": "2"}}),
+        json!({"server_url": "http://127.0.0.1:1/mcp", "authorization": "Bearer other", "headers": {"X-A": "1", "X-B": "2"}}),
+        json!({"server_url": "http://127.0.0.1:1/mcp", "authorization": "Bearer token", "headers": {"X-A": "1", "X-B": "9"}}),
+        json!({"server_url": "http://127.0.0.1:1/mcp", "authorization": "Bearer token", "headers": {"X-A": "1"}}),
+        json!({"server_url": "http://127.0.0.1:1/mcp", "authorization": "Bearer token", "headers": {"X-A": "1", "X-B": "2"}, "connector_id": "c1"}),
+    ] {
+        assert_ne!(
+            target_fingerprint(&base),
+            target_fingerprint(&mutated),
+            "a target identity change must change the fingerprint: {mutated}"
+        );
+    }
+}
+
+#[test]
+fn target_fingerprint_fails_closed_on_case_insensitive_duplicate_headers() {
+    // The MCP transport lowercases header names (via `http::HeaderName`) and keys
+    // its header map by the normalized name, so among case-insensitive duplicates
+    // the last one in JSON order wins. A case-sensitive key sort hashes both
+    // orderings identically, so reversing the two names transmits a different
+    // value while preserving the digest — an old approval would still authorize a
+    // redirected header. Such an ambiguous target must fingerprint to the empty
+    // fail-closed sentinel so it can never match on resume.
+    let forward = json!({
+        "server_url": "http://127.0.0.1:1/mcp",
+        "authorization": "Bearer token",
+        "headers": {"X-Target-Tenant": "A", "x-target-tenant": "B"},
+    });
+    let reversed = json!({
+        "server_url": "http://127.0.0.1:1/mcp",
+        "authorization": "Bearer token",
+        "headers": {"x-target-tenant": "B", "X-Target-Tenant": "A"},
+    });
+    assert!(
+        target_fingerprint(&forward).is_empty(),
+        "case-insensitive duplicate header names must fail closed"
+    );
+    assert!(
+        target_fingerprint(&reversed).is_empty(),
+        "case-insensitive duplicate header names must fail closed"
+    );
+}
+
+#[test]
+fn build_approved_tool_call_shapes_a_function_call() {
+    let resolved = ResolvedApproval {
+        approval_id: "call_1".to_owned(),
+        approve: true,
+        reason: None,
+        server_label: "weather".to_owned(),
+        tool_name: "get_weather".to_owned(),
+        encoded_name: "weather__get_weather".to_owned(),
+        arguments: "{\"city\":\"Paris\"}".to_owned(),
+    };
+    let tc = build_approved_tool_call(&resolved);
+    assert_eq!(tc["type"], "function_call");
+    assert_eq!(tc["name"], "weather__get_weather");
+    assert_eq!(tc["call_id"], "call_1");
+    assert_eq!(tc["arguments"], "{\"city\":\"Paris\"}");
+    assert_eq!(tc["approval_request_id"], "call_1");
+}
+
+#[test]
+fn build_denial_message_is_schema_valid_function_call_output() {
+    let denial = build_denial_message("call_1", Some("too risky"));
+    assert_eq!(denial["type"], "function_call_output");
+    assert_eq!(denial["call_id"], "call_1");
+    let output = denial["output"].as_str().unwrap();
+    assert!(output.contains("denied"));
+    assert!(output.contains("too risky"));
+    // Never a fabricated mcp_call with an invalid "denied" status.
+    assert_ne!(denial["type"], "mcp_call");
+    assert!(denial.get("status").is_none());
+}
+
+#[test]
+fn build_denial_message_without_reason_omits_reason_clause() {
+    let denial = build_denial_message("call_1", None);
+    assert_eq!(denial["output"], "Tool call was denied by the user.");
+}
+
+#[test]
+fn build_denial_message_blank_reason_is_ignored() {
+    let denial = build_denial_message("call_1", Some("   "));
+    assert_eq!(denial["output"], "Tool call was denied by the user.");
+}
+
+#[test]
+fn extract_approval_responses_filters_only_responses() {
+    let messages = vec![
+        json!({"type": "message", "role": "user"}),
+        approval_response("call_1", true, None),
+        json!({"type": "function_call_output", "call_id": "x"}),
+        approval_response("call_2", false, None),
+    ];
+    let responses = extract_approval_responses(&messages);
+    assert_eq!(responses.len(), 2);
+    assert!(responses.iter().copied().all(is_approval_response));
 }

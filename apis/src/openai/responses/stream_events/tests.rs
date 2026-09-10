@@ -858,6 +858,93 @@ async fn logical_stream_failed_mcp_call_emits_failed_outcome_event() {
 }
 
 #[tokio::test]
+async fn logical_stream_flushes_index_zero_local_item_on_iteration_zero_resume() {
+    // Regression (PR #1029, Finding #2): an MCP approval resume executes the
+    // approved tool during `on_request_body`, before any inference round, leaving
+    // the local `mcp_call` at `accumulated_output[0]` with `iteration` still 0. The
+    // resumed model stream must announce that index-0 item ahead of the model's own
+    // output (shifted to index 1); the earlier flush gate only fired at
+    // `iteration > 0`, so index 0 was never announced and a client stream
+    // accumulator saw index 1 with no index 0 and panicked.
+    let filter = make_logical_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(Box::leak(Box::new(req)));
+    ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
+    ctx.current_filter_id = Some(0);
+    ctx.extensions.insert(ResponsesState::from_request_body(json!({
+        "model": "test-model",
+        "input": "hello",
+        "stream": true
+    })));
+
+    // The approved MCP call the dispatch filter executed at request time, before
+    // the first inference round: index 0 in accumulated_output, iteration still 0.
+    {
+        let state = ctx.extensions.get_mut::<ResponsesState>().unwrap();
+        state.accumulated_output = vec![json!({"type": "mcp_call", "id": "mcp_resumed_0"})];
+        mark_accumulated_output_executed(state);
+        assert_eq!(
+            state.iteration, 0,
+            "an approval resume runs its first model round at iteration 0"
+        );
+    }
+
+    // arm() captures output_index_offset = 1 from the pre-seeded accumulated_output.
+    filter.on_request(&mut ctx).await.unwrap();
+
+    // The first (and only) logical response.created must be forwarded — unlike a
+    // resumed round at iteration > 0, iteration 0 has no earlier lifecycle to dedup.
+    // The local item must NOT be flushed ahead of it.
+    let mut created = Some(make_sse_chunk(
+        "response.created",
+        &json!({
+            "response": {"id": "resp_resume", "status": "in_progress", "output": []},
+            "sequence_number": 0
+        }),
+    ));
+    filter.on_response_body(&mut ctx, &mut created, false).unwrap();
+    let created = String::from_utf8(created.unwrap().to_vec()).unwrap();
+    assert!(
+        created.contains("event: response.created"),
+        "the first lifecycle creation must reach the client at iteration 0: {created}"
+    );
+    assert!(
+        !created.contains("mcp_resumed_0"),
+        "the local item must be announced after response.created, not before it: {created}"
+    );
+
+    // The model's first content event carries output_index 0 in its own stream; it
+    // must be shifted to index 1, with the index-0 mcp_call announced ahead of it.
+    let mut delta = Some(make_sse_chunk(
+        "response.output_text.delta",
+        &json!({
+            "response_id": "resp_resume",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "x",
+            "sequence_number": 1
+        }),
+    ));
+    filter.on_response_body(&mut ctx, &mut delta, false).unwrap();
+    let delta = String::from_utf8(delta.unwrap().to_vec()).unwrap();
+
+    assert!(
+        delta.contains("event: response.output_item.added") && delta.contains("mcp_resumed_0"),
+        "the index-0 local mcp_call must be synthesized on the resumed stream: {delta}"
+    );
+    assert!(
+        delta.contains("event: response.mcp_call.in_progress") && delta.contains("event: response.mcp_call.completed"),
+        "the synthesized MCP call must carry its progress lifecycle: {delta}"
+    );
+    let local_item = delta.find(r#""output_index":0"#).unwrap();
+    let model_output = delta.find(r#""output_index":1"#).unwrap();
+    assert!(
+        local_item < model_output,
+        "the index-0 local item must precede the model output shifted to index 1: {delta}"
+    );
+}
+
+#[tokio::test]
 async fn logical_stream_synthesizes_progress_for_model_declared_item_without_repeating_added() {
     // #276 (Finding 1): the model announces a `web_search_call` placeholder with
     // `output_item.added` (status `in_progress`) but never streams the

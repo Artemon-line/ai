@@ -11,7 +11,8 @@ use super::*;
 use crate::{
     openai::sse::{SseFrame, SseFrameParser},
     store::{
-        ConversationRecord, ResponseRecord, ResponseStore, ResponseStoreRegistry, SqliteResponseStore, StoreError,
+        ConversationRecord, PendingApprovalRecord, ResponseRecord, ResponseStore, ResponseStoreRegistry,
+        SqliteResponseStore, StoreError,
     },
 };
 
@@ -221,6 +222,89 @@ async fn validates_previous_response_and_sets_metadata() {
         "current input should be last"
     );
     assert_eq!(state.response_id.as_deref(), Some("resp_current"));
+}
+
+// -----------------------------------------------------------------------------
+// Request-phase marker preservation across state rehydration
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn store_persist_armed_survives_rehydrate_from_previous_response() {
+    let messages = json!([
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there"}
+    ]);
+    let store = MockStore::with_completed_response("resp_prev", json!("Hello"), messages);
+    let registry = setup_registry(store);
+
+    let filter = default_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    // The store filter arms persistence earlier in the request phase; rehydrate
+    // replaces ResponsesState and must not drop that exchange-scoped marker, or a
+    // continuation-turn approval would be falsely rejected as unresumable.
+    ctx.extensions.insert(ResponsesState {
+        store_persist_armed: true,
+        ..Default::default()
+    });
+    let mut body = Some(Bytes::from(
+        r#"{"model":"gpt-4.1","input":"What next?","previous_response_id":"resp_prev"}"#,
+    ));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after validation"
+    );
+
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
+    assert!(
+        state.store_persist_armed,
+        "rehydrate must preserve the store filter's persistence-armed marker"
+    );
+}
+
+#[tokio::test]
+async fn store_persist_armed_survives_rehydrate_from_conversation() {
+    let messages = json!([
+        {"role": "user", "content": "turn one"},
+        {"role": "assistant", "content": "reply one"}
+    ]);
+    let store = MockStore::with_conversation("conv_abc", messages);
+    let registry = setup_registry(store);
+
+    let filter = default_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    ctx.extensions.insert(ResponsesState {
+        store_persist_armed: true,
+        ..Default::default()
+    });
+    let mut body = Some(Bytes::from(
+        r#"{"model":"gpt-4.1","input":"turn two","conversation":"conv_abc"}"#,
+    ));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after conversation rehydration"
+    );
+
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated from conversation");
+    assert!(
+        state.store_persist_armed,
+        "conversation rehydrate must also preserve the persistence-armed marker"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3622,6 +3706,40 @@ impl ResponseStore for MockStore {
 
     async fn delete_response(&self, _tenant_id: &str, _id: &str) -> Result<bool, StoreError> {
         Ok(false)
+    }
+
+    async fn consume_approvals(
+        &self,
+        _tenant_id: &str,
+        _response_id: &str,
+        _approval_ids: &[&str],
+        _consumed_at: i64,
+    ) -> Result<Option<usize>, StoreError> {
+        // Rehydration never consumes approvals; this stub exists only to
+        // satisfy the trait. Report a fresh claim so any accidental call
+        // is obvious in a test rather than silently swallowed.
+        Ok(None)
+    }
+
+    async fn record_pending_approvals(
+        &self,
+        _tenant_id: &str,
+        _response_id: &str,
+        _records: &[PendingApprovalRecord],
+        _created_at: i64,
+    ) -> Result<(), StoreError> {
+        // Rehydration never issues approvals; this stub satisfies the trait.
+        Ok(())
+    }
+
+    async fn get_pending_approvals(
+        &self,
+        _tenant_id: &str,
+        _response_id: &str,
+        _approval_ids: &[&str],
+    ) -> Result<Vec<PendingApprovalRecord>, StoreError> {
+        // Rehydration never issues approvals; this stub satisfies the trait.
+        Ok(Vec::new())
     }
 
     async fn get_conversation(

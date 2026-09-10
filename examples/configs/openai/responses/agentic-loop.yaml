@@ -70,6 +70,44 @@
 #                  "require_approval": "never"}]
 #     }'
 #
+# MCP approval round trip (require_approval: "always"):
+#
+#   A tool guarded by approval pauses the loop and returns an
+#   `mcp_approval_request` output item (id == the model's call_id) instead of
+#   executing. The client resumes by echoing an `mcp_approval_response` on the
+#   next turn (with previous_response_id and the same tools so the server is
+#   re-resolved). `approve: true` runs the tool exactly once; `approve: false`
+#   feeds the model a truthful denial and runs zero tool calls. Consumption is
+#   single-use — replaying an approval fails closed and never executes twice.
+#
+#   # Turn 1 — the model asks to call the tool; approval is required:
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#       "model": "gpt-4.1",
+#       "input": "What is the weather in SF?",
+#       "tools": [{"type": "mcp", "server_label": "weather",
+#                  "server_url": "http://mcp-weather:8001/mcp",
+#                  "allowed_tools": ["get_weather"],
+#                  "require_approval": "always"}]
+#     }'
+#   # → returns an mcp_approval_request output item, e.g. id "call_abc123".
+#
+#   # Turn 2 — approve the pending call (reuse the returned response id):
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#       "model": "gpt-4.1",
+#       "previous_response_id": "<response id from turn 1>",
+#       "tools": [{"type": "mcp", "server_label": "weather",
+#                  "server_url": "http://mcp-weather:8001/mcp",
+#                  "allowed_tools": ["get_weather"],
+#                  "require_approval": "always"}],
+#       "input": [{"type": "mcp_approval_response",
+#                  "approval_request_id": "call_abc123",
+#                  "approve": true}]
+#     }'
+#
 # Build:
 #   cargo build -p praxis-ai-proxy
 
