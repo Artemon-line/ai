@@ -89,25 +89,35 @@ pub(crate) fn generate_ddl(tables: &TableNames) -> Result<Vec<String>, StoreErro
     Ok(stmts)
 }
 
-/// Validate identifier lengths for `PostgreSQL` DDL.
+/// Validate identifiers against `PostgreSQL`-specific DDL constraints.
 ///
 /// `PostgreSQL` truncates identifiers above 63 bytes. The
 /// conversation table name is also embedded in the generated tenant
 /// index name, so it needs a smaller limit than table identifiers.
 ///
+/// `PostgreSQL` also folds unquoted identifiers to lowercase, so
+/// uppercase is rejected here rather than silently creating a table
+/// under a name that later lookups cannot find.
+///
+/// Both rules are `PostgreSQL`-only; the shared identifier validation in
+/// [`validate_identifier`] stays case-permissive for `SQLite`.
+///
 /// # Errors
 ///
 /// Returns [`StoreError::Database`] when an identifier would exceed
-/// the `PostgreSQL` limit.
+/// the `PostgreSQL` limit or would be case-folded.
 pub(crate) fn validate_postgres_identifiers(tables: &TableNames) -> Result<(), StoreError> {
     let (r, c) = validate_table_names(tables)?;
 
     validate_postgres_identifier_len("response table name", r, POSTGRES_MAX_RESPONSES_TABLE_LEN)?;
     validate_postgres_identifier_len("conversation table name", c, POSTGRES_MAX_CONVERSATION_TABLE_LEN)?;
+    validate_postgres_identifier_case("response table name", r)?;
+    validate_postgres_identifier_case("conversation table name", c)?;
 
     if let Some(items) = &tables.items {
         let i = validate_items_table(items, r, c)?;
         validate_postgres_identifier_len("items table name", i, POSTGRES_MAX_ITEMS_TABLE_LEN)?;
+        validate_postgres_identifier_case("items table name", i)?;
     }
 
     Ok(())
@@ -277,6 +287,29 @@ fn validate_postgres_identifier_len(kind: &str, name: &str, max_len: usize) -> R
     if name.len() > max_len {
         return Err(StoreError::Database(format!(
             "{kind} exceeds PostgreSQL identifier limit of {max_len} bytes: {name}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a `PostgreSQL` identifier that would be case-folded.
+///
+/// DDL interpolates table names unquoted, so `PostgreSQL` folds them to
+/// lowercase when creating the table. Schema validation then looks the name up
+/// in `information_schema` as a bound parameter, which is compared literally
+/// and is not folded. A mixed-case name therefore creates a lowercase table and
+/// then fails to find it, reporting every expected column as missing.
+///
+/// Rejecting uppercase keeps the unquoted-interpolation design intact. The
+/// alternative, quoting identifiers everywhere, would have to be applied
+/// consistently across every DDL statement and query.
+///
+/// This is `PostgreSQL`-only. `SQLite` compares table names case-insensitively,
+/// so a mixed-case name resolves to the same table on both paths there.
+fn validate_postgres_identifier_case(kind: &str, name: &str) -> Result<(), StoreError> {
+    if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err(StoreError::Database(format!(
+            "{kind} must be lowercase for PostgreSQL, which folds unquoted identifiers: {name}"
         )));
     }
     Ok(())
@@ -756,5 +789,68 @@ mod tests {
             err.to_string().contains("PostgreSQL identifier limit"),
             "should reject items name PostgreSQL would truncate: {err}"
         );
+    }
+
+    #[test]
+    fn postgres_rejects_uppercase_responses_table() {
+        let err = validate_postgres_table_identifiers("OpenAIResponses", "test_conversations").unwrap_err();
+        assert!(
+            err.to_string().contains("must be lowercase"),
+            "should reject a name PostgreSQL would case-fold: {err}"
+        );
+        assert!(
+            err.to_string().contains("response table name"),
+            "error should name the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn postgres_rejects_uppercase_conversations_table() {
+        let err = validate_postgres_table_identifiers("test_responses", "OpenAIConversations").unwrap_err();
+        assert!(
+            err.to_string().contains("must be lowercase"),
+            "should reject a name PostgreSQL would case-fold: {err}"
+        );
+        assert!(
+            err.to_string().contains("conversation table name"),
+            "error should name the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn postgres_rejects_uppercase_items_table() {
+        let err =
+            validate_postgres_table_set_identifiers("test_responses", "test_conversations", Some("ConversationItems"))
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("must be lowercase"),
+            "should reject a name PostgreSQL would case-fold: {err}"
+        );
+        assert!(
+            err.to_string().contains("items table name"),
+            "error should name the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn postgres_rejects_a_single_uppercase_character() {
+        let err = validate_postgres_table_identifiers("test_responseS", "test_conversations").unwrap_err();
+        assert!(
+            err.to_string().contains("must be lowercase"),
+            "the DDL folds the whole identifier, so one uppercase byte is enough to make the created \
+             table name differ from the configured one: {err}"
+        );
+    }
+
+    #[test]
+    fn postgres_accepts_digits_and_underscores() {
+        validate_postgres_table_identifiers("responses_v2", "_conversations_2026")
+            .expect("lowercase names with digits and underscores should pass");
+    }
+
+    #[test]
+    fn shared_identifier_validation_stays_case_permissive() {
+        validate_identifier("OpenAIResponses")
+            .expect("SQLite compares table names case-insensitively, so only the PostgreSQL path rejects uppercase");
     }
 }

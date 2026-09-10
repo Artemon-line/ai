@@ -5375,3 +5375,41 @@ conversations_table: conversations
     validate_config(&cfg).unwrap();
     assert!(cfg.pool.is_none(), "omitted pool should be None");
 }
+
+#[test]
+fn postgres_uppercase_table_name_rejected_at_config_load() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pw@1.2.3.4/praxis"
+allow_private_database_url: true
+responses_table: OpenAIResponses
+conversations_table: openai_conversations
+"#,
+    )
+    .unwrap();
+
+    let err = ResponseStoreFilter::from_config(&yaml).map(|_| ()).unwrap_err();
+    assert!(
+        err.to_string().contains("must be lowercase"),
+        "PostgreSQL uppercase table name should be rejected at config load, got: {err}"
+    );
+}
+
+#[test]
+fn sqlite_uppercase_table_name_still_accepted() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: sqlite
+database_url: "sqlite::memory:"
+responses_table: OpenAIResponses
+conversations_table: openai_conversations
+"#,
+    )
+    .unwrap();
+
+    assert!(
+        ResponseStoreFilter::from_config(&yaml).is_ok(),
+        "SQLite compares names case-insensitively, so uppercase must still be accepted"
+    );
+}
