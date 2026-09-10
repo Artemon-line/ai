@@ -8,6 +8,7 @@
     clippy::string_slice,
     clippy::too_many_lines,
     clippy::unwrap_used,
+    clippy::unused_async,
     unused_must_use,
     reason = "tests"
 )]
@@ -17,7 +18,8 @@ use praxis_filter::{FilterAction, HttpFilter, SubRequestResponseMode};
 use serde_json::json;
 
 use super::{
-    CompletionState, OpenaiStreamEventsFilter, StreamEventsState, accumulate_response_object, encode_local_completion,
+    ArmDecision, CompletionState, OpenaiStreamEventsFilter, StreamEventsState, accumulate_response_object,
+    arm_decision, encode_local_completion,
 };
 use crate::{
     openai::{
@@ -27,24 +29,46 @@ use crate::{
     test_utils::{make_filter_context, make_request},
 };
 
-fn make_filter() -> Box<dyn HttpFilter> {
+fn make_filter() -> OpenaiStreamEventsFilter {
     let yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
-    OpenaiStreamEventsFilter::from_config(&yaml).unwrap()
+    OpenaiStreamEventsFilter::build(&yaml).unwrap()
 }
 
-fn make_armed_context() -> (Box<dyn HttpFilter>, praxis_filter::HttpFilterContext<'static>) {
+/// Build a context and arm the filter as the IRR runner plus `on_request`
+/// would inside a step.
+///
+/// `on_request` fails closed unless an `IterationState` is present, and unit
+/// tests cannot construct one (its fields are private to praxis-filter). So
+/// tests arm directly through `arm`, which mirrors what `on_request` does once
+/// the IRR-placement guard has admitted the request. The guard's decision table
+/// (arm inside IRR, reject outside, ignore otherwise) is unit tested directly
+/// through `arm_decision`; the end-to-end arming effect with a real IRR-inserted
+/// `IterationState` is covered by the functional integration tests.
+fn make_armed_context() -> (OpenaiStreamEventsFilter, praxis_filter::HttpFilterContext<'static>) {
     let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_metadata("openai_responses_format.format", "openai_responses".to_owned());
     ctx.set_metadata("openai_responses_format.stream", "true".to_owned());
     ctx.current_filter_id = Some(0);
+    filter.arm(&mut ctx);
     (filter, ctx)
 }
 
-fn make_logical_filter() -> Box<dyn HttpFilter> {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("logical_stream: true").unwrap();
-    OpenaiStreamEventsFilter::from_config(&yaml).unwrap()
+#[test]
+fn arm_decision_arms_streaming_responses_inside_irr() {
+    assert_eq!(arm_decision(true, true), ArmDecision::Arm);
+}
+
+#[test]
+fn arm_decision_rejects_streaming_responses_outside_irr() {
+    assert_eq!(arm_decision(true, false), ArmDecision::RejectOutsideIrr);
+}
+
+#[test]
+fn arm_decision_ignores_non_streaming_or_non_responses_requests() {
+    assert_eq!(arm_decision(false, true), ArmDecision::Ignore);
+    assert_eq!(arm_decision(false, false), ArmDecision::Ignore);
 }
 
 #[test]
@@ -122,12 +146,12 @@ fn local_completion_preserves_deferred_done_sentinel() {
 }
 
 #[test]
-fn logical_stream_requires_response_write_access() {
-    let filter = make_logical_filter();
+fn response_body_access_is_always_read_write() {
+    let filter = make_filter();
     assert_eq!(
         filter.response_body_access(),
         praxis_filter::BodyAccess::ReadWrite,
-        "logical lifecycle normalization rewrites emitted SSE frames"
+        "logical lifecycle normalization always rewrites emitted SSE frames"
     );
 }
 
@@ -184,21 +208,33 @@ fn oversized_max_tool_call_argument_bytes_rejected() {
 }
 
 #[tokio::test]
-async fn arms_for_streaming_responses_request() {
-    let (filter, mut ctx) = make_armed_context();
+async fn on_request_rejects_streaming_responses_outside_irr() {
+    // Without an `IterationState` in extensions the filter is placed outside an
+    // `iterative_request_router` step. It cannot compose a logical stream there,
+    // so it must fail closed rather than arm.
+    let filter = make_filter();
+    let req = make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(Box::leak(Box::new(req)));
+    ctx.set_metadata("openai_responses_format.format", "openai_responses".to_owned());
+    ctx.set_metadata("openai_responses_format.stream", "true".to_owned());
+    ctx.current_filter_id = Some(0);
+
     let action = filter.on_request(&mut ctx).await.unwrap();
+
     assert!(
-        matches!(action, FilterAction::Continue),
-        "metadata-selected streaming request should continue"
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 500),
+        "out-of-IRR placement must fail closed with a 500"
     );
     assert!(
-        ctx.get_filter_state::<StreamEventsState>().is_some(),
-        "filter should be armed"
+        ctx.get_filter_state::<StreamEventsState>().is_none(),
+        "a rejected request must not arm the SSE parser"
     );
 }
 
 #[tokio::test]
-async fn arms_for_typed_streaming_selection_without_classifier_metadata() {
+async fn on_request_rejects_typed_streaming_outside_irr() {
+    // The typed terminal-streaming selection path must also fail closed when the
+    // filter is not inside an `iterative_request_router` step.
     let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
@@ -208,41 +244,26 @@ async fn arms_for_typed_streaming_selection_without_classifier_metadata() {
     let action = filter.on_request(&mut ctx).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Continue),
-        "typed terminal streaming selection should continue"
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 500),
+        "out-of-IRR typed streaming must fail closed with a 500"
     );
     assert!(
-        ctx.get_filter_state::<StreamEventsState>().is_some(),
-        "typed terminal streaming selection should arm the SSE parser"
+        ctx.get_filter_state::<StreamEventsState>().is_none(),
+        "a rejected typed-streaming request must not arm the SSE parser"
     );
 }
 
-#[tokio::test]
-async fn arm_publishes_logical_stream_marker_when_enabled() {
-    let (_default, mut ctx) = make_armed_context();
-    let filter = make_logical_filter();
-
-    filter.on_request(&mut ctx).await.unwrap();
-
+#[test]
+fn arm_publishes_logical_stream_marker() {
     // openai_agentic_loop reads and consumes this marker to fail closed on the
-    // unsafe automatic-terminal-streaming + agentic_loop without-logical_stream
-    // combo.
+    // unsafe terminal_streaming + agentic_loop combination when stream_events is
+    // absent. Arming always publishes it because the filter is always logical.
+    let (_filter, ctx) = make_armed_context();
+
     assert_eq!(
         ctx.get_metadata("responses.logical_stream"),
         Some("true"),
-        "logical_stream must publish the per-round marker openai_agentic_loop consumes"
-    );
-}
-
-#[tokio::test]
-async fn arm_omits_logical_stream_marker_when_disabled() {
-    let (filter, mut ctx) = make_armed_context();
-
-    filter.on_request(&mut ctx).await.unwrap();
-
-    assert!(
-        ctx.get_metadata("responses.logical_stream").is_none(),
-        "a non-logical stream_events filter must not publish the logical_stream marker"
+        "arming must publish the per-round marker openai_agentic_loop consumes"
     );
 }
 
@@ -332,7 +353,7 @@ fn make_sse_chunk(event_type: &str, data: &serde_json::Value) -> Bytes {
 
 #[tokio::test]
 async fn logical_stream_suppresses_intermediate_terminal_and_normalizes_resumed_turn() {
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -343,7 +364,7 @@ async fn logical_stream_suppresses_intermediate_terminal_and_normalizes_resumed_
         "stream": true
     })));
 
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -392,7 +413,7 @@ async fn logical_stream_suppresses_intermediate_terminal_and_normalizes_resumed_
     state.accumulated_output = vec![function_call, json!({"type": "mcp_call", "id": "mcp_1"})];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_mcp_dispatch");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut resumed_created = Some(make_sse_chunk(
         "response.created",
@@ -532,7 +553,7 @@ async fn logical_stream_synthesizes_missing_progress_for_local_and_model_declare
     // locally. #276 must synthesize the missing tool-specific progress lifecycle
     // for every one of them, while never duplicating the `output_item.added` the
     // model already streamed for the model-declared search.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -543,7 +564,7 @@ async fn logical_stream_synthesizes_missing_progress_for_local_and_model_declare
         "stream": true
     })));
 
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     // Round 0: the model streams a web_search_call as an incremental item.
     let mut created = Some(make_sse_chunk(
@@ -591,7 +612,7 @@ async fn logical_stream_synthesizes_missing_progress_for_local_and_model_declare
     ];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut resumed_created = Some(make_sse_chunk(
         "response.created",
@@ -688,7 +709,7 @@ async fn logical_stream_synthesizes_missing_progress_for_local_and_model_declare
 
 #[tokio::test]
 async fn logical_stream_suppresses_malformed_chunk_and_emits_terminal_error() {
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -698,7 +719,7 @@ async fn logical_stream_suppresses_malformed_chunk_and_emits_terminal_error() {
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -758,8 +779,8 @@ fn mark_accumulated_output_executed(state: &mut ResponsesState) {
 async fn arm_resumed_round_with_accumulated(
     loop_filter: &'static str,
     accumulated: Vec<serde_json::Value>,
-) -> (Box<dyn HttpFilter>, praxis_filter::HttpFilterContext<'static>) {
-    let filter = make_logical_filter();
+) -> (OpenaiStreamEventsFilter, praxis_filter::HttpFilterContext<'static>) {
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -769,7 +790,7 @@ async fn arm_resumed_round_with_accumulated(
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -792,7 +813,7 @@ async fn arm_resumed_round_with_accumulated(
     state.accumulated_output = accumulated;
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove(loop_filter);
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     (filter, ctx)
 }
@@ -835,7 +856,7 @@ async fn logical_stream_failed_mcp_call_emits_failed_outcome_event() {
     )
     .await;
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     assert!(
         delta.contains("event: response.mcp_call.in_progress"),
         "a failed MCP call still emits an in_progress event first: {delta}"
@@ -866,7 +887,7 @@ async fn logical_stream_flushes_index_zero_local_item_on_iteration_zero_resume()
     // output (shifted to index 1); the earlier flush gate only fired at
     // `iteration > 0`, so index 0 was never announced and a client stream
     // accumulator saw index 1 with no index 0 and panicked.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -890,7 +911,9 @@ async fn logical_stream_flushes_index_zero_local_item_on_iteration_zero_resume()
     }
 
     // arm() captures output_index_offset = 1 from the pre-seeded accumulated_output.
-    filter.on_request(&mut ctx).await.unwrap();
+    // Unit tests cannot construct the IRR-owned `IterationState`; arm directly
+    // after setting up the state that would enter the step.
+    filter.arm(&mut ctx);
 
     // The first (and only) logical response.created must be forwarded — unlike a
     // resumed round at iteration > 0, iteration 0 has no earlier lifecycle to dedup.
@@ -952,7 +975,7 @@ async fn logical_stream_synthesizes_progress_for_model_declared_item_without_rep
     // the same id. The proxy must synthesize the full progress lifecycle
     // (in_progress -> searching -> completed) and a fresh `output_item.done`,
     // without repeating the `output_item.added` the model already streamed.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -962,7 +985,7 @@ async fn logical_stream_synthesizes_progress_for_model_declared_item_without_rep
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -998,9 +1021,9 @@ async fn logical_stream_synthesizes_progress_for_model_declared_item_without_rep
     state.accumulated_output = vec![json!({"type": "web_search_call", "id": "ws_1", "status": "completed"})];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     assert!(
         delta.contains("event: response.web_search_call.completed"),
         "a locally completed web search must emit a completed outcome event: {delta}"
@@ -1034,7 +1057,7 @@ async fn logical_stream_synthesizes_progress_when_model_streams_added_then_done_
     // premature round-0 `done` must be suppressed, and the resumed round must fill
     // in the missing in_progress/searching/completed events and emit exactly one
     // ordered `output_item.done` (without repeating the announcement the model sent).
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -1044,7 +1067,7 @@ async fn logical_stream_synthesizes_progress_when_model_streams_added_then_done_
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -1097,9 +1120,9 @@ async fn logical_stream_synthesizes_progress_when_model_streams_added_then_done_
     state.accumulated_output = vec![completed_item];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     assert!(
         delta.contains("event: response.web_search_call.in_progress")
             && delta.contains("event: response.web_search_call.searching")
@@ -1137,7 +1160,7 @@ async fn logical_stream_does_not_resynthesize_progress_streamed_in_band_by_model
     // lifecycle was already delivered and neither re-announce nor re-synthesize
     // it. Observing the `response.web_search_call.*` events (never `done`) is what
     // records that the lifecycle streamed.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -1147,7 +1170,7 @@ async fn logical_stream_does_not_resynthesize_progress_streamed_in_band_by_model
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -1214,9 +1237,9 @@ async fn logical_stream_does_not_resynthesize_progress_streamed_in_band_by_model
     state.accumulated_output = vec![hosted_item];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     assert!(
         !delta.contains("ws_1"),
         "an item whose lifecycle streamed in-band must not be re-synthesized: {delta}"
@@ -1243,7 +1266,7 @@ async fn logical_stream_synthesizes_missing_phases_after_partial_in_band_lifecyc
     // resumed round must synthesize exactly the still-missing `searching` and
     // `completed` events plus one ordered `done`, without repeating the
     // `output_item.added` or the `in_progress` the client already saw in-band.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -1253,7 +1276,7 @@ async fn logical_stream_synthesizes_missing_phases_after_partial_in_band_lifecyc
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -1314,9 +1337,9 @@ async fn logical_stream_synthesizes_missing_phases_after_partial_in_band_lifecyc
     state.accumulated_output = vec![completed_item];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     // The missing middle/terminal phases must be filled even though `in_progress`
     // already streamed and the item's content is byte-identical to round 0.
     assert!(
@@ -1358,7 +1381,7 @@ async fn logical_stream_fills_middle_phase_after_leading_in_band_progress() {
     // item's content (status in_progress -> completed). The resumed round must
     // supply the missing `searching` AND `completed` phases, not just the terminal
     // outcome: a single-bool "lifecycle streamed" flag would drop `searching`.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -1368,7 +1391,7 @@ async fn logical_stream_fills_middle_phase_after_leading_in_band_progress() {
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -1412,9 +1435,9 @@ async fn logical_stream_fills_middle_phase_after_leading_in_band_progress() {
     state.accumulated_output = vec![json!({"type": "web_search_call", "id": "ws_1", "status": "completed"})];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     assert!(
         delta.contains("event: response.web_search_call.searching"),
         "the middle `searching` phase missing in-band must be synthesized, not dropped: {delta}"
@@ -1449,7 +1472,7 @@ async fn logical_stream_keeps_in_band_done_when_outcome_streams_without_searchin
     // pass through unchanged. The resumed round must NOT resurrect the skipped
     // `searching` (it would land after `completed`, out of canonical order) nor
     // replace the backend's real `done` with a synthesized duplicate.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -1459,7 +1482,7 @@ async fn logical_stream_keeps_in_band_done_when_outcome_streams_without_searchin
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -1526,9 +1549,9 @@ async fn logical_stream_keeps_in_band_done_when_outcome_streams_without_searchin
     state.accumulated_output = vec![completed_item];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     assert!(
         !delta.contains("event: response.web_search_call.searching"),
         "a phase the backend skipped must not be back-filled after the outcome: {delta}"
@@ -1555,7 +1578,7 @@ async fn logical_stream_honors_skipped_leading_phase_when_only_searching_streame
     // must synthesize only the still-owed `completed` and a single `done`; it must
     // NOT back-fill the skipped `in_progress`, which would land after the already
     // streamed `searching`, out of canonical order.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -1565,7 +1588,7 @@ async fn logical_stream_honors_skipped_leading_phase_when_only_searching_streame
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -1609,9 +1632,9 @@ async fn logical_stream_honors_skipped_leading_phase_when_only_searching_streame
     state.accumulated_output = vec![json!({"type": "web_search_call", "id": "ws_1", "status": "completed"})];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     assert!(
         delta.contains("event: response.web_search_call.completed"),
         "the still-owed terminal outcome must be synthesized: {delta}"
@@ -1663,7 +1686,7 @@ async fn logical_stream_reemits_outcome_when_local_item_gains_sources() {
     .await;
 
     // Round 1: the isolated web search is synthesized with its full lifecycle.
-    let first = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let first = resumed_text_delta(&filter, &mut ctx);
     assert!(
         first.contains("event: response.output_item.added")
             && first.contains("event: response.web_search_call.in_progress")
@@ -1687,9 +1710,9 @@ async fn logical_stream_reemits_outcome_when_local_item_gains_sources() {
         }
     })];
     mark_accumulated_output_executed(state);
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let second = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let second = resumed_text_delta(&filter, &mut ctx);
     assert!(
         second.contains("blog.rust-lang.org"),
         "the re-emitted output_item.done must carry the newly added sources: {second}"
@@ -1800,7 +1823,7 @@ async fn logical_stream_finalizes_local_item_when_done_envelope_missing_and_cont
     // exactly one `output_item.done` — otherwise the client is left with an item
     // that never received its terminal envelope. No phase may be re-emitted (all
     // already streamed) and no second `output_item.added`.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -1810,7 +1833,7 @@ async fn logical_stream_finalizes_local_item_when_done_envelope_missing_and_cont
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -1864,9 +1887,9 @@ async fn logical_stream_finalizes_local_item_when_done_envelope_missing_and_cont
     state.accumulated_output = vec![completed_item];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     assert_eq!(
         delta.matches("event: response.output_item.done").count(),
         1,
@@ -1896,7 +1919,7 @@ async fn logical_stream_finalizes_without_duplicating_terminal_phase_when_conten
     // exactly one `output_item.done` carrying the updated item, and must NOT re-emit
     // the payloadless terminal phase already streamed in-band — that phase event
     // carries no item data, so re-emitting it would be a pure duplicate.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -1906,7 +1929,7 @@ async fn logical_stream_finalizes_without_duplicating_terminal_phase_when_conten
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -1961,9 +1984,9 @@ async fn logical_stream_finalizes_without_duplicating_terminal_phase_when_conten
     })];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_web_search");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
-    let delta = resumed_text_delta(filter.as_ref(), &mut ctx);
+    let delta = resumed_text_delta(&filter, &mut ctx);
     assert_eq!(
         delta.matches("event: response.output_item.done").count(),
         1,
@@ -2087,7 +2110,7 @@ async fn logical_stream_error_does_not_fabricate_lifecycle_for_unexecuted_placeh
     // envelope for a search that never ran; only executed local tool items may be
     // synthesized. Without the provenance gate the flush invents a full lifecycle
     // for `ws_ghost`.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -2097,7 +2120,7 @@ async fn logical_stream_error_does_not_fabricate_lifecycle_for_unexecuted_placeh
         "input": "hi",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     // The round announces a `web_search_call` placeholder, then hits a parse error
     // before the tool lifecycle streams or the dispatch filter executes it.
@@ -2160,7 +2183,6 @@ fn make_done_chunk() -> Bytes {
 #[tokio::test]
 async fn terminal_event_writes_response_object() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let response_payload = json!({
         "id": "resp_123",
@@ -2185,9 +2207,65 @@ async fn terminal_event_writes_response_object() {
 }
 
 #[tokio::test]
+async fn logical_terminal_only_output_survives_canonicalization() {
+    // A plain one-round logical stream: the model's output arrives solely in the
+    // terminal `response.completed` event, with no incremental `output_item.*`
+    // events and no dispatch/loop filter to fill `accumulated_output`. The
+    // finalized logical terminal — and the response-store source it mirrors —
+    // must preserve that output rather than replace it with an empty accumulator.
+    let (filter, mut ctx) = make_armed_context();
+
+    let message = json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "Hello from stream"}]
+    });
+    let completed = json!({
+        "response": {
+            "id": "resp_terminal_only",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-4o",
+            "created_at": 1_700_000_000,
+            "output": [message.clone()]
+        },
+        "sequence_number": 0
+    });
+
+    let mut terminal = Some(make_sse_chunk("response.completed", &completed));
+    filter.on_response_body(&mut ctx, &mut terminal, false).unwrap();
+    assert!(terminal.is_none(), "the terminal event must be deferred until finalize");
+
+    let mut eos = None;
+    filter.on_response_body(&mut ctx, &mut eos, true).unwrap();
+    // `unwrap` (not `expect`) matches this module's test conventions; a `None`
+    // here means finalize failed to emit the deferred terminal.
+    let emitted = String::from_utf8(eos.unwrap().to_vec()).unwrap();
+    assert!(
+        emitted.contains("Hello from stream"),
+        "the finalized terminal must carry the terminal event's own output: {emitted}"
+    );
+
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert!(
+        state.accumulated_output.is_empty(),
+        "no dispatch/loop filter ran, so the cross-round accumulator stays empty"
+    );
+    assert_eq!(
+        state.output_items().len(),
+        1,
+        "the store source must retain the terminal output"
+    );
+    assert_eq!(
+        state.output_items()[0],
+        message,
+        "the store source output must equal the terminal event output"
+    );
+}
+
+#[tokio::test]
 async fn terminal_event_authoritatively_populates_completed_function_calls() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
     ctx.extensions.insert(ResponsesState::default());
     ctx.extensions
         .get_mut::<ResponsesState>()
@@ -2283,7 +2361,6 @@ fn response_accumulation_sums_usage_across_iterations() {
 #[tokio::test]
 async fn output_item_added_accumulates_incrementally() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let item = json!({"type": "message", "role": "assistant", "id": "item_1"});
     let payload = json!({"item": item});
@@ -2299,7 +2376,6 @@ async fn output_item_added_accumulates_incrementally() {
 #[tokio::test]
 async fn terminal_event_overwrites_incremental_output() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let item = json!({"item": {"type": "message", "id": "item_1"}});
     let mut body1 = Some(make_sse_chunk("response.output_item.added", &item));
@@ -2332,7 +2408,6 @@ async fn terminal_event_overwrites_incremental_output() {
 #[tokio::test]
 async fn function_call_accumulation() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let item = json!({
         "item": {
@@ -2377,7 +2452,6 @@ async fn function_call_accumulation() {
 #[tokio::test]
 async fn missing_state_does_not_panic() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let completed = json!({
         "id": "resp_123",
@@ -2399,7 +2473,6 @@ async fn missing_state_does_not_panic() {
 #[tokio::test]
 async fn eos_validates_stream_completeness() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let completed =
         json!({"id": "resp_1", "status": "completed", "model": "m", "created_at": 0, "output": [], "usage": {}});
@@ -2424,7 +2497,6 @@ async fn eos_validates_stream_completeness() {
 #[tokio::test]
 async fn eos_without_terminal_sets_incomplete() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let delta = json!({"text": "hi"});
     let mut b1 = Some(make_sse_chunk("response.output_text.delta", &delta));
@@ -2441,7 +2513,7 @@ async fn eos_without_terminal_sets_incomplete() {
 
 #[tokio::test]
 async fn logical_eos_without_terminal_emits_error() {
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -2451,7 +2523,7 @@ async fn logical_eos_without_terminal_emits_error() {
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let mut delta = Some(make_sse_chunk(
         "response.output_text.delta",
@@ -2503,6 +2575,29 @@ async fn logical_eos_without_terminal_emits_error() {
         ctx.get_metadata("responses.skip_persist"),
         Some("true"),
         "a stream missing its terminal event must not be persisted"
+    );
+}
+
+#[test]
+fn armed_first_round_emits_created_lifecycle() {
+    // A single inference round is a one-round logical stream: the first round's
+    // created lifecycle is emitted (normalized) rather than suppressed.
+    let (filter, mut ctx) = make_armed_context();
+
+    let mut body = Some(make_sse_chunk(
+        "response.created",
+        &json!({"response": {"id": "r1", "status": "in_progress", "output": []}}),
+    ));
+    filter.on_response_body(&mut ctx, &mut body, false).unwrap();
+
+    let emitted = String::from_utf8(body.unwrap().to_vec()).unwrap();
+    assert!(
+        emitted.contains("event: response.created"),
+        "the first round's created lifecycle should be emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains(r#""id":"r1""#),
+        "the first round keeps its own response identity: {emitted}"
     );
 }
 
@@ -2672,40 +2767,6 @@ fn deferred_terminal_stores_moved_payload_without_deep_clone() {
 }
 
 #[test]
-fn body_passes_through_unchanged() {
-    let (filter, mut ctx) = make_armed_context();
-    ctx.insert_filter_state(StreamEventsState {
-        frame_parser: SseFrameParser::new(10_485_760),
-        event_count: 0,
-        max_events: 100_000,
-        timeout: std::time::Duration::from_secs(300),
-        started_at: None,
-        completed_at: None,
-        completion_state: CompletionState::Open,
-        tool_call_args: std::collections::HashMap::new(),
-        rejected_tool_call_args: std::collections::HashSet::new(),
-        max_tool_call_argument_bytes: 1024 * 1024,
-        logical_stream: false,
-        iteration: 0,
-        output_index_offset: 0,
-        deferred_terminal: None,
-        deferred_done: false,
-        local_items_flushed: false,
-        local_tool_items: std::collections::HashMap::new(),
-    });
-
-    let original = Bytes::from("event: response.created\ndata: {\"type\":\"response.created\",\"id\":\"r1\"}\n\n");
-    let mut body = Some(original.clone());
-    filter.on_response_body(&mut ctx, &mut body, false).unwrap();
-
-    assert_eq!(
-        body.as_ref().unwrap().as_ref(),
-        original.as_ref(),
-        "body should pass through unchanged in ReadOnly mode"
-    );
-}
-
-#[test]
 fn parse_error_sets_metadata() {
     let (filter, mut ctx) = make_armed_context();
     ctx.insert_filter_state(StreamEventsState {
@@ -2719,7 +2780,6 @@ fn parse_error_sets_metadata() {
         tool_call_args: std::collections::HashMap::new(),
         rejected_tool_call_args: std::collections::HashSet::new(),
         max_tool_call_argument_bytes: 1024 * 1024,
-        logical_stream: false,
         iteration: 0,
         output_index_offset: 0,
         deferred_terminal: None,
@@ -2743,7 +2803,6 @@ fn parse_error_sets_metadata() {
 #[tokio::test]
 async fn output_item_done_replaces_by_index() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let added = json!({"item": {"type": "message", "id": "item_1", "content": []}});
     let mut b1 = Some(make_sse_chunk("response.output_item.added", &added));
@@ -2767,7 +2826,6 @@ async fn output_item_done_replaces_by_index() {
 #[tokio::test]
 async fn terminal_incomplete_sets_status() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let payload = json!({
         "id": "resp_inc",
@@ -2790,7 +2848,6 @@ async fn terminal_incomplete_sets_status() {
 #[tokio::test]
 async fn terminal_failed_sets_status() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let payload = json!({
         "id": "resp_fail",
@@ -2813,7 +2870,6 @@ async fn terminal_failed_sets_status() {
 #[tokio::test]
 async fn output_item_done_replaces_by_id() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let added = json!({"item": {"type": "message", "id": "item_A", "content": []}});
     let mut b1 = Some(make_sse_chunk("response.output_item.added", &added));
@@ -2833,7 +2889,6 @@ async fn output_item_done_replaces_by_id() {
 #[tokio::test]
 async fn upsert_tool_call_dedup() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let item = json!({
         "item": {
@@ -2867,7 +2922,6 @@ async fn upsert_tool_call_dedup() {
 #[tokio::test]
 async fn function_call_done_without_prior_deltas() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let item = json!({
         "item": {
@@ -2902,7 +2956,6 @@ async fn function_call_done_without_prior_deltas() {
 #[tokio::test]
 async fn done_payload_wins_over_accumulated_deltas() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let item = json!({
         "item": {
@@ -2940,7 +2993,6 @@ async fn done_payload_wins_over_accumulated_deltas() {
 #[tokio::test]
 async fn unknown_event_type_ignored() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let payload = json!({"some_field": "some_value"});
     let mut body = Some(make_sse_chunk("response.future_event_type", &payload));
@@ -2953,7 +3005,6 @@ async fn unknown_event_type_ignored() {
 #[tokio::test]
 async fn error_event_does_not_mutate_state() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let payload = json!({"code": "server_error", "message": "something broke"});
     let mut body = Some(make_sse_chunk("error", &payload));
@@ -2969,7 +3020,6 @@ async fn error_event_does_not_mutate_state() {
 #[tokio::test]
 async fn error_after_terminal_lifecycle_is_accepted() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let completed =
         json!({"id": "resp_1", "status": "completed", "model": "m", "created_at": 0, "output": [], "usage": {}});
@@ -2993,7 +3043,6 @@ async fn error_after_terminal_lifecycle_is_accepted() {
 #[tokio::test]
 async fn second_error_after_terminal_is_rejected() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let completed =
         json!({"id": "resp_1", "status": "completed", "model": "m", "created_at": 0, "output": [], "usage": {}});
@@ -3021,7 +3070,7 @@ async fn resumed_round_error_does_not_persist_prior_round_success() {
     // `error` must not persist the previous round's completed response as the
     // logical result. Re-arming invalidates the prior `response_object`, and the
     // error round never repopulates it, so `build_record` skips persistence.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -3033,7 +3082,7 @@ async fn resumed_round_error_does_not_persist_prior_round_success() {
     })));
 
     // Round 1: a completed response carrying a tool call, transitioning the loop.
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
     let function_call = json!({
         "type": "function_call",
         "id": "fc_1",
@@ -3074,7 +3123,7 @@ async fn resumed_round_error_does_not_persist_prior_round_success() {
     state.accumulated_output = vec![function_call, json!({"type": "mcp_call", "id": "mcp_1"})];
     mark_accumulated_output_executed(state);
     ctx.filter_results.remove("openai_mcp_dispatch");
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     assert!(
         ctx.extensions
@@ -3113,14 +3162,14 @@ async fn resumed_round_error_does_not_persist_prior_round_success() {
 #[tokio::test]
 async fn tool_call_argument_bytes_cap_enforced() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("max_tool_call_argument_bytes: 20").unwrap();
-    let filter = OpenaiStreamEventsFilter::from_config(&yaml).unwrap();
+    let filter = OpenaiStreamEventsFilter::build(&yaml).unwrap();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_metadata("openai_responses_format.format", "openai_responses".to_owned());
     ctx.set_metadata("openai_responses_format.stream", "true".to_owned());
     ctx.current_filter_id = Some(0);
 
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let item = json!({
         "item": {
@@ -3158,13 +3207,13 @@ async fn tool_call_argument_bytes_cap_enforced() {
 #[tokio::test]
 async fn tool_call_argument_bytes_cap_rejects_restart_after_overflow() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("max_tool_call_argument_bytes: 20").unwrap();
-    let filter = OpenaiStreamEventsFilter::from_config(&yaml).unwrap();
+    let filter = OpenaiStreamEventsFilter::build(&yaml).unwrap();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_metadata("openai_responses_format.format", "openai_responses".to_owned());
     ctx.set_metadata("openai_responses_format.stream", "true".to_owned());
     ctx.current_filter_id = Some(0);
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let item = json!({
         "item": {
@@ -3204,13 +3253,13 @@ async fn tool_call_argument_bytes_cap_rejects_restart_after_overflow() {
 #[tokio::test]
 async fn tool_call_argument_bytes_cap_rejects_oversized_done_payload() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("max_tool_call_argument_bytes: 20").unwrap();
-    let filter = OpenaiStreamEventsFilter::from_config(&yaml).unwrap();
+    let filter = OpenaiStreamEventsFilter::build(&yaml).unwrap();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_metadata("openai_responses_format.format", "openai_responses".to_owned());
     ctx.set_metadata("openai_responses_format.stream", "true".to_owned());
     ctx.current_filter_id = Some(0);
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let item = json!({
         "item": {
@@ -3254,14 +3303,14 @@ async fn tool_call_argument_bytes_cap_rejects_oversized_done_payload() {
 #[tokio::test]
 async fn tool_call_argument_bytes_within_limit() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("max_tool_call_argument_bytes: 50").unwrap();
-    let filter = OpenaiStreamEventsFilter::from_config(&yaml).unwrap();
+    let filter = OpenaiStreamEventsFilter::build(&yaml).unwrap();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_metadata("openai_responses_format.format", "openai_responses".to_owned());
     ctx.set_metadata("openai_responses_format.stream", "true".to_owned());
     ctx.current_filter_id = Some(0);
 
-    filter.on_request(&mut ctx).await.unwrap();
+    filter.arm(&mut ctx);
 
     let item = json!({
         "item": {
@@ -3292,7 +3341,6 @@ async fn tool_call_argument_bytes_within_limit() {
 #[tokio::test]
 async fn on_response_disarms_for_non_2xx_status() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
     assert!(
         ctx.get_filter_state::<StreamEventsState>().is_some(),
         "test setup should arm the SSE parser"
@@ -3317,7 +3365,6 @@ async fn on_response_disarms_for_non_2xx_status() {
 #[tokio::test]
 async fn on_response_disarms_for_non_sse_content_type() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let resp = Box::leak(Box::new(crate::test_utils::make_response()));
     resp.headers.insert(
@@ -3337,7 +3384,6 @@ async fn on_response_disarms_for_non_sse_content_type() {
 #[tokio::test]
 async fn on_response_stays_armed_for_sse_with_charset() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let resp = Box::leak(Box::new(crate::test_utils::make_response()));
     resp.headers.insert(
@@ -3355,22 +3401,6 @@ async fn on_response_stays_armed_for_sse_with_charset() {
 }
 
 #[tokio::test]
-async fn on_request_strips_accept_encoding_when_arming() {
-    let (filter, mut ctx) = make_armed_context();
-
-    filter.on_request(&mut ctx).await.unwrap();
-
-    assert!(
-        ctx.get_filter_state::<StreamEventsState>().is_some(),
-        "test setup should arm the SSE parser"
-    );
-    assert!(
-        ctx.request_headers_to_remove.contains(&http::header::ACCEPT_ENCODING),
-        "arming logical parsing must strip Accept-Encoding so the backend returns plaintext SSE"
-    );
-}
-
-#[tokio::test]
 async fn on_request_keeps_accept_encoding_when_not_arming() {
     let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
@@ -3379,8 +3409,11 @@ async fn on_request_keeps_accept_encoding_when_not_arming() {
     ctx.set_metadata("openai_responses_format.stream", "false".to_owned());
     ctx.current_filter_id = Some(0);
 
-    filter.on_request(&mut ctx).await.unwrap();
-
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-streaming request should continue without arming"
+    );
     assert!(
         ctx.get_filter_state::<StreamEventsState>().is_none(),
         "non-streaming request must not arm"
@@ -3394,7 +3427,6 @@ async fn on_request_keeps_accept_encoding_when_not_arming() {
 #[tokio::test]
 async fn on_response_disarms_for_content_encoded_sse() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     // A non-compliant backend returns a gzip-encoded event stream despite the
     // stripped Accept-Encoding. The raw SSE parser cannot decode it, so the
@@ -3419,7 +3451,6 @@ async fn on_response_disarms_for_content_encoded_sse() {
 #[tokio::test]
 async fn disarmed_filter_passes_error_body_through() {
     let (filter, mut ctx) = make_armed_context();
-    filter.on_request(&mut ctx).await.unwrap();
 
     let resp = Box::leak(Box::new(crate::test_utils::make_response()));
     resp.status = http::StatusCode::BAD_REQUEST;
@@ -3501,7 +3532,7 @@ fn responses_event(event_type: &str, mut payload: serde_json::Value) -> crate::o
 }
 
 impl OpenaiStreamEventsFilter {
-    fn test_logical_stream() -> Self {
+    fn test_filter() -> Self {
         Self {
             parser_config: crate::openai::sse::SseParserConfig {
                 max_buffer_bytes: 10_485_760,
@@ -3509,7 +3540,6 @@ impl OpenaiStreamEventsFilter {
                 timeout: std::time::Duration::from_secs(300),
             },
             max_tool_call_argument_bytes: 1024 * 1024,
-            logical_stream: true,
         }
     }
 }
@@ -3521,7 +3551,7 @@ fn suppress_mode_drops_private_function_call_lifecycle() {
     // A private function_call(name=file_search) opened while a hosted file_search
     // tool is declared: its added/delta/done all suppressed (nothing emitted).
     let mut ctx = test_ctx_with_hosted_file_search_tool();
-    let filter = OpenaiStreamEventsFilter::test_logical_stream();
+    let filter = OpenaiStreamEventsFilter::test_filter();
     filter.arm(&mut ctx);
     let mut state = ctx.remove_filter_state::<StreamEventsState>().unwrap();
 
@@ -3558,7 +3588,7 @@ fn client_function_call_without_hosted_tool_passes_through() {
 
     // has_file_search_tool == false: not suppressed, reaches the wire (P1 round-11).
     let mut ctx = test_ctx_without_file_search_tool();
-    let filter = OpenaiStreamEventsFilter::test_logical_stream();
+    let filter = OpenaiStreamEventsFilter::test_filter();
     filter.arm(&mut ctx);
     let mut state = ctx.remove_filter_state::<StreamEventsState>().unwrap();
     let added = responses_event(
@@ -3582,7 +3612,7 @@ fn native_hybrid_drops_pending_done_and_passes_opening() {
     use super::{StreamEventsState, append_logical_event};
 
     let mut ctx = test_ctx_with_hosted_file_search_tool();
-    let filter = OpenaiStreamEventsFilter::test_logical_stream();
+    let filter = OpenaiStreamEventsFilter::test_filter();
     filter.arm(&mut ctx);
     let mut state = ctx.remove_filter_state::<StreamEventsState>().unwrap();
     let added = responses_event(
@@ -3613,7 +3643,7 @@ fn native_terminal_done_passes_and_cancels_synthesis() {
     use super::{StreamEventsState, append_logical_event};
 
     let mut ctx = test_ctx_with_hosted_file_search_tool();
-    let filter = OpenaiStreamEventsFilter::test_logical_stream();
+    let filter = OpenaiStreamEventsFilter::test_filter();
     filter.arm(&mut ctx);
     let mut state = ctx.remove_filter_state::<StreamEventsState>().unwrap();
     let added = responses_event(
@@ -3652,7 +3682,7 @@ fn native_failed_done_records_observation_for_reconcile_skip() {
     // and must be recorded — the reconcile skips by observed membership, not status, so a
     // synthesized tail cannot duplicate this live terminal done.
     let mut ctx = test_ctx_with_hosted_file_search_tool();
-    let filter = OpenaiStreamEventsFilter::test_logical_stream();
+    let filter = OpenaiStreamEventsFilter::test_filter();
     filter.arm(&mut ctx);
     let mut state = ctx.remove_filter_state::<StreamEventsState>().unwrap();
     let added = responses_event(
@@ -3688,7 +3718,7 @@ async fn logical_stream_finalize_clears_provider_streamed_terminal_ids() {
     // this round's observation set; finalize must clear it so it cannot accumulate across IRR
     // continuation rounds and bypass max_state_bytes. Seeding it stands in for a round in which
     // stream_events observed a provider-streamed native terminal done.
-    let filter = make_logical_filter();
+    let filter = make_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -3698,7 +3728,8 @@ async fn logical_stream_finalize_clears_provider_streamed_terminal_ids() {
         "input": "hello",
         "stream": true
     })));
-    filter.on_request(&mut ctx).await.unwrap();
+    // Unit tests cannot construct the IRR-owned `IterationState`; arm directly.
+    filter.arm(&mut ctx);
 
     let mut created = Some(make_sse_chunk(
         "response.created",
@@ -3758,7 +3789,7 @@ fn logical_stream_continues_recognizes_file_search_loop() {
 fn arm_publishes_file_search_marker_on_logical_stream() {
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
-    OpenaiStreamEventsFilter::test_logical_stream().arm(&mut ctx);
+    OpenaiStreamEventsFilter::test_filter().arm(&mut ctx);
     assert_eq!(ctx.get_metadata("responses.logical_stream.file_search"), Some("true"));
 }
 
@@ -3826,7 +3857,7 @@ fn drain_invalid_index_sets_error_and_no_gap() {
 // §10 P0: native-progress-precedes-closed-error ordering (no gap, no rewind).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_progress_precedes_closed_error_ordering() {
-    let filter = OpenaiStreamEventsFilter::test_logical_stream();
+    let filter = OpenaiStreamEventsFilter::test_filter();
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(Box::leak(Box::new(req)));
     ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming);
@@ -3839,7 +3870,8 @@ async fn native_progress_precedes_closed_error_ordering() {
     state.tools = vec![json!({"type": "file_search", "vector_store_ids": ["vs_1"]})];
     ctx.extensions.insert(state);
 
-    filter.on_request(&mut ctx).await.unwrap();
+    // Unit tests cannot construct the IRR-owned `IterationState`; arm directly.
+    filter.arm(&mut ctx);
 
     // Drive one native file_search progress frame through to get a sequence_number
     let mut progress = Some(make_sse_chunk(
