@@ -1567,6 +1567,18 @@ class TestOpenAIResponsesVLLM:
             f"previous_response_id; got: {lifecycle_previous_ids}"
         )
 
+        # Issue #1150: the persisted record (served by GET) must agree with the
+        # terminal frame the client observed. The streaming persistence source is
+        # an independent ResponsesState.response_object that the incremental wire
+        # rewrite never touches, so before the fix the stored response echoed the
+        # backend's null even though the streamed terminal carried first.id.
+        retrieved = _retrieve_with_retry(openai_client, final_response.id)
+        assert retrieved.previous_response_id == first.id, (
+            "the stored streaming response must persist the caller's "
+            "previous_response_id, matching the terminal frame the client saw; "
+            f"got: {retrieved.previous_response_id!r}"
+        )
+
     @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streaming"])
     def test_conflicting_history_selectors_error_shape(self, openai_client, stream):
         with pytest.raises(BadRequestError) as exc_info:
