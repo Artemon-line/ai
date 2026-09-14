@@ -233,7 +233,7 @@ pub(crate) enum McpClientError {
 }
 
 /// Parse a server URL into a safe display URL, or return invalid fallback.
-fn parse_display_url(server_url: &str) -> McpDisplayUrl {
+pub(crate) fn parse_display_url(server_url: &str) -> McpDisplayUrl {
     server_url
         .parse::<http::Uri>()
         .map_or_else(|_| McpDisplayUrl::invalid(), |uri| McpDisplayUrl::from_uri(&uri))
