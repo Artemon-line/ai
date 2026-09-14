@@ -36,6 +36,7 @@ before sending requests.
 | [json-rpc-routing.yaml](configs/json-rpc-routing.yaml) | Routes JSON-RPC 2.0 requests to different backends based on the "method" field in the JSON request body |
 | [lakera-guard.yaml](configs/lakera-guard.yaml) | Screens every request body through Lakera Guard for content moderation before forwarding to the upstream |
 | [llmd-ext-proc-routing.yaml](configs/llmd-ext-proc-routing.yaml) | A real llm-d EPP or test processor returns the trusted x-gateway-destination-endpoint header |
+| [llmisvc-model-provider-resolver.yaml](configs/llmisvc-model-provider-resolver.yaml) | Rewrites publisher-ID body `model` values to the short model name for LLMISvc / KServe routing; the routing header (default `X-Model`) is left unchanged so routing can still use the publisher ID |
 | [mcp-classifier-routing.yaml](configs/mcp-classifier-routing.yaml) | Routes MCP requests by body-derived method and tool name |
 | [mcp-stateless-broker.yaml](configs/mcp-stateless-broker.yaml) | Configurable stateless MCP broker using the final MCP 2026-07-28 stateless profile |
 | [model-to-header-routing.yaml](configs/model-to-header-routing.yaml) | Routes LLM API requests to different backends based on the "model" field in the JSON request body |

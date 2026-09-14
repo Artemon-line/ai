@@ -32,6 +32,7 @@ mod irr_terminal_streaming;
 mod lakera_guard;
 #[cfg(feature = "llmd-ext-proc")]
 mod llmd_ext_proc;
+mod llmisvc_model_provider_resolver;
 mod mcp_broker;
 mod model_to_header;
 mod openai_agentic_loop;
