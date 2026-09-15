@@ -656,16 +656,17 @@ fn commit_local_tool_milestones(
     // Record which client-visible milestones the model backend streamed for this
     // item. `output_item.added`/`.done` mark it announced (so a later flush does
     // not re-emit `output_item.added`); an actual `response.web_search_call.*` /
-    // `response.mcp_call.*` progress event marks the lifecycle as already streamed
-    // in-band (so the flush does not re-synthesize it). Persisted across rounds
-    // via `emitted_output_items`, this is what a resumed round's flush consults.
+    // `response.mcp_call.*` / `response.mcp_list_tools.*` progress event marks
+    // the lifecycle as already streamed in-band (so the flush does not
+    // re-synthesize it). Persisted across rounds via `emitted_output_items`,
+    // this is what a resumed round's flush consults.
     record_model_output_item(ctx, event);
 
     // #276: ahead of the first model output *content* event, stream any locally
-    // generated tool items (MCP calls/approvals, or web searches absent from the
-    // upstream stream) that the tool-dispatch filters appended to
-    // `accumulated_output` but never emitted incrementally. They must precede the
-    // resumed model output and occupy their reserved output indices.
+    // generated tool items (MCP calls/approvals/listings, or web searches
+    // absent from the upstream stream) that the tool-dispatch filters appended
+    // to `accumulated_output` but never emitted incrementally. They must
+    // precede the resumed model output and occupy their reserved output indices.
     // `accumulated_output` is fixed for the round, so the flush runs once here
     // rather than re-serializing every local item ahead of each event; the EOS
     // flush still catches items whose round produced no resumed model event.
@@ -729,11 +730,12 @@ fn mark_local_done_delivered(ctx: &mut HttpFilterContext<'_>, event: &ResponsesE
 /// its latest content, but prove nothing about the tool-specific progress
 /// lifecycle: a backend may stream `added` then `done` with no progress events in
 /// between, or only some of them (e.g. `in_progress` then `done`). Only observing
-/// an actual `response.web_search_call.*` / `response.mcp_call.*` event proves
-/// that specific phase reached the client, so each is recorded individually by
-/// its event type. Deriving the lifecycle from `done` would suppress the
-/// synthesized progress a partial `added → in_progress → done` sequence still
-/// owes for its missing `searching`/`completed` phases.
+/// an actual `response.web_search_call.*` / `response.mcp_call.*` /
+/// `response.mcp_list_tools.*` event proves that specific phase reached the
+/// client, so each is recorded individually by its event type. Deriving the
+/// lifecycle from `done` would suppress the synthesized progress a partial
+/// `added → in_progress → done` sequence still owes for its missing
+/// `searching`/`completed` phases.
 fn record_model_output_item(ctx: &mut HttpFilterContext<'_>, event: &ResponsesEvent) {
     match event {
         ResponsesEvent::OutputItemAdded(payload) | ResponsesEvent::OutputItemDone(payload) => {

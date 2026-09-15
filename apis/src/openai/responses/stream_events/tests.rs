@@ -1132,6 +1132,49 @@ async fn logical_stream_failed_mcp_call_emits_failed_outcome_event() {
 }
 
 #[tokio::test]
+async fn logical_stream_successful_mcp_list_tools_emits_lifecycle_events() {
+    // Locally generated deferred listings must surface as incremental
+    // added / in_progress / completed / done events, not only the final
+    // response snapshot.
+    let (filter, mut ctx) = arm_resumed_round_with_accumulated(
+        "openai_mcp_dispatch",
+        vec![json!({
+            "type": "mcp_list_tools",
+            "id": "mcpl_1",
+            "server_label": "weather",
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+        })],
+    )
+    .await;
+
+    let delta = resumed_text_delta(&filter, &mut ctx);
+    assert!(
+        delta.contains("event: response.output_item.added") && delta.contains("event: response.output_item.done"),
+        "a locally generated listing must surface as incremental output-item events: {delta}"
+    );
+    assert!(
+        delta.contains("event: response.mcp_list_tools.in_progress"),
+        "a successful listing must emit an in_progress progress event: {delta}"
+    );
+    assert!(
+        delta.contains("event: response.mcp_list_tools.completed"),
+        "a successful listing must emit a completed outcome event: {delta}"
+    );
+    assert!(
+        !delta.contains("event: response.mcp_list_tools.failed"),
+        "a successful listing must not emit a failed outcome event: {delta}"
+    );
+    let added = delta.find("event: response.output_item.added").unwrap();
+    let in_progress = delta.find("event: response.mcp_list_tools.in_progress").unwrap();
+    let completed = delta.find("event: response.mcp_list_tools.completed").unwrap();
+    let done = delta.find("event: response.output_item.done").unwrap();
+    assert!(
+        added < in_progress && in_progress < completed && completed < done,
+        "listing lifecycle must be ordered added -> in_progress -> completed -> done: {delta}"
+    );
+}
+
+#[tokio::test]
 async fn logical_stream_flushes_index_zero_local_item_on_iteration_zero_resume() {
     // Regression (PR #1029, Finding #2): an MCP approval resume executes the
     // approved tool during `on_request_body`, before any inference round, leaving
