@@ -496,6 +496,18 @@ pub(crate) struct ResponsesState {
     /// writes `mcp_call` and `mcp_approval_request` items.
     pub accumulated_output: Vec<serde_json::Value>,
 
+    /// Aggregate wire bytes `openai_stream_events` has charged against its
+    /// accumulation budget across every IRR round of this request.
+    ///
+    /// Request-wide (not per-round) because the memory it bounds —
+    /// [`Self::accumulated_output`], [`Self::emitted_output_items`], and the
+    /// terminal snapshot — persists across rounds: resetting the counter each
+    /// round would let a multi-round stream accumulate unbounded state while no
+    /// single round trips the cap. Monotonically non-decreasing, so once the
+    /// budget is exceeded the stream stays failed closed. A fixed `usize`, so it
+    /// contributes nothing meaningful to `max_state_bytes`.
+    pub stream_accumulated_bytes: usize,
+
     /// Client-visible lifecycle progress of output items, keyed by item id.
     ///
     /// Tracked across IRR rounds so `stream_events` can synthesize incremental
@@ -717,6 +729,7 @@ impl Default for ResponsesState {
             tools: Vec::new(),
             usage: serde_json::Value::Null,
             accumulated_output: Vec::new(),
+            stream_accumulated_bytes: 0,
             emitted_output_items: HashMap::new(),
             locally_executed_output_items: HashSet::new(),
             pending_local_tool_synthesis: Vec::new(),
