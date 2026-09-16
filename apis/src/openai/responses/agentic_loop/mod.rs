@@ -965,6 +965,19 @@ fn collect_output_items(response: &Value, state: &mut ResponsesState, private_in
         }
     }
     record_file_search_assignments(state, pending_file_search);
+    mark_provider_history(state);
+}
+
+/// The provider persists every successful round in a native conversation.
+fn mark_provider_history(state: &mut ResponsesState) {
+    if !state.history_rehydrated
+        && state
+            .conversation
+            .as_ref()
+            .is_some_and(|conversation| !conversation.is_null())
+    {
+        state.provider_history_len = state.messages.len();
+    }
 }
 
 /// Record file-search assignments for the dispatcher, gated on the shared
@@ -1115,6 +1128,7 @@ fn collect_streaming_output_items(state: &mut ResponsesState) {
         }
     }
     record_file_search_assignments(state, pending_file_search);
+    mark_provider_history(state);
 }
 
 /// Whether a function call is complete enough to dispatch.
