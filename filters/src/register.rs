@@ -328,6 +328,10 @@ fn register_openai_response_filters(registry: &mut FilterRegistry, subrequest_cl
         @register registry,
         http "openai_tool_parse" => praxis_ai_apis::openai::ToolParseFilter::from_config
     );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "openai_client_tool_compat" => praxis_ai_apis::openai::ClientToolCompatFilter::from_config
+    );
     register_web_search(registry, subrequest_client);
     register_openai_agentic_filters(registry);
 }

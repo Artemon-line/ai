@@ -558,10 +558,37 @@ fn continuation_state_fits(
         // ceiling as every other request-scoped field, so one round streaming many distinct
         // native ids cannot bypass max_state_bytes (finalize clears it between rounds).
         .chain(state.provider_streamed_terminal_ids.iter().map(String::len))
+        // #1131: charge the client-tool lowering reverse map (private name -> original name,
+        // plus the optional restored namespace) against the same ceiling; `ClientToolRestore`
+        // is a 1-byte `Copy` tag with no owned payload, so only the strings need accounting.
+        .chain(state.client_tool_lowering.iter().map(|(name, lowered)| {
+            name.len()
+                .saturating_add(lowered.original_name.len())
+                .saturating_add(lowered.namespace.as_ref().map_or(0, String::len))
+        }))
         .fold(0_usize, usize::saturating_add);
     used = used.saturating_add(string_bytes);
     for value in state.mcp_tool_map.values() {
         let Some(size) = bounded_json_size(value, max_bytes.saturating_sub(used)).ok().flatten() else {
+            return false;
+        };
+        used = used.saturating_add(size);
+    }
+    // #1131: charge the pre-lowering echo snapshot (the client's original `tools`
+    // array and `tool_choice`, restored onto the echoed response) against the same
+    // ceiling as every other request-scoped field.
+    if let Some(echo) = state.client_tool_echo.as_ref() {
+        let Some(size) = bounded_json_size(&echo.tools, max_bytes.saturating_sub(used))
+            .ok()
+            .flatten()
+        else {
+            return false;
+        };
+        used = used.saturating_add(size);
+        let Some(size) = bounded_json_size(&echo.tool_choice, max_bytes.saturating_sub(used))
+            .ok()
+            .flatten()
+        else {
             return false;
         };
         used = used.saturating_add(size);
