@@ -789,10 +789,12 @@ def _write_agentic_config(
     vllm = backend_endpoint if translate_to_chat else _vllm_endpoint()
     if vllm is None:
         raise ValueError("translated agentic config requires a backend endpoint")
-    config = config.replace(
-        '- "127.0.0.1:3001"',
-        f'- "{vllm}"\n                    read_timeout_ms: 300000',
-    )
+    config = config.replace('- "127.0.0.1:3001"', f'- "{vllm}"')
+    if config.count("read_timeout_ms:") != 1:
+        raise RuntimeError(
+            "agentic-loop.yaml must declare exactly one cluster read_timeout_ms; "
+            "the vLLM harness no longer injects a second copy"
+        )
     # agentic-loop.yaml is the canonical unified config (#1046): it wires all
     # three request-phase dispatchers (web_search, mcp_dispatch,
     # file_search_callout) under the single agentic-loop owner. Retarget the
