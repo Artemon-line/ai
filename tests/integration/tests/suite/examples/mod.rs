@@ -50,6 +50,7 @@ mod openai_doc_extract;
 mod openai_embeddings_routing;
 mod openai_file_resolve;
 mod openai_mcp_dispatch;
+mod openai_mcp_outbound_chain;
 mod openai_mcp_tool_resolve;
 mod openai_prompts_routing;
 #[cfg(feature = "store-sqlite")]
