@@ -4,19 +4,51 @@
 //! Anthropic Messages to Chat Completions-compatible request transformation.
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest as _, Sha256};
 use tracing::warn;
 
 // -----------------------------------------------------------------------------
 // Request Transformation
 // -----------------------------------------------------------------------------
 
+/// Anthropic Messages fields the Chat Completions translation cannot honor.
+///
+/// Each one changes behavior that the translated response would then
+/// misreport: `wire.rs` hardcodes `service_tier`, `container` and
+/// `inference_geo` to null, and `mcp_servers` is a beta server-side feature
+/// (`mcp-client-2025-04-04`). Forwarding them would let the backend ignore
+/// the field while the client is told it took effect, so the request is
+/// rejected instead.
+const UNREPRESENTABLE_FIELDS: [&str; 4] = ["service_tier", "container", "inference_geo", "mcp_servers"];
+
+/// Anthropic Messages fields dropped with a warning instead of forwarded.
+///
+/// Claude Code sends both on every request, and neither has a Chat
+/// Completions equivalent: the translated response carries no thinking
+/// blocks, so `thinking` is visibly absent and `context_management` (which
+/// only edits thinking blocks) has nothing to act on. Forwarding them would
+/// make the outcome depend on the backend, since vLLM ignores unknown fields
+/// and the OpenAI API rejects them.
+const DROPPED_FIELDS: [&str; 2] = ["thinking", "context_management"];
+
 /// Transform a parsed Anthropic Messages request body into Chat
 /// Completions-compatible format.
-/// Returns the transformed JSON bytes, or an error message.
+///
+/// Every top-level field falls into one of these buckets:
+/// - mapped fields are translated to their Chat Completions equivalent;
+/// - [`UNREPRESENTABLE_FIELDS`] reject the request with an error message, because the proxy would otherwise fabricate
+///   their effect in the translated response;
+/// - [`DROPPED_FIELDS`] are removed with a warning;
+/// - everything else is forwarded untouched, and the backend validates it.
+///
+/// A translated field always wins over a forwarded client key of the same
+/// name. Returns the transformed JSON bytes, or an error message.
 pub(crate) fn transform_request(value: Value) -> Result<Vec<u8>, String> {
     let Value::Object(mut body) = value else {
         return Err("request body is not a JSON object".to_owned());
     };
+    reject_unrepresentable_fields(&mut body)?;
+    drop_unsupported_fields(&mut body);
 
     // Take every mapped field up front, in one place. Each becomes an owned
     // local that is moved into the helper emitting it.
@@ -29,23 +61,55 @@ pub(crate) fn transform_request(value: Value) -> Result<Vec<u8>, String> {
     let stop_sequences = body.remove("stop_sequences");
     let temperature = body.remove("temperature");
     let top_p = body.remove("top_p");
-    let top_k = body.remove("top_k");
     let tools = body.remove("tools");
     let tool_choice = body.remove("tool_choice");
     let had_tools = tools.is_some();
-    drop(body);
 
     let mut chat = Map::new();
     insert_if_some(&mut chat, "model", model);
     chat.insert("messages".to_owned(), build_messages(system, messages));
     insert_if_some(&mut chat, "max_completion_tokens", max_tokens);
     convert_stream(&mut chat, stream, stream_options);
-    map_parameters(&mut chat, stop_sequences, temperature, top_p, top_k);
+    map_parameters(&mut chat, stop_sequences, temperature, top_p);
+    map_metadata(&mut chat, body.remove("metadata"));
+    map_output_config(&mut chat, body.remove("output_config"), body.remove("output_format"))?;
     convert_tools(&mut chat, tools);
     convert_parallel_tool_calls(&mut chat, tool_choice.as_ref());
     convert_tool_choice(&mut chat, tool_choice, had_tools);
+    forward_unmapped_fields(&mut chat, body);
 
     serde_json::to_vec(&Value::Object(chat)).map_err(|e| format!("serialization failed: {e}"))
+}
+
+/// Forward every field the translation did not consume, leaving its
+/// validation to the backend. A translated key always wins over a colliding
+/// client key.
+fn forward_unmapped_fields(chat: &mut Map<String, Value>, body: Map<String, Value>) {
+    for (key, value) in body {
+        chat.entry(key).or_insert(value);
+    }
+}
+
+/// Remove every [`DROPPED_FIELDS`] entry, warning for each one that carried a value.
+fn drop_unsupported_fields(body: &mut Map<String, Value>) {
+    for field in DROPPED_FIELDS {
+        if body.remove(field).is_some_and(|value| !value.is_null()) {
+            warn!(field, "dropping Anthropic field with no Chat Completions equivalent");
+        }
+    }
+}
+
+/// Remove every [`UNREPRESENTABLE_FIELDS`] entry, failing on the first one
+/// that carries a value. A JSON `null` is treated as absent.
+fn reject_unrepresentable_fields(body: &mut Map<String, Value>) -> Result<(), String> {
+    for field in UNREPRESENTABLE_FIELDS {
+        if body.remove(field).is_some_and(|value| !value.is_null()) {
+            return Err(format!(
+                "`{field}` is not supported when translating Anthropic Messages to Chat Completions"
+            ));
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -595,21 +659,87 @@ fn convert_stream(chat: &mut Map<String, Value>, stream: Option<Value>, stream_o
 }
 
 /// Map Anthropic parameters to Chat Completions-compatible equivalents.
-///
-/// `top_k` has no standard Chat Completions equivalent but is preserved
-/// as an extra body parameter for backends that support it
-/// (e.g. vLLM).
 fn map_parameters(
     chat: &mut Map<String, Value>,
     stop_sequences: Option<Value>,
     temperature: Option<Value>,
     top_p: Option<Value>,
-    top_k: Option<Value>,
 ) {
     insert_if_some(chat, "stop", stop_sequences);
     insert_if_some(chat, "temperature", temperature);
     insert_if_some(chat, "top_p", top_p);
-    insert_if_some(chat, "top_k", top_k);
+}
+
+/// Map Anthropic `metadata.user_id` to Chat Completions `safety_identifier`,
+/// the field with the same abuse-detection purpose.
+///
+/// The identifier is sent as its SHA-256 hex digest: Anthropic allows up to
+/// 512 characters while `safety_identifier` allows 64, and the digest is
+/// exactly 64. A null `user_id` is omitted because `safety_identifier` is not
+/// nullable. Chat Completions has its own `metadata` field with different
+/// semantics, so the Anthropic object itself never travels.
+fn map_metadata(chat: &mut Map<String, Value>, metadata: Option<Value>) {
+    if let Some(Value::Object(mut metadata)) = metadata
+        && let Some(user_id) = take_string(&mut metadata, "user_id")
+    {
+        let digest = Sha256::digest(user_id.as_bytes());
+        let hex = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        chat.insert("safety_identifier".to_owned(), Value::String(hex));
+    }
+}
+
+/// Map Anthropic `output_config` to the Chat Completions controls with the
+/// same meaning: `effort` to `reasoning_effort`, whose enum contains every
+/// Anthropic level, and a `json_schema` `format` to a strict
+/// `response_format`, since Anthropic structured outputs guarantee schema
+/// conformance. Any other `output_config` key (such as the beta
+/// `task_budget`) has no Chat Completions equivalent and rejects the request
+/// rather than being silently discarded.
+///
+/// The deprecated top-level `output_format` is the older spelling of
+/// `output_config.format`.
+fn map_output_config(
+    chat: &mut Map<String, Value>,
+    output_config: Option<Value>,
+    output_format: Option<Value>,
+) -> Result<(), String> {
+    let mut config = match output_config {
+        Some(Value::Object(config)) => config,
+        _ => Map::new(),
+    };
+    insert_if_some(
+        chat,
+        "reasoning_effort",
+        config.remove("effort").filter(|effort| !effort.is_null()),
+    );
+    if let Some(format) = config
+        .remove("format")
+        .or(output_format)
+        .filter(|format| !format.is_null())
+    {
+        chat.insert("response_format".to_owned(), response_format(format)?);
+    }
+    match config.keys().next() {
+        Some(key) => Err(format!(
+            "`output_config.{key}` is not supported when translating Anthropic Messages to Chat Completions"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Build a strict Chat Completions `json_schema` response format from an
+/// Anthropic `json_schema` output format.
+fn response_format(format: Value) -> Result<Value, String> {
+    if let Value::Object(mut format) = format
+        && format.get("type").and_then(Value::as_str) == Some("json_schema")
+        && let Some(schema) = format.remove("schema")
+    {
+        return Ok(json!({
+            "type": "json_schema",
+            "json_schema": {"name": "output_format", "strict": true, "schema": schema},
+        }));
+    }
+    Err("`output_config.format` must be a `json_schema` object with a `schema` when translating Anthropic Messages to Chat Completions".to_owned())
 }
 
 // -----------------------------------------------------------------------------
@@ -822,10 +952,10 @@ mod tests {
                 "stop",
                 "temperature",
                 "top_p",
-                "top_k",
                 "tools",
                 "parallel_tool_calls",
                 "tool_choice",
+                "top_k",
             ],
             "translated request key order must stay stable"
         );
@@ -1245,13 +1375,145 @@ mod tests {
     }
 
     #[test]
-    fn top_k_preserved_as_extra_param() {
-        let body =
-            br#"{"model":"claude-opus-4-8","max_tokens":1024,"top_k":40,"messages":[{"role":"user","content":"Hi"}]}"#;
+    fn unmapped_fields_are_forwarded_untouched() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"speed":"fast","messages":[{"role":"user","content":"Hi"}]}"#;
         let result = transform_bytes(body).unwrap();
         let parsed: Value = serde_json::from_slice(&result).unwrap();
 
-        assert_eq!(parsed["top_k"], 40, "top_k should be preserved as extra body parameter");
+        assert_eq!(parsed["speed"], "fast", "unmapped field must reach the backend");
+    }
+
+    #[test]
+    fn forwarded_fields_never_overwrite_translated_ones() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"max_completion_tokens":999,"messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = transform_bytes(body).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+
+        assert_eq!(
+            parsed["max_completion_tokens"], 1024,
+            "translated value must win over a colliding client key"
+        );
+    }
+
+    #[test]
+    fn metadata_user_id_is_hashed_into_safety_identifier() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"metadata":{"user_id":"user-1"},"messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = transform_bytes(body).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+
+        let expected: String = Sha256::digest(b"user-1")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(expected.len(), 64, "digest fits the 64-character limit");
+        assert_eq!(parsed["safety_identifier"], expected.as_str(), "user_id hashed");
+        assert!(
+            parsed.get("metadata").is_none(),
+            "Anthropic metadata must not reach a Chat Completions backend"
+        );
+    }
+
+    #[test]
+    fn metadata_null_user_id_is_omitted() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"metadata":{"user_id":null},"messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = transform_bytes(body).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+
+        assert!(
+            parsed.get("safety_identifier").is_none(),
+            "safety_identifier is not nullable"
+        );
+    }
+
+    #[test]
+    fn output_config_maps_to_chat_generation_controls() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"output_config":{"effort":"high","format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}}}}},"messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = transform_bytes(body).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+
+        assert_eq!(parsed["reasoning_effort"], "high", "effort mapped");
+        assert_eq!(parsed["response_format"]["type"], "json_schema", "format mapped");
+        assert_eq!(
+            parsed["response_format"]["json_schema"]["schema"]["properties"]["title"]["type"], "string",
+            "schema carried"
+        );
+        assert_eq!(
+            parsed["response_format"]["json_schema"]["strict"], true,
+            "Anthropic structured outputs guarantee conformance, so the Chat schema must be strict"
+        );
+        assert!(parsed.get("output_config").is_none(), "output_config must not travel");
+    }
+
+    #[test]
+    fn unsupported_output_config_keys_are_rejected() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"output_config":{"effort":"high","task_budget":{"type":"tokens","budget":4096}},"messages":[{"role":"user","content":"Hi"}]}"#;
+        let error = transform_bytes(body).unwrap_err();
+
+        assert!(
+            error.contains("output_config.task_budget"),
+            "rejection must name the unsupported key: {error}"
+        );
+    }
+
+    #[test]
+    fn unsupported_output_format_type_is_rejected() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"output_config":{"format":{"type":"grammar"}},"messages":[{"role":"user","content":"Hi"}]}"#;
+        let error = transform_bytes(body).unwrap_err();
+
+        assert!(
+            error.contains("output_config.format"),
+            "rejection must name the unsupported format: {error}"
+        );
+    }
+
+    #[test]
+    fn deprecated_output_format_maps_to_response_format() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"output_format":{"type":"json_schema","schema":{"type":"object"}},"messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = transform_bytes(body).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+
+        assert_eq!(parsed["response_format"]["type"], "json_schema", "format mapped");
+        assert!(parsed.get("output_format").is_none(), "output_format must not travel");
+    }
+
+    #[test]
+    fn client_default_fields_are_dropped_not_forwarded() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"thinking":{"type":"enabled","budget_tokens":1024},"context_management":{"edits":[{"type":"clear_thinking_20251015"}]},"messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = transform_bytes(body).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+
+        for field in ["thinking", "context_management"] {
+            assert!(
+                parsed.get(field).is_none(),
+                "`{field}` has no Chat Completions equivalent"
+            );
+        }
+    }
+
+    #[test]
+    fn unrepresentable_fields_are_rejected() {
+        for field in ["service_tier", "container", "inference_geo", "mcp_servers"] {
+            let body = json!({
+                "model": "claude-opus-4-8",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": "Hi"}],
+                field: {"any": 1},
+            });
+            let error = transform_request(body).unwrap_err();
+            assert!(
+                error.contains(field),
+                "rejection for `{field}` must name the field: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn null_unrepresentable_field_is_treated_as_absent() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"service_tier":null,"messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = transform_bytes(body).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+
+        assert!(parsed.get("service_tier").is_none(), "null field is not forwarded");
     }
 
     #[test]

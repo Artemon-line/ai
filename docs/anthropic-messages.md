@@ -184,8 +184,21 @@ The `anthropic_messages_to_chat_completions` filter:
   equivalent tool-result error flag
 - Maps `stop_sequences` to `stop`,
   `tool_choice` semantics, tool definitions
-- Preserves `top_k` as an extra body parameter
-- Drops `thinking` blocks with a log warning
+- Maps `metadata.user_id` to `safety_identifier` as its
+  SHA-256 hex digest, `output_config.effort` to
+  `reasoning_effort`, and a `json_schema`
+  `output_config.format` (or the deprecated
+  `output_format`) to a strict `response_format`; any
+  other `output_config` key is rejected with a 400
+- Rejects `service_tier`, `container`, `inference_geo`
+  and `mcp_servers` with a 400, because the translated
+  response cannot report their effect truthfully
+- Drops `thinking` and `context_management` with a log
+  warning; Claude Code sends both on every request and
+  Chat Completions has no equivalent
+- Forwards every other field untouched (for example
+  `top_k`) and leaves its validation to the backend
+- Drops `thinking` content blocks with a log warning
 - Transforms the response back to Anthropic format
 - Normalizes pre-stream upstream 4xx/5xx responses into
   Anthropic error envelopes for both streaming and
