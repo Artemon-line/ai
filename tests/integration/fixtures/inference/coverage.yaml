@@ -319,3 +319,12 @@ features:
     providers:
       synthetic:
         status: synthetic_only
+  - id: responses.client_tool_compat.stream_restore
+    scopes:
+      - responses_client_tool_compat
+    status: synthetic_only
+    scenarios:
+      - responses/client-tool-compat-stream
+    providers:
+      synthetic:
+        status: synthetic_only

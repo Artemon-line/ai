@@ -55,6 +55,7 @@ The manifest declares **32 features** across **6 scopes**, linked to **32 scenar
 | `responses_to_chat_completions` | `responses.chat.tools.function_echo` | `synthetic_only` | `responses/chat-tool-echo` | `synthetic`: `synthetic_only` |
 | `responses_to_chat_completions` | `responses.chat.structured_output_with_tools` | `synthetic_only` | `responses/chat-structured-output-with-tools` | `synthetic`: `synthetic_only` |
 | `responses_client_tool_compat` | `responses.client_tool_compat.lower_restore` | `synthetic_only` | `responses/client-tool-compat` | `synthetic`: `synthetic_only` |
+| `responses_client_tool_compat` | `responses.client_tool_compat.stream_restore` | `synthetic_only` | `responses/client-tool-compat-stream` | `synthetic`: `synthetic_only` |
 <!-- END GENERATED INFERENCE COVERAGE -->
 
 ## Layout
