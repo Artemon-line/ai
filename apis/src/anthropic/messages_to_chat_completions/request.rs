@@ -11,15 +11,39 @@ use tracing::warn;
 // Request Transformation
 // -----------------------------------------------------------------------------
 
-/// Anthropic Messages fields the Chat Completions translation cannot honor.
+/// Request fields whose effect the translated response could not report.
 ///
-/// Each one changes behavior that the translated response would then
-/// misreport: `wire.rs` hardcodes `service_tier`, `container` and
-/// `inference_geo` to null, and `mcp_servers` is a beta server-side feature
-/// (`mcp-client-2025-04-04`). Forwarding them would let the backend ignore
-/// the field while the client is told it took effect, so the request is
-/// rejected instead.
-const UNREPRESENTABLE_FIELDS: [&str; 4] = ["service_tier", "container", "inference_geo", "mcp_servers"];
+/// The Anthropic fields change behavior that the response would misreport:
+/// `wire.rs` hardcodes `service_tier`, `container` and `inference_geo` to
+/// null, and `mcp_servers` is a beta server-side feature
+/// (`mcp-client-2025-04-04`).
+///
+/// The Chat Completions fields have no Anthropic counterpart, so no
+/// conforming client sends them, but forwarding would let them reach the
+/// backend, which then produces output the response translators discard:
+/// only the first of `n` choices is translated, `logprobs` and
+/// `top_logprobs` are dropped, `audio` and `modalities` output parts are
+/// dropped, the deprecated `functions`/`function_call` shape is never read,
+/// `web_search_options` annotations are dropped, and the top-level
+/// `moderation` results are dropped. Rejecting is honest; forwarding would
+/// bill the client for output it never sees. A value equal to the field's
+/// documented default changes nothing and is dropped instead (see
+/// [`is_default_value`]).
+const UNREPRESENTABLE_FIELDS: [&str; 13] = [
+    "service_tier",
+    "container",
+    "inference_geo",
+    "mcp_servers",
+    "n",
+    "logprobs",
+    "top_logprobs",
+    "audio",
+    "modalities",
+    "functions",
+    "function_call",
+    "web_search_options",
+    "moderation",
+];
 
 /// Anthropic Messages fields dropped with a warning instead of forwarded.
 ///
@@ -30,6 +54,11 @@ const UNREPRESENTABLE_FIELDS: [&str; 4] = ["service_tier", "container", "inferen
 /// make the outcome depend on the backend, since vLLM ignores unknown fields
 /// and the OpenAI API rejects them.
 const DROPPED_FIELDS: [&str; 2] = ["thinking", "context_management"];
+
+/// Every `output_config` key in the Anthropic schema, including the beta
+/// `task_budget`; the schema declares no others (`additionalProperties:
+/// false`) and every one is nullable.
+const OUTPUT_CONFIG_KEYS: [&str; 3] = ["effort", "format", "task_budget"];
 
 /// Transform a parsed Anthropic Messages request body into Chat
 /// Completions-compatible format.
@@ -100,16 +129,41 @@ fn drop_unsupported_fields(body: &mut Map<String, Value>) {
 }
 
 /// Remove every [`UNREPRESENTABLE_FIELDS`] entry, failing on the first one
-/// that carries a value. A JSON `null` is treated as absent.
+/// that carries a value. A JSON `null` or the field's documented default is
+/// treated as absent.
 fn reject_unrepresentable_fields(body: &mut Map<String, Value>) -> Result<(), String> {
     for field in UNREPRESENTABLE_FIELDS {
-        if body.remove(field).is_some_and(|value| !value.is_null()) {
+        if body
+            .remove(field)
+            .is_some_and(|value| !value.is_null() && !is_default_value(field, &value))
+        {
             return Err(format!(
                 "`{field}` is not supported when translating Anthropic Messages to Chat Completions"
             ));
         }
     }
     Ok(())
+}
+
+/// Whether `value` is the documented default of `field`, so that sending it
+/// is indistinguishable from omitting it and the response misreports nothing.
+///
+/// The Chat Completions spec documents `n: 1`, `logprobs: false`,
+/// `modalities: ["text"]` and `function_call: "none"` (the default when no
+/// `functions` are present, which always holds since `functions` is
+/// rejected). Anthropic documents `service_tier: "auto"`, and an empty
+/// `mcp_servers` list configures nothing. The remaining rejected fields have
+/// no default other than null.
+fn is_default_value(field: &str, value: &Value) -> bool {
+    match field {
+        "n" => *value == 1,
+        "logprobs" => *value == false,
+        "modalities" => *value == json!(["text"]),
+        "function_call" => *value == "none",
+        "service_tier" => *value == "auto",
+        "mcp_servers" => *value == json!([]),
+        _ => false,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -707,11 +761,15 @@ fn map_output_config(
         Some(Value::Object(config)) => config,
         _ => Map::new(),
     };
-    insert_if_some(
-        chat,
-        "reasoning_effort",
-        config.remove("effort").filter(|effort| !effort.is_null()),
-    );
+    // Each known key is nullable in the schema, and null means unset. Nulls
+    // under unknown keys stay, so they reach the unsupported-key rejection
+    // below, as the schema's `additionalProperties: false` would reject them.
+    for key in OUTPUT_CONFIG_KEYS {
+        if config.get(key).is_some_and(Value::is_null) {
+            config.remove(key);
+        }
+    }
+    insert_if_some(chat, "reasoning_effort", config.remove("effort"));
     if let Some(format) = config
         .remove("format")
         .or(output_format)
@@ -1442,6 +1500,114 @@ mod tests {
             "Anthropic structured outputs guarantee conformance, so the Chat schema must be strict"
         );
         assert!(parsed.get("output_config").is_none(), "output_config must not travel");
+    }
+
+    #[test]
+    fn chat_fields_whose_effect_the_response_cannot_carry_are_rejected() {
+        for field in [
+            "n",
+            "logprobs",
+            "top_logprobs",
+            "audio",
+            "modalities",
+            "functions",
+            "function_call",
+            "web_search_options",
+            "moderation",
+        ] {
+            let body = json!({
+                "model": "claude-opus-4-8",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": "Hi"}],
+                field: 2,
+            });
+            let error = transform_request(body).unwrap_err();
+            assert!(
+                error.contains(field),
+                "rejection for `{field}` must name the field: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_valued_rejected_fields_are_treated_as_absent() {
+        for (field, default) in [
+            ("n", json!(1)),
+            ("logprobs", json!(false)),
+            ("modalities", json!(["text"])),
+            ("function_call", json!("none")),
+            ("service_tier", json!("auto")),
+            ("mcp_servers", json!([])),
+        ] {
+            let body = json!({
+                "model": "claude-opus-4-8",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": "Hi"}],
+                field: default,
+            });
+            let result = transform_request(body);
+            assert!(
+                result.is_ok(),
+                "the default value of `{field}` must be accepted: {result:?}"
+            );
+            let parsed: Value = serde_json::from_slice(&result.unwrap()).unwrap();
+            assert!(
+                parsed.get(field).is_none(),
+                "the default value of `{field}` must not be forwarded"
+            );
+        }
+    }
+
+    #[test]
+    fn non_default_valued_rejected_fields_are_rejected() {
+        for (field, value) in [
+            ("n", json!(2)),
+            ("logprobs", json!(true)),
+            ("modalities", json!(["text", "audio"])),
+            ("function_call", json!("auto")),
+            ("service_tier", json!("standard_only")),
+            (
+                "mcp_servers",
+                json!([{"type": "url", "url": "https://example.com", "name": "x"}]),
+            ),
+        ] {
+            let body = json!({
+                "model": "claude-opus-4-8",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": "Hi"}],
+                field: value,
+            });
+            let error = transform_request(body).unwrap_err();
+            assert!(
+                error.contains(field),
+                "a non-default `{field}` must be rejected by name: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn output_config_null_values_are_treated_as_absent() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"output_config":{"effort":null,"format":null,"task_budget":null},"messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = transform_bytes(body).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+
+        for field in ["reasoning_effort", "response_format", "output_config"] {
+            assert!(
+                parsed.get(field).is_none(),
+                "a null `{field}` source must produce nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_null_output_config_key_is_rejected() {
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":1024,"output_config":{"effort":"high","foo":null},"messages":[{"role":"user","content":"Hi"}]}"#;
+        let error = transform_bytes(body).unwrap_err();
+
+        assert!(
+            error.contains("output_config.foo"),
+            "a null under an unknown key must still be rejected by name: {error}"
+        );
     }
 
     #[test]
