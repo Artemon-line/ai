@@ -2916,6 +2916,105 @@ class TestClientToolCompatVLLM:
         # Request phase echo: the client sees its original ``custom`` tool back.
         assert any(t.type == "custom" for t in response.tools), response.tools
 
+    def test_single_round_declared_and_discovered_tools_lower_without_leaking(
+        self, client_tool_compat_client
+    ):
+        """General single-request coverage: a declared rich ``custom`` tool and a
+        ``tool_search``-discovered ``custom`` tool coexist on one request, are both
+        lowered to private ``function`` selectors for the function-only backend, and
+        the canonical echo plus restoration stay leak-free.
+
+        A prior client-executed ``tool_search`` discovered ``apply_patch`` while the
+        request also declares the rich ``custom`` ``run_python`` and forces the
+        discovered tool via ``tool_choice``. The forced discovered selector is
+        accepted (lowered ``custom`` -> ``function``, not rejected), and the response
+        echoes the *declared* ``run_python`` back as ``custom`` (its echo is not
+        clobbered by the discovered set) while never leaking a private ``function``
+        tool or ``function_call`` item to the client.
+
+        This asserts only filter-guaranteed, model-independent invariants: whether
+        the small CI simulator actually emits the forced call is model-dependent, so
+        the test does not require a live tool call. It exercises a single lowering
+        only (the example pipeline transitions straight to ``done``), so it passes on
+        both pre- and post-fix code and is deliberately NOT the #1249 IRR re-entry
+        regression guard — that failure is unreachable through the live agentic loop
+        and is pinned synthetically by the Rust unit test
+        ``relowering_with_captured_echo_preserves_canonical_restoration``.
+        """
+        response = client_tool_compat_client.responses.create(
+            model=VLLM_MODEL,
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": (
+                        "You MUST call the apply_patch tool. Do not answer "
+                        "directly. /no_think"
+                    ),
+                },
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_ts",
+                    "execution": "client",
+                    "arguments": {"query": "patch"},
+                },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_ts",
+                    "status": "completed",
+                    "tools": [
+                        {
+                            "type": "custom",
+                            "name": "apply_patch",
+                            "description": "Apply a unified diff to the workspace.",
+                            "format": {"type": "text"},
+                        }
+                    ],
+                },
+            ],
+            tools=[
+                {
+                    "type": "custom",
+                    "name": "run_python",
+                    "description": "Run python code in the workspace.",
+                }
+            ],
+            # Force the discovered custom tool: this exercises the discovered
+            # tool_choice lowering path (custom -> function selector) and proves the
+            # backend accepts it rather than rejecting an undeclared selector.
+            # Whether the small CI simulator then honours the forced call is
+            # model-dependent, so the assertions below never require a live call.
+            tool_choice={"type": "custom", "name": "apply_patch"},
+            temperature=0,
+            store=False,
+            max_output_tokens=256,
+        )
+
+        assert response.status == "completed", response
+        # No un-restored private ``function_call`` may leak to the client, and any
+        # tool call the model did emit must have been restored to a typed
+        # ``custom_tool_call`` naming one of the two known tools (never a raw private
+        # function call). This holds whether or not the model honoured the forced
+        # choice, so it does not depend on the simulator emitting a call.
+        assert all(item.type != "function_call" for item in response.output), (
+            f"lowered function must not leak: {[i.type for i in response.output]}"
+        )
+        custom_calls = [
+            item for item in response.output if item.type == "custom_tool_call"
+        ]
+        assert all(
+            call.name in {"run_python", "apply_patch"} for call in custom_calls
+        ), f"unexpected restored tool name: {[c.name for c in custom_calls]}"
+        # The response echoes the *declared* rich tool back as ``custom`` — the
+        # discovered set never overwrites the canonical declaration echo, and no
+        # lowered private ``function`` tool leaks into the echoed set.
+        assert any(
+            t.type == "custom" and t.name == "run_python" for t in response.tools
+        ), response.tools
+        assert all(t.type != "function" for t in response.tools), response.tools
+        # The discovered tool was never declared, so it is not echoed.
+        assert all(t.name != "apply_patch" for t in response.tools), response.tools
+
     def test_streaming_custom_tool_restores_lifecycle(
         self, client_tool_compat_client
     ):
