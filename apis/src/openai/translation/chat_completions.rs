@@ -1358,6 +1358,7 @@ fn build_chat_tool_choice(
     };
 
     match choice {
+        Value::Null => Ok(None),
         Value::String(_) => Ok(Some(choice.clone())),
         Value::Object(choice_obj) => build_object_tool_choice(choice_obj, has_web_search, has_file_search).map(Some),
         _ => Err(TranslationError::UnsupportedToolChoiceType(

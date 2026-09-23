@@ -7119,6 +7119,49 @@ def test_invalid_tool_choice_raises_bad_request(openai_client):
     assert "tool_choice" in str(exc_info.value).lower()
 
 
+@requires_vllm_compat
+def test_null_tool_choice_succeeds_sdk(openai_client):
+    """Verify explicit tool_choice=None succeeds via the OpenAI SDK."""
+    response = openai_client.responses.create(
+        model=VLLM_MODEL,
+        input="Hello",
+        tools=[
+            {
+                "type": "function",
+                "name": "test_tool",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+        tool_choice=None,
+    )
+    assert response.status == "completed"
+
+
+@requires_vllm_compat
+def test_null_tool_choice_succeeds_raw_http(openai_client):
+    """Verify explicit json tool_choice: null succeeds over raw HTTP."""
+    raw = httpx.post(
+        f"{str(openai_client.base_url).rstrip('/')}/responses",
+        headers={"Authorization": "Bearer test", **TRUSTED_OWNER_HEADERS},
+        json={
+            "model": VLLM_MODEL,
+            "input": "Hello",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "test_tool",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+            "tool_choice": None,
+        },
+        timeout=30,
+    )
+    assert raw.status_code == 200
+    data = raw.json()
+    assert data.get("status") == "completed"
+
+
 # ---------------------------------------------------------------------------
 # openai_file_resolve outbound-chain (fully stubbed upstreams; no vLLM/OGX)
 # ---------------------------------------------------------------------------

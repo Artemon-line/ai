@@ -1965,6 +1965,30 @@ mod tests {
     }
 
     #[test]
+    fn null_tool_choice_means_no_field() {
+        let mapped = map(&json!({
+            "model": "m",
+            "input": "hello",
+            "tool_choice": null
+        }));
+
+        assert!(mapped.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn null_tool_choice_with_tools_means_no_tool_choice_field() {
+        let mapped = map(&json!({
+            "model": "m",
+            "input": "hello",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+            "tool_choice": null
+        }));
+
+        assert!(mapped.get("tools").is_some());
+        assert!(mapped.get("tool_choice").is_none());
+    }
+
+    #[test]
     fn non_string_non_object_tool_choice_is_rejected() {
         let error = map_error(&json!({"model": "m", "input": "hello", "tool_choice": 42}));
 
