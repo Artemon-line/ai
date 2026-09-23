@@ -50,6 +50,7 @@ dashmap = { workspace = true, optional = true }
 futures = { workspace = true }
 http = { workspace = true }
 jsonschema = { workspace = true, optional = true }
+openssl = { workspace = true }
 percent-encoding = { workspace = true }
 pingora-core = { workspace = true }
 praxis-core = { workspace = true }
@@ -58,13 +59,13 @@ praxis-core = { workspace = true }
 # bind_chain for outbound callout chains. Both are off-by-default experimental
 # features in praxis 0.6.0 that carry no extra dependencies.
 praxis-filter = { workspace = true, features = ["iterative-request-router", "chain-binding"] }
+praxis-tls = { workspace = true }
 reqwest = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-sha2 = { workspace = true }
 sqlx = { workspace = true, optional = true }
 sse-stream = { workspace = true, optional = true }
 thiserror = { workspace = true }
