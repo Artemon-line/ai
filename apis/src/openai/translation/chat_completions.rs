@@ -1348,6 +1348,10 @@ fn convert_function_tool(tool: &Map<String, Value>) -> Value {
 }
 
 /// Convert Responses `tool_choice` into Chat Completions-compatible shape.
+///
+/// An explicit JSON `null` (or absent `None`) is treated as absent/default per
+/// observed OpenAI compatibility, returning `Ok(None)` so translation omits the
+/// `tool_choice` field from the outbound Chat Completions request.
 fn build_chat_tool_choice(
     choice: Option<&Value>,
     has_web_search: bool,

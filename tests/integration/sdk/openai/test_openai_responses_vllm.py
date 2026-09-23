@@ -7137,9 +7137,58 @@ def test_null_tool_choice_succeeds_sdk(openai_client):
     assert response.status == "completed"
 
 
+@pytest.mark.parametrize(
+    "tool_choice,with_tools",
+    [
+        (None, True),  # explicit null with tools
+        (None, False),  # explicit null without tools
+        ("none", True),
+        ("none", False),
+        ("auto", True),
+        ("auto", False),
+        ({"type": "function", "name": "test_tool"}, True),
+    ],
+)
+@pytest.mark.parametrize("stream", [False, True])
 @requires_vllm_compat
-def test_null_tool_choice_succeeds_raw_http(openai_client):
-    """Verify explicit json tool_choice: null succeeds over raw HTTP."""
+def test_valid_tool_choice_variants_raw_http(openai_client, tool_choice, with_tools, stream):
+    """Verify valid tool_choice variants (null, omitted, none, auto, forced) over raw HTTP in buffered and streaming modes."""
+    body = {
+        "model": VLLM_MODEL,
+        "input": "Hello",
+        "stream": stream,
+        "tool_choice": tool_choice,
+    }
+    if with_tools:
+        body["tools"] = [
+            {
+                "type": "function",
+                "name": "test_tool",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ]
+
+    raw = httpx.post(
+        f"{str(openai_client.base_url).rstrip('/')}/responses",
+        headers={"Authorization": "Bearer test", **TRUSTED_OWNER_HEADERS},
+        json=body,
+        timeout=30,
+    )
+    assert raw.status_code == 200, f"Failed for choice={tool_choice}, tools={with_tools}, stream={stream}: {raw.text}"
+
+
+@pytest.mark.parametrize(
+    "malformed_choice",
+    [
+        42,
+        {"name": "test_tool"},  # missing "type" discriminator
+        "invalid_choice",
+    ],
+)
+@pytest.mark.parametrize("stream", [False, True])
+@requires_vllm_compat
+def test_malformed_tool_choice_variants_raw_http(openai_client, malformed_choice, stream):
+    """Verify malformed tool_choice variants return 400 over raw HTTP in buffered and streaming modes."""
     raw = httpx.post(
         f"{str(openai_client.base_url).rstrip('/')}/responses",
         headers={"Authorization": "Bearer test", **TRUSTED_OWNER_HEADERS},
@@ -7153,13 +7202,13 @@ def test_null_tool_choice_succeeds_raw_http(openai_client):
                     "parameters": {"type": "object", "properties": {}},
                 }
             ],
-            "tool_choice": None,
+            "tool_choice": malformed_choice,
+            "stream": stream,
         },
         timeout=30,
     )
-    assert raw.status_code == 200
-    data = raw.json()
-    assert data.get("status") == "completed"
+    assert raw.status_code == 400
+    assert "tool_choice" in raw.text.lower() or "invalid" in raw.text.lower()
 
 
 # ---------------------------------------------------------------------------
