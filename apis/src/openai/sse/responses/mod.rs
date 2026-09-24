@@ -8,3 +8,5 @@ mod parser;
 
 #[cfg(feature = "openai-responses")]
 pub(crate) use event::ResponsesEvent;
+#[cfg(all(feature = "openai-responses", test))]
+pub(crate) use parser::ResponsesSseParser;

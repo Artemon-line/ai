@@ -1994,6 +1994,7 @@ fn build_usage(obj: &Map<String, Value>) -> Value {
 }
 
 /// Build `Responses` usage from an optional Chat Completions usage value.
+#[expect(clippy::too_many_lines, reason = "straight-line usage builder")]
 fn build_usage_from_value(usage: Option<&Value>) -> Value {
     let input_tokens = usage_tokens(usage, "prompt_tokens");
     let output_tokens = usage_tokens(usage, "completion_tokens");
@@ -2001,6 +2002,15 @@ fn build_usage_from_value(usage: Option<&Value>) -> Value {
     let cached_tokens = usage
         .and_then(|usage| usage.get("prompt_tokens_details"))
         .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_write_tokens = usage
+        .and_then(|usage| usage.get("prompt_tokens_details"))
+        .and_then(|details| {
+            details
+                .get("cache_write_tokens")
+                .or_else(|| details.get("cache_creation_input_tokens"))
+        })
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let reasoning_tokens = usage
@@ -2012,7 +2022,8 @@ fn build_usage_from_value(usage: Option<&Value>) -> Value {
     json!({
         "input_tokens": input_tokens,
         "input_tokens_details": {
-            "cached_tokens": cached_tokens
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens
         },
         "output_tokens": output_tokens,
         "output_tokens_details": {

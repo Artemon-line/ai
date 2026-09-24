@@ -1191,3 +1191,399 @@ fn fs_end_stream_writes_five_keys_and_is_idempotent() {
     fs_end_stream_with_error_ctx(&mut ctx, "other_code", "later");
     assert_eq!(ctx.get_metadata("responses.stream_error_code"), Some("server_error"));
 }
+
+// -----------------------------------------------------------------------------
+// Conformance Verification Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(feature = "openai-responses")]
+#[test]
+#[expect(clippy::print_stdout, reason = "sentinel output for xtask conformance verification")]
+fn conformance_responses_routes_match_runtime_registry() {
+    for spec in routes::operation_specs() {
+        let path = spec.runtime_path().replace("{response_id}", "resp_test");
+        let matched = routes::match_route(spec.method().as_str(), &path, spec.transport())
+            .unwrap_or_else(|| panic!("failed to match route for {} {path}", spec.method().as_str()));
+        assert_eq!(
+            matched.spec.operation,
+            spec.operation,
+            "matched wrong operation for {} {path}",
+            spec.method().as_str()
+        );
+    }
+    println!("PRAXIS_CONFORMANCE_OK responses route_dispatch");
+}
+
+#[cfg(feature = "openai-responses")]
+#[test]
+#[expect(clippy::print_stdout, reason = "sentinel output for xtask conformance verification")]
+fn conformance_responses_success_payloads_match_generated_response_schemas() {
+    let spec = load_openai_spec();
+    let schema = spec
+        .pointer("/components/schemas/Response")
+        .expect("missing Response schema");
+
+    let response_resource = serde_json::json!({
+        "id": "resp_conformance_123",
+        "object": "response",
+        "status": "completed",
+        "created_at": 1_700_000_000_u64,
+        "completed_at": 1_700_000_005_u64,
+        "model": "gpt-4o",
+        "error": null,
+        "incomplete_details": null,
+        "instructions": null,
+        "metadata": {},
+        "tools": [],
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "output": [
+            {
+                "id": "msg_456",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Hello world"
+                    }
+                ]
+            }
+        ],
+        "usage": {
+            "input_tokens": 10,
+            "input_tokens_details": {
+                "cached_tokens": 2,
+                "cache_write_tokens": 0
+            },
+            "output_tokens": 5,
+            "output_tokens_details": {
+                "reasoning_tokens": 0
+            },
+            "total_tokens": 15
+        }
+    });
+
+    assert_response_matches_schema(&spec, "Response", schema, &response_resource);
+    println!("PRAXIS_CONFORMANCE_OK responses success_response_contract");
+}
+
+#[cfg(feature = "openai-responses")]
+#[test]
+#[expect(clippy::print_stdout, reason = "sentinel output for xtask conformance verification")]
+fn conformance_responses_sse_lifecycle_events_match_schemas() {
+    let spec = load_openai_spec();
+
+    let events = [
+        serde_json::json!({
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_sse_123",
+                "object": "response",
+                "status": "in_progress",
+                "created_at": 1_700_000_000_u64,
+                "completed_at": null,
+                "model": "gpt-4o",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "metadata": {},
+                "tools": [],
+                "tool_choice": "auto",
+                "parallel_tool_calls": true,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "output": []
+            }
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "sequence_number": 1,
+            "response": {
+                "id": "resp_sse_123",
+                "object": "response",
+                "status": "completed",
+                "created_at": 1_700_000_000_u64,
+                "completed_at": 1_700_000_005_u64,
+                "model": "gpt-4o",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "metadata": {},
+                "tools": [],
+                "tool_choice": "auto",
+                "parallel_tool_calls": true,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "output": [
+                    {
+                        "id": "msg_sse_1",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Streaming complete"
+                            }
+                        ]
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "input_tokens_details": {
+                        "cached_tokens": 0,
+                        "cache_write_tokens": 0
+                    },
+                    "output_tokens": 2,
+                    "output_tokens_details": {
+                        "reasoning_tokens": 0
+                    },
+                    "total_tokens": 12
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "sequence_number": 2,
+            "item_id": "msg_sse_1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Hello",
+            "logprobs": []
+        }),
+        serde_json::json!({
+            "type": "response.output_text.done",
+            "sequence_number": 3,
+            "item_id": "msg_sse_1",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "Hello world",
+            "logprobs": []
+        }),
+    ];
+
+    for (idx, event) in events.iter().enumerate() {
+        assert_response_matches_schema(
+            &spec,
+            &format!("SSE event {idx}"),
+            spec.pointer("/components/schemas/ResponseStreamEvent").unwrap(),
+            event,
+        );
+    }
+    println!("PRAXIS_CONFORMANCE_OK responses sse_lifecycle_contract");
+}
+
+#[cfg(feature = "openai-responses")]
+#[test]
+#[expect(clippy::print_stdout, reason = "sentinel output for xtask conformance verification")]
+fn conformance_responses_generated_schema_check_rejects_incomplete_payloads() {
+    let spec = load_openai_spec();
+    let schema = spec
+        .pointer("/components/schemas/Response")
+        .expect("missing Response schema");
+
+    let missing_cache_write = serde_json::json!({
+        "id": "resp_123",
+        "object": "response",
+        "status": "completed",
+        "created_at": 1_700_000_000_u64,
+        "model": "gpt-4o",
+        "output": [],
+        "usage": {
+            "input_tokens": 10,
+            "input_tokens_details": {
+                "cached_tokens": 2
+            },
+            "output_tokens": 5,
+            "output_tokens_details": {
+                "reasoning_tokens": 0
+            },
+            "total_tokens": 15
+        }
+    });
+
+    assert!(
+        !response_schema_matches(&spec, schema, &missing_cache_write),
+        "schema check must reject usage missing required cache_write_tokens"
+    );
+
+    let missing_status = serde_json::json!({
+        "id": "resp_123",
+        "object": "response",
+        "created_at": 1_700_000_000_u64,
+        "model": "gpt-4o",
+        "output": []
+    });
+
+    assert!(
+        !response_schema_matches(&spec, schema, &missing_status),
+        "schema check must reject response missing required status"
+    );
+
+    let sse_event_schema = spec
+        .pointer("/components/schemas/ResponseStreamEvent")
+        .expect("missing ResponseStreamEvent schema");
+    let missing_sequence_number = serde_json::json!({
+        "type": "response.created",
+        "response": {
+            "id": "resp_sse_123",
+            "object": "response",
+            "status": "in_progress",
+            "created_at": 1_700_000_000_u64,
+            "completed_at": null,
+            "model": "gpt-4o",
+            "error": null,
+            "incomplete_details": null,
+            "instructions": null,
+            "metadata": {},
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "output": []
+        }
+    });
+
+    assert!(
+        !response_schema_matches(&spec, sse_event_schema, &missing_sequence_number),
+        "schema check must reject SSE event missing required sequence_number"
+    );
+
+    let mut parser =
+        crate::openai::sse::responses::ResponsesSseParser::new(&crate::openai::sse::SseParserConfig::default());
+    drop(parser.parse_chunk(b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"));
+    assert!(
+        parser.validate_complete().is_err(),
+        "stream parser must reject a stream where the terminal event is removed"
+    );
+
+    println!("PRAXIS_CONFORMANCE_OK responses schema_check_sensitivity");
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+#[cfg(feature = "openai-responses")]
+fn load_openai_spec() -> serde_json::Value {
+    let spec_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/conformance/specs/openai-openapi.yaml"
+    );
+    let content = std::fs::read_to_string(spec_path).expect("read spec");
+    let sanitized = content.replace("9223372036854776000", "9223372036854775807");
+    serde_yaml::from_str(&sanitized).expect("parse spec")
+}
+
+#[cfg(feature = "openai-responses")]
+fn assert_response_matches_schema(
+    spec: &serde_json::Value,
+    path: &str,
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) {
+    if let Err(err) = check_schema_match(spec, schema, value) {
+        panic!("{path} does not match generated schema: {err}; value: {value}");
+    }
+}
+
+#[cfg(feature = "openai-responses")]
+fn response_schema_matches(spec: &serde_json::Value, schema: &serde_json::Value, value: &serde_json::Value) -> bool {
+    check_schema_match(spec, schema, value).is_ok()
+}
+
+#[cfg(feature = "openai-responses")]
+fn check_schema_match(
+    spec: &serde_json::Value,
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let schema = resolve_spec_schema_ref(spec, schema);
+
+    if value.is_null() && schema.get("nullable").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    if let Some(variants) = schema.get("oneOf").and_then(serde_json::Value::as_array) {
+        let count = variants
+            .iter()
+            .filter(|v| response_schema_matches(spec, v, value))
+            .count();
+        if count == 1 {
+            return Ok(());
+        }
+        return Err(format!("oneOf matched {count} variants for {value:?}"));
+    }
+    if let Some(variants) = schema.get("anyOf").and_then(serde_json::Value::as_array) {
+        if variants.iter().any(|v| response_schema_matches(spec, v, value)) {
+            return Ok(());
+        }
+        return Err(format!("anyOf matched 0 variants for {value:?}"));
+    }
+    if let Some(variants) = schema.get("allOf").and_then(serde_json::Value::as_array) {
+        for (i, v) in variants.iter().enumerate() {
+            if let Err(err) = check_schema_match(spec, v, value) {
+                return Err(format!("allOf branch {i} failed: {err}"));
+            }
+        }
+        return Ok(());
+    }
+    if let Some(enum_vals) = schema.get("enum").and_then(serde_json::Value::as_array)
+        && !enum_vals.contains(value)
+    {
+        return Err(format!("value {value:?} not in enum {enum_vals:?}"));
+    }
+    if let Some(schema_type) = schema.get("type").and_then(serde_json::Value::as_str) {
+        let matches_type = match schema_type {
+            "array" => value.is_array(),
+            "boolean" => value.is_boolean(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "null" => value.is_null(),
+            "number" => value.as_f64().is_some(),
+            "object" => value.is_object(),
+            "string" => value.is_string(),
+            _ => false,
+        };
+        if !matches_type {
+            return Err(format!("type mismatch: expected {schema_type}, got {value:?}"));
+        }
+    }
+
+    if let Some(object) = value.as_object() {
+        if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+            for req in required {
+                if let Some(req_str) = req.as_str()
+                    && !object.contains_key(req_str)
+                {
+                    return Err(format!("missing required property {req_str:?}"));
+                }
+            }
+        }
+        if let Some(properties) = schema.get("properties").and_then(serde_json::Value::as_object) {
+            for (prop_name, prop_schema) in properties {
+                if let Some(prop_val) = object.get(prop_name)
+                    && let Err(err) = check_schema_match(spec, prop_schema, prop_val)
+                {
+                    return Err(format!("property {prop_name:?} mismatch: {err}"));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "openai-responses")]
+fn resolve_spec_schema_ref<'a>(spec: &'a serde_json::Value, schema: &'a serde_json::Value) -> &'a serde_json::Value {
+    let Some(ref_path) = schema.get("$ref").and_then(serde_json::Value::as_str) else {
+        return schema;
+    };
+    let pointer = ref_path.strip_prefix('#').unwrap_or(ref_path);
+    spec.pointer(pointer)
+        .unwrap_or_else(|| panic!("missing schema ref {ref_path}"))
+}

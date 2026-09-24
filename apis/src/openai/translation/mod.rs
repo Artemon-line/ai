@@ -2618,6 +2618,7 @@ mod tests {
         assert_eq!(mapped["usage"]["output_tokens"], 50);
         assert_eq!(mapped["usage"]["total_tokens"], 150);
         assert_eq!(mapped["usage"]["input_tokens_details"]["cached_tokens"], 80);
+        assert_eq!(mapped["usage"]["input_tokens_details"]["cache_write_tokens"], 0);
         assert_eq!(mapped["usage"]["output_tokens_details"]["reasoning_tokens"], 20);
     }
 
@@ -2639,6 +2640,7 @@ mod tests {
         assert_eq!(mapped["usage"]["output_tokens"], 0);
         assert_eq!(mapped["usage"]["total_tokens"], 0);
         assert_eq!(mapped["usage"]["input_tokens_details"]["cached_tokens"], 0);
+        assert_eq!(mapped["usage"]["input_tokens_details"]["cache_write_tokens"], 0);
         assert_eq!(mapped["usage"]["output_tokens_details"]["reasoning_tokens"], 0);
     }
 
@@ -2658,6 +2660,7 @@ mod tests {
         let mapped = super::chat_completions::chat_response_to_response_resource(&response, &context).unwrap();
 
         assert_eq!(mapped["usage"]["input_tokens_details"]["cached_tokens"], 0);
+        assert_eq!(mapped["usage"]["input_tokens_details"]["cache_write_tokens"], 0);
         assert_eq!(mapped["usage"]["output_tokens_details"]["reasoning_tokens"], 0);
     }
 
