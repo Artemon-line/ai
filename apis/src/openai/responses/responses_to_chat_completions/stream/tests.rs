@@ -198,7 +198,10 @@ fn streaming_translation_handles_nonzero_zero_and_absent_cache_write_counts() {
     );
     let completed_nonzero = &events_nonzero.last().unwrap().1["response"];
     assert_eq!(completed_nonzero["usage"]["input_tokens_details"]["cached_tokens"], 8);
-    assert_eq!(completed_nonzero["usage"]["input_tokens_details"]["cache_write_tokens"], 2);
+    assert_eq!(
+        completed_nonzero["usage"]["input_tokens_details"]["cache_write_tokens"],
+        2
+    );
 
     // 2. Explicit zero cache_write_tokens
     let events_zero = run_stream(
@@ -222,7 +225,10 @@ fn streaming_translation_handles_nonzero_zero_and_absent_cache_write_counts() {
     );
     let completed_absent = &events_absent.last().unwrap().1["response"];
     assert_eq!(completed_absent["usage"]["input_tokens_details"]["cached_tokens"], 8);
-    assert_eq!(completed_absent["usage"]["input_tokens_details"]["cache_write_tokens"], 0);
+    assert_eq!(
+        completed_absent["usage"]["input_tokens_details"]["cache_write_tokens"],
+        0
+    );
 }
 
 #[test]

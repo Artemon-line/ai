@@ -2665,9 +2665,15 @@ mod tests {
 
         let mapped = super::chat_completions::chat_response_to_response_resource(&response, &context).unwrap();
 
-        assert_eq!(mapped["usage"]["input_tokens"], 1000, "input_tokens remains total prompt_tokens without double counting");
+        assert_eq!(
+            mapped["usage"]["input_tokens"], 1000,
+            "input_tokens remains total prompt_tokens without double counting"
+        );
         assert_eq!(mapped["usage"]["output_tokens"], 50);
-        assert_eq!(mapped["usage"]["total_tokens"], 1050, "total_tokens remains input + output");
+        assert_eq!(
+            mapped["usage"]["total_tokens"], 1050,
+            "total_tokens remains input + output"
+        );
         assert_eq!(mapped["usage"]["input_tokens_details"]["cached_tokens"], 800);
         assert_eq!(mapped["usage"]["input_tokens_details"]["cache_write_tokens"], 200);
         assert_eq!(mapped["usage"]["output_tokens_details"]["reasoning_tokens"], 10);
@@ -2684,9 +2690,13 @@ mod tests {
             "choices": [{"finish_reason": "stop", "index": 0, "message": {"role": "assistant", "content": "ok"}}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150, "prompt_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 20}}
         });
-        let mapped_nonzero = super::chat_completions::chat_response_to_response_resource(&resp_nonzero, &context).unwrap();
+        let mapped_nonzero =
+            super::chat_completions::chat_response_to_response_resource(&resp_nonzero, &context).unwrap();
         assert_eq!(mapped_nonzero["usage"]["input_tokens_details"]["cached_tokens"], 80);
-        assert_eq!(mapped_nonzero["usage"]["input_tokens_details"]["cache_write_tokens"], 20);
+        assert_eq!(
+            mapped_nonzero["usage"]["input_tokens_details"]["cache_write_tokens"],
+            20
+        );
 
         // 2. Explicit zero cache_write_tokens
         let resp_zero = json!({
@@ -2704,7 +2714,8 @@ mod tests {
             "choices": [{"finish_reason": "stop", "index": 0, "message": {"role": "assistant", "content": "ok"}}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150, "prompt_tokens_details": {"cached_tokens": 80}}
         });
-        let mapped_absent = super::chat_completions::chat_response_to_response_resource(&resp_absent, &context).unwrap();
+        let mapped_absent =
+            super::chat_completions::chat_response_to_response_resource(&resp_absent, &context).unwrap();
         assert_eq!(mapped_absent["usage"]["input_tokens_details"]["cached_tokens"], 80);
         assert_eq!(mapped_absent["usage"]["input_tokens_details"]["cache_write_tokens"], 0);
     }
