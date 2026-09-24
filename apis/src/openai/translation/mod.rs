@@ -2885,6 +2885,23 @@ mod tests {
     }
 
     #[test]
+    fn response_resource_normalizes_null_tool_choice_to_auto() {
+        let request = json!({
+            "model": "gpt-4o",
+            "input": "hello",
+            "tools": [{"type": "function", "name": "f"}],
+            "tool_choice": null
+        });
+        let context =
+            super::chat_completions::ResponseContext::from_responses_request(&request, "resp_1".to_owned(), 100);
+        let response = simple_chat_response("stop", "done");
+
+        let mapped = super::chat_completions::chat_response_to_response_resource(&response, &context).unwrap();
+
+        assert_eq!(mapped["tool_choice"], "auto");
+    }
+
+    #[test]
     fn stop_finish_reason_maps_to_completed_status() {
         let request = json!({"model": "m", "input": "hello"});
         let context = make_response_context(&request);

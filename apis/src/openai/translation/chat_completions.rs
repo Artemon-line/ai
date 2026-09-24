@@ -144,7 +144,7 @@ impl<'a> ResponseContext<'a> {
             previous_response_id: request.string("previous_response_id"),
             store: request.bool("store").unwrap_or(true),
             tools: request.array("tools").unwrap_or_default(),
-            tool_choice: request.value("tool_choice"),
+            tool_choice: request.value("tool_choice").filter(|v| !v.is_null()),
             presence_penalty: request.value("presence_penalty"),
             frequency_penalty: request.value("frequency_penalty"),
             top_logprobs: request.u64("top_logprobs"),
@@ -1801,6 +1801,7 @@ fn reasoning_value(context: &ResponseContext<'_>) -> Result<Value, TranslationEr
 fn tool_choice_value(context: &ResponseContext<'_>) -> Value {
     context
         .tool_choice
+        .filter(|v| !v.is_null())
         .cloned()
         .unwrap_or_else(|| Value::String(DEFAULT_TOOL_CHOICE.to_owned()))
 }

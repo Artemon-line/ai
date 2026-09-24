@@ -7121,7 +7121,7 @@ def test_invalid_tool_choice_raises_bad_request(openai_client):
 
 @requires_vllm_compat
 def test_null_tool_choice_succeeds_sdk(openai_client):
-    """Verify explicit tool_choice=None succeeds via the OpenAI SDK."""
+    """Verify explicit tool_choice=None succeeds via the OpenAI SDK and returns normalized tool_choice='auto'."""
     response = openai_client.responses.create(
         model=VLLM_MODEL,
         input="Hello",
@@ -7135,6 +7135,7 @@ def test_null_tool_choice_succeeds_sdk(openai_client):
         tool_choice=None,
     )
     assert response.status == "completed"
+    assert response.tool_choice == "auto"
 
 
 @pytest.mark.parametrize(
@@ -7175,6 +7176,21 @@ def test_valid_tool_choice_variants_raw_http(openai_client, tool_choice, with_to
         timeout=30,
     )
     assert raw.status_code == 200, f"Failed for choice={tool_choice}, tools={with_tools}, stream={stream}: {raw.text}"
+
+    expected_choice = "auto" if tool_choice is None else tool_choice
+    if not stream:
+        data = raw.json()
+        assert data["tool_choice"] == expected_choice
+    else:
+        # Check that emitted SSE response objects carry normalized tool_choice
+        for line in raw.text.splitlines():
+            if line.startswith("data: "):
+                try:
+                    event = json.loads(line[6:])
+                    if isinstance(event, dict) and "response" in event:
+                        assert event["response"]["tool_choice"] == expected_choice
+                except json.JSONDecodeError:
+                    pass
 
 
 @pytest.mark.parametrize(

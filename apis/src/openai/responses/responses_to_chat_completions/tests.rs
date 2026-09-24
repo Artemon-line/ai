@@ -969,6 +969,12 @@ async fn null_tool_choice_translates_as_absent() {
     let action = filter.on_request_body(&mut context, &mut body, true).await.unwrap();
 
     assert!(matches!(action, FilterAction::Continue));
+    let state = context.extensions.get::<ResponsesState>().unwrap();
+    assert_eq!(
+        state.tool_choice,
+        json!("auto"),
+        "canonical tool_choice in ResponsesState must normalize null to auto"
+    );
     let translated: serde_json::Value = serde_json::from_slice(body.as_deref().unwrap()).unwrap();
     assert!(translated.get("tools").is_some());
     assert!(
