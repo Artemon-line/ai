@@ -72,7 +72,7 @@ impl OperationEntry for ConversationOperationSpec {
 }
 
 /// Convert a registry request declaration into an optional schema binding.
-#[cfg(any(feature = "openai-conversations", feature = "openai-responses"))]
+#[cfg(feature = "openai-conversations")]
 macro_rules! request_binding {
     ([none]) => {
         None

@@ -397,13 +397,13 @@ mod tests {
         assert!(!PROXIED_UPLOAD.owns_contract());
         assert!(PROXIED_UPLOAD.owned_contract().is_none());
         assert!(
-            PROXIED_UPLOAD.has_request_body(),
+            PROXIED_UPLOAD.request_body().is_present(),
             "a proxied multipart upload must report its body without owning a contract"
         );
         assert!(PROXIED_UPLOAD.request_body().is_required());
         assert_eq!(PROXIED_UPLOAD.request_body().as_str(), "multipart");
 
-        assert!(!PROXIED_GET.has_request_body());
+        assert!(!PROXIED_GET.request_body().is_present());
         assert!(!PROXIED_GET.request_body().is_required());
     }
 
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn owned_contract_operations_still_report_their_body() {
-        assert!(FILE_OPERATION.has_request_body());
+        assert!(FILE_OPERATION.request_body().is_present());
         assert!(FILE_OPERATION.owned_contract().is_some());
     }
 
