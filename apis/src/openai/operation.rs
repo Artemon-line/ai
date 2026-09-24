@@ -94,15 +94,6 @@ impl OpenAiOperationSpec {
         matches!(self.runtime.mode, HandlingMode::Transform | HandlingMode::Local)
     }
 
-    /// Whether this operation consumes a request body.
-    ///
-    /// Answers the runtime question directly rather than inferring it from
-    /// contract ownership, so proxied operations report their real body shape.
-    #[cfg(feature = "openai-conversations")]
-    pub(crate) const fn has_request_body(&self) -> bool {
-        self.runtime.has_request_body()
-    }
-
     /// Return the locally owned `OpenAPI` contract, when applicable.
     #[cfg(any(feature = "openai-conversations", feature = "openai-responses"))]
     pub(crate) const fn owned_contract(&self) -> Option<OwnedOperationContract> {
