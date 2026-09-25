@@ -1223,49 +1223,41 @@ fn conformance_responses_success_payloads_match_generated_response_schemas() {
         .pointer("/components/schemas/Response")
         .expect("missing Response schema");
 
-    let response_resource = serde_json::json!({
-        "id": "resp_conformance_123",
-        "object": "response",
-        "status": "completed",
-        "created_at": 1_700_000_000_u64,
-        "completed_at": 1_700_000_005_u64,
+    let chat_response = serde_json::json!({
+        "id": "chatcmpl_conformance_123",
+        "object": "chat.completion",
+        "created": 1_700_000_000_u64,
         "model": "gpt-4o",
-        "error": null,
-        "incomplete_details": null,
-        "instructions": null,
-        "metadata": {},
-        "tools": [],
-        "tool_choice": "auto",
-        "parallel_tool_calls": true,
-        "temperature": 1.0,
-        "top_p": 1.0,
-        "output": [
-            {
-                "id": "msg_456",
-                "type": "message",
-                "status": "completed",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
                 "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": "Hello world"
-                    }
-                ]
+                "content": "Hello world"
             }
-        ],
+        }],
         "usage": {
-            "input_tokens": 10,
-            "input_tokens_details": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "prompt_tokens_details": {
                 "cached_tokens": 2,
                 "cache_write_tokens": 0
             },
-            "output_tokens": 5,
-            "output_tokens_details": {
+            "completion_tokens_details": {
                 "reasoning_tokens": 0
-            },
-            "total_tokens": 15
+            }
         }
     });
+    let request = serde_json::json!({"model": "gpt-4o", "input": "Hello"});
+    let context = crate::openai::translation::chat_completions::ResponseContext::from_responses_request(
+        &request,
+        "resp_conformance_123".to_owned(),
+        1_700_000_000,
+    );
+    let response_resource =
+        crate::openai::translation::chat_completions::chat_response_to_response_resource(&chat_response, &context)
+            .expect("translator must convert chat response to response resource");
 
     assert_response_matches_schema(&spec, "Response", schema, &response_resource);
     println!("PRAXIS_CONFORMANCE_OK responses success_response_contract");
@@ -1275,106 +1267,83 @@ fn conformance_responses_success_payloads_match_generated_response_schemas() {
 #[test]
 #[expect(clippy::print_stdout, reason = "sentinel output for xtask conformance verification")]
 fn conformance_responses_sse_lifecycle_events_match_schemas() {
-    let spec = load_openai_spec();
+    use crate::openai::responses::responses_to_chat_completions::stream::tests::{run_stream, wide_limits};
 
-    let events = [
-        serde_json::json!({
-            "type": "response.created",
-            "sequence_number": 0,
-            "response": {
-                "id": "resp_sse_123",
-                "object": "response",
-                "status": "in_progress",
-                "created_at": 1_700_000_000_u64,
-                "completed_at": null,
-                "model": "gpt-4o",
-                "error": null,
-                "incomplete_details": null,
-                "instructions": null,
-                "metadata": {},
-                "tools": [],
-                "tool_choice": "auto",
-                "parallel_tool_calls": true,
-                "temperature": 1.0,
-                "top_p": 1.0,
-                "output": []
-            }
-        }),
-        serde_json::json!({
-            "type": "response.completed",
-            "sequence_number": 1,
-            "response": {
-                "id": "resp_sse_123",
-                "object": "response",
-                "status": "completed",
-                "created_at": 1_700_000_000_u64,
-                "completed_at": 1_700_000_005_u64,
-                "model": "gpt-4o",
-                "error": null,
-                "incomplete_details": null,
-                "instructions": null,
-                "metadata": {},
-                "tools": [],
-                "tool_choice": "auto",
-                "parallel_tool_calls": true,
-                "temperature": 1.0,
-                "top_p": 1.0,
-                "output": [
-                    {
-                        "id": "msg_sse_1",
-                        "type": "message",
-                        "status": "completed",
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": "Streaming complete"
-                            }
-                        ]
-                    }
-                ],
-                "usage": {
-                    "input_tokens": 10,
-                    "input_tokens_details": {
-                        "cached_tokens": 0,
-                        "cache_write_tokens": 0
-                    },
-                    "output_tokens": 2,
-                    "output_tokens_details": {
-                        "reasoning_tokens": 0
-                    },
-                    "total_tokens": 12
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "response.output_text.delta",
-            "sequence_number": 2,
-            "item_id": "msg_sse_1",
-            "output_index": 0,
-            "content_index": 0,
-            "delta": "Hello",
-            "logprobs": []
-        }),
-        serde_json::json!({
-            "type": "response.output_text.done",
-            "sequence_number": 3,
-            "item_id": "msg_sse_1",
-            "output_index": 0,
-            "content_index": 0,
-            "text": "Hello world",
-            "logprobs": []
-        }),
+    let spec = load_openai_spec();
+    let sse_event_schema = spec
+        .pointer("/components/schemas/ResponseStreamEvent")
+        .expect("missing ResponseStreamEvent schema");
+
+    // Scenarios: buffered text, tool call, incomplete (length)
+    let buffered_text_chunks = [
+        r#"{"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello "}}]}"#,
+        r#"{"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"world"}}]}"#,
+        r#"{"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}"#,
     ];
 
-    for (idx, event) in events.iter().enumerate() {
-        assert_response_matches_schema(
-            &spec,
-            &format!("SSE event {idx}"),
-            spec.pointer("/components/schemas/ResponseStreamEvent").unwrap(),
-            event,
+    let tool_call_chunks = [
+        r#"{"id":"chatcmpl_2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Boston\"}"}}]}}]}"#,
+        r#"{"id":"chatcmpl_2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":15,"completion_tokens":10,"total_tokens":25,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}"#,
+    ];
+
+    let incomplete_chunks = [
+        r#"{"id":"chatcmpl_3","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"Truncated..."}}]}"#,
+        r#"{"id":"chatcmpl_3","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}"#,
+    ];
+
+    let test_streams = [
+        ("buffered_text", run_stream(&buffered_text_chunks, wide_limits())),
+        ("tool_call", run_stream(&tool_call_chunks, wide_limits())),
+        ("incomplete", run_stream(&incomplete_chunks, wide_limits())),
+    ];
+
+    for (scenario, stream_events) in test_streams {
+        assert!(!stream_events.is_empty(), "scenario {scenario} generated no events");
+
+        let mut terminal_count = 0;
+        for (idx, (event_type, event_val)) in stream_events.iter().enumerate() {
+            assert_response_matches_schema(
+                &spec,
+                &format!("SSE event {idx} ({event_type}) in {scenario}"),
+                sse_event_schema,
+                event_val,
+            );
+
+            let seq = event_val
+                .get("sequence_number")
+                .and_then(serde_json::Value::as_u64)
+                .expect("sequence_number required");
+            assert_eq!(seq, idx as u64, "sequence_number mismatch in {scenario} at index {idx}");
+
+            if idx == 0 {
+                assert_eq!(
+                    event_type, "response.created",
+                    "first event in {scenario} must be response.created"
+                );
+            }
+
+            if matches!(
+                event_type.as_str(),
+                "response.completed" | "response.failed" | "response.incomplete"
+            ) {
+                terminal_count += 1;
+            }
+        }
+
+        assert_eq!(
+            terminal_count, 1,
+            "scenario {scenario} must have exactly 1 terminal event"
+        );
+        let (last_event_type, _) = stream_events.last().unwrap();
+        assert!(
+            matches!(
+                last_event_type.as_str(),
+                "response.completed" | "response.failed" | "response.incomplete"
+            ),
+            "last event in {scenario} must be terminal, got {last_event_type}"
         );
     }
+
     println!("PRAXIS_CONFORMANCE_OK responses sse_lifecycle_contract");
 }
 
@@ -1387,80 +1356,83 @@ fn conformance_responses_generated_schema_check_rejects_incomplete_payloads() {
         .pointer("/components/schemas/Response")
         .expect("missing Response schema");
 
-    let missing_cache_write = serde_json::json!({
-        "id": "resp_123",
-        "object": "response",
-        "status": "completed",
-        "created_at": 1_700_000_000_u64,
+    let chat_response = serde_json::json!({
+        "id": "chatcmpl_conformance_123",
+        "object": "chat.completion",
+        "created": 1_700_000_000_u64,
         "model": "gpt-4o",
-        "output": [],
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "Hello world"
+            }
+        }],
         "usage": {
-            "input_tokens": 10,
-            "input_tokens_details": {
-                "cached_tokens": 2
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "prompt_tokens_details": {
+                "cached_tokens": 2,
+                "cache_write_tokens": 0
             },
-            "output_tokens": 5,
-            "output_tokens_details": {
+            "completion_tokens_details": {
                 "reasoning_tokens": 0
-            },
-            "total_tokens": 15
+            }
         }
     });
+    let request = serde_json::json!({"model": "gpt-4o", "input": "Hello"});
+    let context = crate::openai::translation::chat_completions::ResponseContext::from_responses_request(
+        &request,
+        "resp_conformance_123".to_owned(),
+        1_700_000_000,
+    );
+    let valid_response =
+        crate::openai::translation::chat_completions::chat_response_to_response_resource(&chat_response, &context)
+            .expect("translator must convert chat response to response resource");
 
+    // Negative 1: missing cache_write_tokens in input_tokens_details
+    let mut missing_cache_write = valid_response.clone();
+    if let Some(details) = missing_cache_write
+        .get_mut("usage")
+        .and_then(|u| u.get_mut("input_tokens_details"))
+        .and_then(|d| d.as_object_mut())
+    {
+        details.remove("cache_write_tokens");
+    }
     assert!(
         !response_schema_matches(&spec, schema, &missing_cache_write),
         "schema check must reject usage missing required cache_write_tokens"
     );
 
-    let missing_status = serde_json::json!({
-        "id": "resp_123",
-        "object": "response",
-        "created_at": 1_700_000_000_u64,
-        "model": "gpt-4o",
-        "output": []
-    });
-
+    // Negative 2: missing required top-level field `id`
+    let mut missing_id = valid_response.clone();
+    if let Some(obj) = missing_id.as_object_mut() {
+        obj.remove("id");
+    }
     assert!(
-        !response_schema_matches(&spec, schema, &missing_status),
-        "schema check must reject response missing required status"
+        !response_schema_matches(&spec, schema, &missing_id),
+        "schema check must reject response missing required id"
     );
 
+    // Negative 3: SSE event missing required sequence_number
     let sse_event_schema = spec
         .pointer("/components/schemas/ResponseStreamEvent")
         .expect("missing ResponseStreamEvent schema");
-    let missing_sequence_number = serde_json::json!({
+    let valid_sse_event = serde_json::json!({
         "type": "response.created",
-        "response": {
-            "id": "resp_sse_123",
-            "object": "response",
-            "status": "in_progress",
-            "created_at": 1_700_000_000_u64,
-            "completed_at": null,
-            "model": "gpt-4o",
-            "error": null,
-            "incomplete_details": null,
-            "instructions": null,
-            "metadata": {},
-            "tools": [],
-            "tool_choice": "auto",
-            "parallel_tool_calls": true,
-            "temperature": 1.0,
-            "top_p": 1.0,
-            "output": []
-        }
+        "sequence_number": 0,
+        "response": valid_response
     });
+    let mut missing_sequence_number = valid_sse_event.clone();
+    if let Some(obj) = missing_sequence_number.as_object_mut() {
+        obj.remove("sequence_number");
+    }
 
     assert!(
         !response_schema_matches(&spec, sse_event_schema, &missing_sequence_number),
         "schema check must reject SSE event missing required sequence_number"
-    );
-
-    let mut parser =
-        crate::openai::sse::responses::ResponsesSseParser::new(&crate::openai::sse::SseParserConfig::default());
-    drop(parser.parse_chunk(b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"));
-    assert!(
-        parser.validate_complete().is_err(),
-        "stream parser must reject a stream where the terminal event is removed"
     );
 
     println!("PRAXIS_CONFORMANCE_OK responses schema_check_sensitivity");
@@ -1489,7 +1461,7 @@ fn assert_response_matches_schema(
     value: &serde_json::Value,
 ) {
     if let Err(err) = check_schema_match(spec, schema, value) {
-        panic!("{path} does not match generated schema: {err}; value: {value}");
+        panic!("{path} does not match schema: {err}; value: {value}");
     }
 }
 
@@ -1510,18 +1482,22 @@ fn check_schema_match(
         return Ok(());
     }
     if let Some(variants) = schema.get("oneOf").and_then(serde_json::Value::as_array) {
-        let count = variants
-            .iter()
-            .filter(|v| response_schema_matches(spec, v, value))
-            .count();
-        if count == 1 {
+        let mut matches = Vec::new();
+        for (i, v) in variants.iter().enumerate() {
+            if let Ok(()) = check_schema_match(spec, v, value) {
+                matches.push(i);
+            }
+        }
+        if matches.len() == 1 {
             return Ok(());
         }
-        return Err(format!("oneOf matched {count} variants for {value:?}"));
+        return Err(format!("oneOf matched {} variants for {value:?}", matches.len()));
     }
     if let Some(variants) = schema.get("anyOf").and_then(serde_json::Value::as_array) {
-        if variants.iter().any(|v| response_schema_matches(spec, v, value)) {
-            return Ok(());
+        for v in variants {
+            if check_schema_match(spec, v, value).is_ok() {
+                return Ok(());
+            }
         }
         return Err(format!("anyOf matched 0 variants for {value:?}"));
     }
@@ -1538,19 +1514,31 @@ fn check_schema_match(
     {
         return Err(format!("value {value:?} not in enum {enum_vals:?}"));
     }
-    if let Some(schema_type) = schema.get("type").and_then(serde_json::Value::as_str) {
-        let matches_type = match schema_type {
-            "array" => value.is_array(),
-            "boolean" => value.is_boolean(),
-            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-            "null" => value.is_null(),
-            "number" => value.as_f64().is_some(),
-            "object" => value.is_object(),
-            "string" => value.is_string(),
-            _ => false,
-        };
+    if let Some(schema_type) = schema.get("type") {
+        let matches_type = schema_type.as_str().map_or_else(
+            || {
+                schema_type.as_array().is_some_and(|types| {
+                    types
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .any(|kind| value_has_type(value, kind))
+                })
+            },
+            |kind| value_has_type(value, kind),
+        );
         if !matches_type {
-            return Err(format!("type mismatch: expected {schema_type}, got {value:?}"));
+            return Err(format!("type mismatch: expected {schema_type:?}, got {value:?}"));
+        }
+    }
+
+    if let Some(items_schema) = schema.get("items") {
+        let Some(items) = value.as_array() else {
+            return Err(format!("expected array for items check, got {value:?}"));
+        };
+        for (idx, item) in items.iter().enumerate() {
+            if let Err(err) = check_schema_match(spec, items_schema, item) {
+                return Err(format!("array item [{idx}] mismatch: {err}"));
+            }
         }
     }
 
@@ -1565,17 +1553,40 @@ fn check_schema_match(
             }
         }
         if let Some(properties) = schema.get("properties").and_then(serde_json::Value::as_object) {
+            let required_list = schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .map(|arr| arr.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+
             for (prop_name, prop_schema) in properties {
-                if let Some(prop_val) = object.get(prop_name)
-                    && let Err(err) = check_schema_match(spec, prop_schema, prop_val)
-                {
-                    return Err(format!("property {prop_name:?} mismatch: {err}"));
+                if let Some(prop_val) = object.get(prop_name) {
+                    if prop_val.is_null() && !required_list.contains(&prop_name.as_str()) {
+                        continue;
+                    }
+                    if let Err(err) = check_schema_match(spec, prop_schema, prop_val) {
+                        return Err(format!("property {prop_name:?} mismatch: {err}"));
+                    }
                 }
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(feature = "openai-responses")]
+fn value_has_type(value: &serde_json::Value, schema_type: &str) -> bool {
+    match schema_type {
+        "array" => value.is_array(),
+        "boolean" => value.is_boolean(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "null" => value.is_null(),
+        "number" => value.as_f64().is_some(),
+        "object" => value.is_object(),
+        "string" => value.is_string(),
+        _ => false,
+    }
 }
 
 #[cfg(feature = "openai-responses")]

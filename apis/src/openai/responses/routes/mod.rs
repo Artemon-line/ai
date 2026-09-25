@@ -14,9 +14,9 @@
 
 use std::ops::Deref;
 
-#[cfg(feature = "openai-responses")]
+#[cfg(feature = "openai-responses-openapi")]
 use super::contracts::{CreateResponseRequest, ResponseResource};
-#[cfg(feature = "openai-responses")]
+#[cfg(feature = "openai-responses-openapi")]
 use crate::openai::operation::{MediaTypeSpec, OwnedOperationContract, RequestBodySpec, ResponseSpec, schema_binding};
 use crate::{
     openai::operation::OpenAiOperationSpec,
@@ -27,7 +27,7 @@ use crate::{
 };
 
 /// JSON media type used by all Responses bodies.
-#[cfg(feature = "openai-responses")]
+#[cfg(feature = "openai-responses-openapi")]
 const JSON_CONTENT_TYPE: &str = "application/json";
 
 /// Application protocol these operations belong to.
@@ -60,7 +60,7 @@ impl OperationEntry for ResponsesOperationSpec {
 }
 
 /// Convert a registry request declaration into an optional schema binding.
-#[cfg(feature = "openai-responses")]
+#[cfg(feature = "openai-responses-openapi")]
 #[expect(
     unused_macro_rules,
     reason = "all-shapes helper macro preserved for registry consistency"
@@ -84,7 +84,7 @@ macro_rules! request_binding {
 }
 
 /// Convert a registry contract declaration into optional owned metadata.
-#[cfg(feature = "openai-responses")]
+#[cfg(any(feature = "openai-conversations", feature = "openai-responses-openapi"))]
 macro_rules! operation_contract {
     (none {}) => {
         None
@@ -95,17 +95,24 @@ macro_rules! operation_contract {
             request: $request:tt,
             response: $response:ty $(,)?
         }
-    ) => {
-        Some(OwnedOperationContract {
-            parameters: &[$($parameter),*],
-            request: request_binding!($request),
-            responses: &[ResponseSpec {
-                status: "200",
-                description: "OK",
-                content: &[MediaTypeSpec::new(JSON_CONTENT_TYPE, schema_binding!($response))],
-            }],
-        })
-    };
+    ) => {{
+        #[cfg(feature = "openai-responses-openapi")]
+        {
+            Some(OwnedOperationContract {
+                parameters: &[$($parameter),*],
+                request: request_binding!($request),
+                responses: &[ResponseSpec {
+                    status: "200",
+                    description: "OK",
+                    content: &[MediaTypeSpec::new(JSON_CONTENT_TYPE, schema_binding!($response))],
+                }],
+            })
+        }
+        #[cfg(not(feature = "openai-responses-openapi"))]
+        {
+            None
+        }
+    }};
 }
 
 /// Convert a registry body declaration into a runtime request-body shape.
@@ -161,7 +168,7 @@ macro_rules! responses_operations {
                             request_body: request_body_shape!($body),
                         },
                         spec_path: $path,
-                        #[cfg(any(feature = "openai-conversations", feature = "openai-responses"))]
+                        #[cfg(any(feature = "openai-conversations", feature = "openai-responses-openapi"))]
                         owned_contract: operation_contract!($contract_kind $contract),
                     },
                 },
@@ -429,7 +436,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "openai-conversations", feature = "openai-responses"))]
+    #[cfg(any(feature = "openai-conversations", feature = "openai-responses-openapi"))]
     #[test]
     fn transformed_operations_declare_owned_contracts() {
         assert!(

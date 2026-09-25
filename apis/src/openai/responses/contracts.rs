@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Runtime JSON contracts for Praxis-transformed Responses operations.
+//! `OpenAPI` contract schema types for Praxis-transformed Responses operations.
 
 #![expect(
     clippy::allow_attributes,
@@ -80,20 +80,56 @@ pub(super) struct ResponseResource {
     /// Error details when status is `failed`.
     pub(super) error: Option<Value>,
 
-    /// Metadata map.
-    pub(super) metadata: Option<Value>,
+    /// Incomplete details when status is `incomplete`.
+    pub(super) incomplete_details: Option<Value>,
+
+    /// Instructions provided or inherited.
+    pub(super) instructions: Option<Value>,
+
+    /// Maximum output tokens allowed.
+    pub(super) max_output_tokens: Option<u64>,
 
     /// Original response input items.
     pub(super) input: Option<Value>,
 
-    /// System instructions.
-    pub(super) instructions: Option<Value>,
+    /// Parallel tool calls enabled flag.
+    pub(super) parallel_tool_calls: Option<bool>,
+
+    /// Previous response ID in continuation chain.
+    pub(super) previous_response_id: Option<Value>,
+
+    /// Reasoning configuration or null.
+    pub(super) reasoning: Option<Value>,
+
+    /// Whether response is stored in response store.
+    pub(super) store: Option<bool>,
+
+    /// Sampling temperature.
+    pub(super) temperature: Option<f64>,
+
+    /// Text response format configuration.
+    pub(super) text: Option<Value>,
+
+    /// Tool selection policy.
+    pub(super) tool_choice: Option<Value>,
 
     /// Tools available for execution.
     pub(super) tools: Option<Value>,
 
-    /// Tool selection policy.
-    pub(super) tool_choice: Option<Value>,
+    /// Nucleus sampling `top_p`.
+    pub(super) top_p: Option<f64>,
+
+    /// Truncation strategy.
+    pub(super) truncation: Option<String>,
+
+    /// Metadata map.
+    pub(super) metadata: Option<Value>,
+
+    /// Whether the response executes in background mode.
+    pub(super) background: Option<bool>,
+
+    /// Service tier used for request.
+    pub(super) service_tier: Option<Value>,
 }
 
 #[cfg(test)]
@@ -101,36 +137,63 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "straight-line struct instantiation test")]
     fn contract_types_can_be_instantiated() {
         let req = CreateResponseRequest {
             model: Some("gpt-4o".to_owned()),
-            input: None,
-            instructions: None,
-            tools: None,
-            tool_choice: None,
-            temperature: None,
-            top_p: None,
-            stream: None,
-            store: None,
+            input: Some(serde_json::json!("Hello")),
+            instructions: Some("You are a helpful assistant.".to_owned()),
+            tools: Some(vec![]),
+            tool_choice: Some(serde_json::json!("auto")),
+            temperature: Some(1.0),
+            top_p: Some(1.0),
+            stream: Some(false),
+            store: Some(false),
         };
         assert_eq!(req.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(req.instructions.as_deref(), Some("You are a helpful assistant."));
+        assert_eq!(req.temperature, Some(1.0));
+        assert_eq!(req.top_p, Some(1.0));
+        assert_eq!(req.stream, Some(false));
+        assert_eq!(req.store, Some(false));
 
         let res = ResponseResource {
             id: "resp_1".to_owned(),
             object: "response".to_owned(),
             status: "completed".to_owned(),
-            created_at: 0,
-            completed_at: None,
+            created_at: 1_700_000_000,
+            completed_at: Some(1_700_000_005),
             model: "gpt-4o".to_owned(),
             output: Vec::new(),
-            usage: None,
+            usage: Some(serde_json::json!({"total_tokens": 10})),
             error: None,
-            metadata: None,
-            input: None,
+            incomplete_details: None,
             instructions: None,
-            tools: None,
-            tool_choice: None,
+            max_output_tokens: None,
+            input: None,
+            parallel_tool_calls: Some(true),
+            previous_response_id: None,
+            reasoning: None,
+            store: Some(false),
+            temperature: Some(1.0),
+            text: None,
+            tool_choice: Some(serde_json::json!("auto")),
+            tools: Some(serde_json::json!([])),
+            top_p: Some(1.0),
+            truncation: Some("disabled".to_owned()),
+            metadata: Some(serde_json::json!({})),
+            background: Some(false),
+            service_tier: Some(serde_json::json!("default")),
         };
         assert_eq!(res.id, "resp_1");
+        assert_eq!(res.object, "response");
+        assert_eq!(res.status, "completed");
+        assert_eq!(res.created_at, 1_700_000_000);
+        assert_eq!(res.completed_at, Some(1_700_000_005));
+        assert_eq!(res.model, "gpt-4o");
+        assert_eq!(res.parallel_tool_calls, Some(true));
+        assert_eq!(res.temperature, Some(1.0));
+        assert_eq!(res.top_p, Some(1.0));
+        assert_eq!(res.background, Some(false));
     }
 }

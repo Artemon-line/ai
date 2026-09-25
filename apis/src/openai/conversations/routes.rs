@@ -92,7 +92,7 @@ macro_rules! request_binding {
 }
 
 /// Convert a registry contract declaration into optional owned metadata.
-#[cfg(any(feature = "openai-conversations", feature = "openai-responses"))]
+#[cfg(any(feature = "openai-conversations", feature = "openai-responses-openapi"))]
 #[expect(
     unused_macro_rules,
     reason = "non-owning form is part of the registry API but current Conversations operations are all local"
@@ -285,7 +285,7 @@ macro_rules! conversation_operations {
                             request_body: contract_request_body!($contract_kind $contract),
                         },
                         spec_path: $path,
-                        #[cfg(any(feature = "openai-conversations", feature = "openai-responses"))]
+                        #[cfg(any(feature = "openai-conversations", feature = "openai-responses-openapi"))]
                         owned_contract: operation_contract!($contract_kind $contract),
                     },
                 },

@@ -65,72 +65,14 @@ const RESPONSES_RUNTIME_CHECKS: &[RuntimeVerificationCheck] = &[
 ];
 
 /// Evidence-backed discrepancies for Responses operations.
-const RESPONSES_CONTRACT_EXCEPTIONS: &[ContractException] = &[
-    ContractException {
-        kind: super::model::ContractDriftKind::Request,
-        method: Some("POST"),
-        path: Some("/responses"),
-        detail: "requestBody.content.application/json.schema.allOf.deleted",
-        rationale: "Praxis defines CreateResponseRequest directly rather than inheriting allOf branches",
-        evidence: "praxis-ai-apis/openai/responses/contracts.rs: CreateResponseRequest schema",
-    },
-    ContractException {
-        kind: super::model::ContractDriftKind::Request,
-        method: Some("POST"),
-        path: Some("/responses"),
-        detail: "requestBody.content.application/json.schema.properties.added",
-        rationale: "Praxis defines CreateResponseRequest properties directly rather than inheriting allOf branches",
-        evidence: "praxis-ai-apis/openai/responses/contracts.rs: CreateResponseRequest properties",
-    },
-    ContractException {
-        kind: super::model::ContractDriftKind::Request,
-        method: Some("POST"),
-        path: Some("/responses"),
-        detail: "requestBody.content.application/json.schema.type.added",
-        rationale: "Praxis explicitly marks CreateResponseRequest as object type",
-        evidence: "praxis-ai-apis/openai/responses/contracts.rs: CreateResponseRequest type",
-    },
-    ContractException {
-        kind: super::model::ContractDriftKind::Response,
-        method: Some("POST"),
-        path: Some("/responses"),
-        detail: "responses.200.content.application/json.schema.allOf.deleted",
-        rationale: "Praxis defines ResponseResource directly rather than inheriting allOf branches",
-        evidence: "praxis-ai-apis/openai/responses/contracts.rs: ResponseResource schema",
-    },
-    ContractException {
-        kind: super::model::ContractDriftKind::Response,
-        method: Some("POST"),
-        path: Some("/responses"),
-        detail: "responses.200.content.application/json.schema.properties.added",
-        rationale: "Praxis defines ResponseResource properties directly rather than inheriting allOf branches",
-        evidence: "praxis-ai-apis/openai/responses/contracts.rs: ResponseResource properties",
-    },
-    ContractException {
-        kind: super::model::ContractDriftKind::Response,
-        method: Some("POST"),
-        path: Some("/responses"),
-        detail: "responses.200.content.application/json.schema.required.added",
-        rationale: "Praxis explicitly marks required properties on ResponseResource",
-        evidence: "praxis-ai-apis/openai/responses/contracts.rs: ResponseResource required fields",
-    },
-    ContractException {
-        kind: super::model::ContractDriftKind::Response,
-        method: Some("POST"),
-        path: Some("/responses"),
-        detail: "responses.200.content.application/json.schema.type.added",
-        rationale: "Praxis explicitly marks ResponseResource as object type",
-        evidence: "praxis-ai-apis/openai/responses/contracts.rs: ResponseResource type",
-    },
-    ContractException {
-        kind: super::model::ContractDriftKind::Response,
-        method: Some("POST"),
-        path: Some("/responses"),
-        detail: "responses.200.content.deleted",
-        rationale: "Praxis registers application/json for transformed responses and omits text/event-stream from the OpenAPI 200 response schema",
-        evidence: "praxis-ai-apis/openai/responses/routes/mod.rs: CreateResponse response spec",
-    },
-];
+const RESPONSES_CONTRACT_EXCEPTIONS: &[ContractException] = &[ContractException {
+    kind: super::model::ContractDriftKind::Response,
+    method: Some("POST"),
+    path: Some("/responses"),
+    detail: "responses.200.content.deleted",
+    rationale: "Praxis registers application/json for transformed responses and omits text/event-stream from the OpenAPI 200 response schema",
+    evidence: "praxis-ai-apis/openai/responses/routes/mod.rs: CreateResponse response spec",
+}];
 
 /// Evidence-backed discrepancies where the pinned upstream schema is incomplete
 /// and the implementation follows the verified live OpenAI behavior instead.
