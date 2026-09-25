@@ -641,98 +641,44 @@
         "implementation_source": "generated:praxis-ai-apis/openai/responses",
         "operation_contracts": {
           "total": 1,
-          "exact": 1,
+          "exact": 0,
           "missing": 0,
-          "drifted": 0,
-          "request_drifted": 0,
-          "response_drifted": 0,
+          "drifted": 1,
+          "request_drifted": 1,
+          "response_drifted": 1,
           "other_drifted": 0,
-          "exact_percent": 100.0,
+          "exact_percent": 0.0,
           "missing_operations": [],
-          "drifted_operations": []
+          "drifted_operations": [
+            {
+              "operation": {
+                "method": "POST",
+                "path": "/responses",
+                "operation": "POST /responses"
+              },
+              "has_request_drift": true,
+              "has_response_drift": true,
+              "has_other_drift": false,
+              "request_details": [
+                "requestBody.content.application/json.schema.allOf.deleted",
+                "requestBody.content.application/json.schema.type.added",
+                "requestBody.content.application/json.schema.properties.added"
+              ],
+              "response_details": [
+                "responses.200.content.application/json.schema.allOf.deleted",
+                "responses.200.content.application/json.schema.type.added",
+                "responses.200.content.application/json.schema.required.added",
+                "responses.200.content.application/json.schema.properties.added"
+              ],
+              "other_details": []
+            }
+          ]
         },
         "inherited_contract": {
           "exact": true,
           "details": []
         },
         "upstream_spec_exceptions": [
-          {
-            "kind": "request",
-            "operation": {
-              "method": "POST",
-              "path": "/responses",
-              "operation": "POST /responses"
-            },
-            "detail": "requestBody.content.application/json.schema.allOf.deleted",
-            "rationale": "Praxis defines CreateResponseRequest directly rather than inheriting allOf branches",
-            "evidence": "praxis-ai-apis/openai/responses/contracts.rs: CreateResponseRequest schema"
-          },
-          {
-            "kind": "request",
-            "operation": {
-              "method": "POST",
-              "path": "/responses",
-              "operation": "POST /responses"
-            },
-            "detail": "requestBody.content.application/json.schema.properties.added",
-            "rationale": "Praxis defines CreateResponseRequest properties directly rather than inheriting allOf branches",
-            "evidence": "praxis-ai-apis/openai/responses/contracts.rs: CreateResponseRequest properties"
-          },
-          {
-            "kind": "request",
-            "operation": {
-              "method": "POST",
-              "path": "/responses",
-              "operation": "POST /responses"
-            },
-            "detail": "requestBody.content.application/json.schema.type.added",
-            "rationale": "Praxis explicitly marks CreateResponseRequest as object type",
-            "evidence": "praxis-ai-apis/openai/responses/contracts.rs: CreateResponseRequest type"
-          },
-          {
-            "kind": "response",
-            "operation": {
-              "method": "POST",
-              "path": "/responses",
-              "operation": "POST /responses"
-            },
-            "detail": "responses.200.content.application/json.schema.allOf.deleted",
-            "rationale": "Praxis defines ResponseResource directly rather than inheriting allOf branches",
-            "evidence": "praxis-ai-apis/openai/responses/contracts.rs: ResponseResource schema"
-          },
-          {
-            "kind": "response",
-            "operation": {
-              "method": "POST",
-              "path": "/responses",
-              "operation": "POST /responses"
-            },
-            "detail": "responses.200.content.application/json.schema.properties.added",
-            "rationale": "Praxis defines ResponseResource properties directly rather than inheriting allOf branches",
-            "evidence": "praxis-ai-apis/openai/responses/contracts.rs: ResponseResource properties"
-          },
-          {
-            "kind": "response",
-            "operation": {
-              "method": "POST",
-              "path": "/responses",
-              "operation": "POST /responses"
-            },
-            "detail": "responses.200.content.application/json.schema.required.added",
-            "rationale": "Praxis explicitly marks required properties on ResponseResource",
-            "evidence": "praxis-ai-apis/openai/responses/contracts.rs: ResponseResource required fields"
-          },
-          {
-            "kind": "response",
-            "operation": {
-              "method": "POST",
-              "path": "/responses",
-              "operation": "POST /responses"
-            },
-            "detail": "responses.200.content.application/json.schema.type.added",
-            "rationale": "Praxis explicitly marks ResponseResource as object type",
-            "evidence": "praxis-ai-apis/openai/responses/contracts.rs: ResponseResource type"
-          },
           {
             "kind": "response",
             "operation": {
@@ -745,18 +691,18 @@
             "evidence": "praxis-ai-apis/openai/responses/routes/mod.rs: CreateResponse response spec"
           }
         ],
-        "all_exact": true
+        "all_exact": false
       }
     ],
     "operation_contracts": {
       "total": 9,
-      "exact": 9,
+      "exact": 8,
       "missing": 0,
-      "drifted": 0,
-      "request_drifted": 0,
-      "response_drifted": 0,
+      "drifted": 1,
+      "request_drifted": 1,
+      "response_drifted": 1,
       "other_drifted": 0,
-      "exact_percent": 100.0,
+      "exact_percent": 88.88888888888889,
       "by_area": [
         {
           "area": "Conversations",
@@ -772,13 +718,13 @@
         {
           "area": "Responses",
           "total": 1,
-          "conformant": 1,
+          "conformant": 0,
           "missing": 0,
-          "drifted": 0,
-          "request_drifted": 0,
-          "response_drifted": 0,
+          "drifted": 1,
+          "request_drifted": 1,
+          "response_drifted": 1,
           "other_drifted": 0,
-          "conformance_percent": 100.0
+          "conformance_percent": 0.0
         }
       ]
     },
@@ -794,17 +740,48 @@
         "details": []
       }
     ],
-    "all_exact": true,
+    "all_exact": false,
     "fixes_required": {
       "summary": {
-        "operations_to_fix": 0,
+        "operations_to_fix": 1,
         "area_contracts_to_fix": 0,
         "missing_operations": 0,
-        "request_drift_operations": 0,
-        "response_drift_operations": 0,
+        "request_drift_operations": 1,
+        "response_drift_operations": 1,
         "other_drift_operations": 0
       },
-      "by_operation": [],
+      "by_operation": [
+        {
+          "operation": {
+            "method": "POST",
+            "path": "/responses",
+            "operation": "POST /responses"
+          },
+          "fixes": [
+            {
+              "area": "request",
+              "kind": "request_body_schema",
+              "summary": "Align the request body schema with the OpenAI spec.",
+              "detail_paths": [
+                "requestBody.content.application/json.schema.allOf.deleted",
+                "requestBody.content.application/json.schema.type.added",
+                "requestBody.content.application/json.schema.properties.added"
+              ]
+            },
+            {
+              "area": "response",
+              "kind": "response_schema",
+              "summary": "Align the response body schema with the OpenAI spec.",
+              "detail_paths": [
+                "responses.200.content.application/json.schema.allOf.deleted",
+                "responses.200.content.application/json.schema.type.added",
+                "responses.200.content.application/json.schema.required.added",
+                "responses.200.content.application/json.schema.properties.added"
+              ]
+            }
+          ]
+        }
+      ],
       "by_area": []
     }
   },
