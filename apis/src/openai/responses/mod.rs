@@ -267,7 +267,7 @@ impl ResponsesFormatFilter {
     /// [`FilterError`]: praxis_filter::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: ResponsesFormatConfig = parse_filter_config("openai_responses_format", config)?;
-        let validated = build_config(cfg)?;
+        let validated = build_config("openai_responses_format", cfg)?;
         Ok(Box::new(Self { config: validated }))
     }
 }
@@ -755,6 +755,8 @@ pub(crate) fn user_message_item(text: &str) -> serde_json::Value {
 #[cfg(feature = "store")]
 pub(crate) mod rehydrate;
 #[cfg(feature = "openai-responses")]
+pub(crate) mod request;
+#[cfg(feature = "openai-responses")]
 pub(crate) mod validate;
 #[cfg(feature = "openai-responses")]
 pub(crate) mod web_search;
@@ -769,6 +771,8 @@ pub use compact::CompactFilter;
 pub use openapi::implementation_openapi_json;
 #[cfg(feature = "store")]
 pub use rehydrate::RehydrateFilter;
+#[cfg(feature = "openai-responses")]
+pub use request::OpenaiResponsesRequestFilter;
 #[cfg(feature = "openai-responses")]
 pub use validate::OpenaiResponsesValidateFilter;
 #[cfg(feature = "openai-responses")]
