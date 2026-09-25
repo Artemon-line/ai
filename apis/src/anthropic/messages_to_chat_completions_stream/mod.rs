@@ -348,19 +348,9 @@ fn process_sse_chunk(
     max_partial_event_bytes: usize,
     max_tool_blocks: usize,
 ) -> Result<Bytes, FilterError> {
-    let leftover = ctx.filter_metadata.get(LINE_BUFFER_KEY).cloned().unwrap_or_default();
-    let combined = format!("{leftover}{chunk_str}");
-
-    let defer_trailing_cr = !end_of_stream && combined.ends_with('\r') && !combined.ends_with("\r\r");
-    let (to_normalize, pending_cr) = if defer_trailing_cr {
-        match combined.strip_suffix('\r') {
-            Some(without) => (without, true),
-            None => (combined.as_str(), false),
-        }
-    } else {
-        (combined.as_str(), false)
-    };
-
+    let leftover = ctx.filter_metadata.get(LINE_BUFFER_KEY).map(String::as_str);
+    let combined = combine_chunk_with_leftover(leftover, chunk_str);
+    let (to_normalize, pending_cr) = split_deferred_trailing_cr(combined.as_ref(), end_of_stream);
     let normalized = normalize_line_endings(to_normalize);
     let mut output = Vec::new();
     let remaining = process_complete_event_blocks(ctx, &normalized, &mut output, max_tool_blocks)?;
@@ -395,6 +385,32 @@ fn process_complete_event_blocks<'a>(
         }
     }
     Ok(remaining)
+}
+
+/// Prefix the current chunk with any buffered incomplete SSE text.
+///
+/// Returns borrowed `chunk_str` when there is no leftover prefix.
+fn combine_chunk_with_leftover<'a>(leftover: Option<&str>, chunk_str: &'a str) -> Cow<'a, str> {
+    match leftover {
+        Some(prefix) if !prefix.is_empty() => {
+            let mut combined = String::with_capacity(prefix.len() + chunk_str.len());
+            combined.push_str(prefix);
+            combined.push_str(chunk_str);
+            Cow::Owned(combined)
+        },
+        _ => Cow::Borrowed(chunk_str),
+    }
+}
+
+/// Hold back a single trailing CR that may be the first half of a CRLF pair.
+fn split_deferred_trailing_cr(combined: &str, end_of_stream: bool) -> (&str, bool) {
+    let defer = !end_of_stream && combined.ends_with('\r') && !combined.ends_with("\r\r");
+    if !defer {
+        return (combined, false);
+    }
+    combined
+        .strip_suffix('\r')
+        .map_or((combined, false), |without| (without, true))
 }
 
 /// Store bounded incomplete SSE event data between response chunks.
@@ -1093,9 +1109,22 @@ fn open_tool_blocks(ctx: &HttpFilterContext<'_>) -> Vec<(u32, String)> {
 }
 
 /// Write a single SSE event to the output buffer.
+///
+/// Capacity is not reserved per event: a guessed JSON size would force a
+/// realloc on later events in the same chunk once spare capacity drops
+/// below that guess.
+///
+/// If JSON serialization fails after a partial write, the payload is
+/// truncated so `data:` is empty, matching `to_string().unwrap_or_default()`.
 fn emit_event(output: &mut Vec<u8>, event_type: &str, data: &Value) {
-    let data_str = serde_json::to_string(data).unwrap_or_default();
-    output.extend_from_slice(format!("event: {event_type}\ndata: {data_str}\n\n").as_bytes());
+    output.extend_from_slice(b"event: ");
+    output.extend_from_slice(event_type.as_bytes());
+    output.extend_from_slice(b"\ndata: ");
+    let json_start = output.len();
+    if serde_json::to_writer(&mut *output, data).is_err() {
+        output.truncate(json_start);
+    }
+    output.extend_from_slice(b"\n\n");
 }
 
 /// Emit a client-safe terminal error when an upstream tool call cannot be
@@ -1108,8 +1137,14 @@ fn emit_upstream_transform_error(output: &mut Vec<u8>) {
 }
 
 /// Normalize SSE line endings: `\r\n` → `\n`, standalone `\r` → `\n`.
-fn normalize_line_endings(s: &str) -> String {
-    s.replace("\r\n", "\n").replace('\r', "\n")
+///
+/// LF-only input is returned borrowed.
+fn normalize_line_endings(s: &str) -> Cow<'_, str> {
+    if s.contains('\r') {
+        Cow::Owned(s.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(s)
+    }
 }
 
 /// Hex-encode a byte slice (for buffering incomplete UTF-8 sequences).
@@ -1145,6 +1180,8 @@ fn hex_nibble(b: u8) -> Option<u8> {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
 
     #[test]
@@ -2232,6 +2269,178 @@ mod tests {
         assert!(
             !ctx.filter_metadata.contains_key(LINE_BUFFER_KEY),
             "oversized incomplete SSE event should not remain buffered"
+        );
+    }
+
+    #[test]
+    fn normalize_line_endings_rewrites_crlf_and_standalone_cr() {
+        assert_eq!(
+            normalize_line_endings("a\r\nb\rc\n").as_ref(),
+            "a\nb\nc\n",
+            "CRLF and standalone CR must become LF"
+        );
+        assert!(
+            matches!(normalize_line_endings("a\r\nb"), Cow::Owned(_)),
+            "input containing CR must allocate a normalized String"
+        );
+    }
+
+    #[test]
+    fn combine_chunk_with_leftover_prefixes_current_chunk() {
+        let combined = combine_chunk_with_leftover(Some("data: {"), "\"a\":1}\n\n");
+        assert_eq!(
+            combined.as_ref(),
+            "data: {\"a\":1}\n\n",
+            "leftover prefix must be prepended to the current chunk"
+        );
+        assert!(
+            matches!(combined, Cow::Owned(_)),
+            "non-empty leftover must own the combined buffer"
+        );
+    }
+
+    #[test]
+    fn emit_event_matches_legacy_to_string_format_bytes() {
+        let data = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hello"}
+        });
+        let mut output = Vec::new();
+        emit_event(&mut output, "content_block_delta", &data);
+        let data_str = serde_json::to_string(&data).unwrap_or_default();
+        let expected = format!("event: content_block_delta\ndata: {data_str}\n\n");
+        assert_eq!(
+            output,
+            expected.as_bytes(),
+            "direct Vec writes must match to_string+format! SSE bytes"
+        );
+    }
+
+    #[test]
+    fn normalize_line_endings_lf_path_borrows_input() {
+        let input = "data: {\"id\":\"c1\"}\n\n";
+        let normalized = normalize_line_endings(input);
+        assert!(matches!(normalized, Cow::Borrowed(_)), "LF-only input must be borrowed");
+        assert!(
+            std::ptr::eq(normalized.as_ptr(), input.as_ptr()),
+            "borrowed LF-only input must retain the caller's buffer"
+        );
+    }
+
+    #[test]
+    fn combine_without_leftover_borrows_chunk() {
+        let chunk = "data: {\"a\":1}\n\n";
+        let combined = combine_chunk_with_leftover(None, chunk);
+        assert!(
+            matches!(combined, Cow::Borrowed(_)),
+            "absent leftover must borrow the current chunk"
+        );
+        assert!(
+            std::ptr::eq(combined.as_ptr(), chunk.as_ptr()),
+            "absent leftover must not copy the current chunk"
+        );
+    }
+
+    // =====================================================================
+    // Allocation evidence (allocation-counter)
+    // =====================================================================
+
+    /// Pre-optimisation `emit_event` baseline.
+    fn emit_event_legacy(output: &mut Vec<u8>, event_type: &str, data: &Value) {
+        let data_str = serde_json::to_string(data).unwrap_or_default();
+        output.extend_from_slice(format!("event: {event_type}\ndata: {data_str}\n\n").as_bytes());
+    }
+
+    /// Pre-optimisation `normalize_line_endings` baseline.
+    fn normalize_line_endings_legacy(s: &str) -> String {
+        s.replace("\r\n", "\n").replace('\r', "\n")
+    }
+
+    /// Pre-optimisation `combine_chunk_with_leftover` baseline.
+    fn combine_chunk_with_leftover_legacy(leftover: Option<&str>, chunk_str: &str) -> String {
+        match leftover {
+            Some(prefix) if !prefix.is_empty() => format!("{prefix}{chunk_str}"),
+            _ => chunk_str.to_owned(),
+        }
+    }
+
+    fn assert_emit_allocates_less(event_type: &str, payload: &Value) {
+        let capacity = serde_json::to_vec(payload).unwrap().len() + 64;
+        let mut via_writer = Vec::with_capacity(capacity);
+        let mut via_string = Vec::with_capacity(capacity);
+        let writer = allocation_counter::measure(|| {
+            emit_event(&mut via_writer, event_type, payload);
+        });
+        let string = allocation_counter::measure(|| {
+            emit_event_legacy(&mut via_string, event_type, payload);
+        });
+        assert_eq!(
+            via_writer, via_string,
+            "{event_type} SSE bytes must stay equivalent while measuring allocations"
+        );
+        assert!(
+            writer.bytes_total < string.bytes_total,
+            "{event_type} to_writer must allocate fewer bytes than to_string: writer={} string={}",
+            writer.bytes_total,
+            string.bytes_total
+        );
+    }
+
+    #[test]
+    fn emit_event_allocates_less_than_legacy_to_string_format() {
+        let small = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hello"}
+        });
+        assert_emit_allocates_less("content_block_delta", &small);
+
+        let large = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "x".repeat(4096)}
+        });
+        assert_emit_allocates_less("content_block_delta", &large);
+    }
+
+    #[test]
+    fn normalize_line_endings_lf_only_allocates_zero() {
+        let input = "event: content_block_delta\ndata: {\"index\":0}\n\n";
+        let optimized = allocation_counter::measure(|| {
+            std::hint::black_box(normalize_line_endings(input));
+        });
+        let legacy = allocation_counter::measure(|| {
+            std::hint::black_box(normalize_line_endings_legacy(input));
+        });
+        assert_eq!(
+            optimized.count_total, 0,
+            "LF-only normalize must not allocate at all, got {} allocations",
+            optimized.count_total
+        );
+        assert!(
+            legacy.count_total > 0,
+            "legacy normalize should allocate even for LF-only input"
+        );
+    }
+
+    #[test]
+    fn combine_chunk_without_leftover_allocates_zero() {
+        let chunk = "event: message_start\ndata: {\"type\":\"message\"}\n\n";
+        let optimized = allocation_counter::measure(|| {
+            std::hint::black_box(combine_chunk_with_leftover(None, chunk));
+        });
+        let legacy = allocation_counter::measure(|| {
+            std::hint::black_box(combine_chunk_with_leftover_legacy(None, chunk));
+        });
+        assert_eq!(
+            optimized.count_total, 0,
+            "combine without leftover must not allocate, got {} allocations",
+            optimized.count_total
+        );
+        assert!(
+            legacy.count_total > 0,
+            "legacy combine should allocate via to_owned even without leftover"
         );
     }
 
