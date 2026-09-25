@@ -344,6 +344,10 @@ fn register_openai_responses_filters(registry: &mut FilterRegistry, subrequest_c
     register_file_resolve(registry, subrequest_client);
     praxis_filter::register_filters!(
         @register registry,
+        http "openai_responses_request" => praxis_ai_apis::openai::OpenaiResponsesRequestFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
         http "openai_responses_validate" => praxis_ai_apis::openai::OpenaiResponsesValidateFilter::from_config
     );
     #[cfg(feature = "store")]
@@ -654,6 +658,19 @@ mod tests {
         ];
         for name in expected {
             assert!(names.contains(&name), "expected {name} in registry");
+        }
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn build_ai_registry_includes_responses_request_when_enabled() {
+        let registry = build_ai_registry();
+        let names = registry.available_filters();
+        for name in ["openai_responses_request", "openai_responses_validate"] {
+            assert!(
+                names.contains(&name),
+                "expected {name} in registry when openai-responses is enabled"
+            );
         }
     }
 
