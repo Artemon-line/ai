@@ -1673,7 +1673,7 @@ mod tests {
                 ]
             );
         }
-        for feature in &manifest.features[17..29] {
+        for feature in &manifest.features[17..28] {
             assert_eq!(
                 feature
                     .providers
@@ -1683,7 +1683,7 @@ mod tests {
                 vec![("synthetic", CoverageStatus::SyntheticOnly)]
             );
         }
-        for feature in &manifest.features[29..31] {
+        for feature in &manifest.features[28..30] {
             assert_eq!(
                 feature
                     .providers
@@ -1693,7 +1693,7 @@ mod tests {
                 vec![("vllm", CoverageStatus::LiveCovered)]
             );
         }
-        for feature in &manifest.features[31..40] {
+        for feature in &manifest.features[30..40] {
             assert_eq!(
                 feature
                     .providers
