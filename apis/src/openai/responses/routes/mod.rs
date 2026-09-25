@@ -7,10 +7,16 @@
 //! headers — rather than from body heuristics, so a request is recognized before
 //! any payload is read.
 //!
-//! Praxis proxies the Responses contract rather than owning it, so these
-//! operations declare their runtime request-body shape without an
-//! `OwnedOperationContract`. Operation IDs are the official ones from the pinned
-//! OpenAI specification, reproduced verbatim including upstream's casing.
+//! Operation IDs are the official ones from the pinned OpenAI specification,
+//! reproduced verbatim including upstream's casing.
+//!
+//! Under the transformed profile (`responses_to_chat_completions`), Praxis owns
+//! the `POST /v1/responses` request and response contract, translating requests
+//! and resources for a Chat Completions backend. In native Responses passthrough
+//! deployments, the upstream provider owns the contract and continuations while
+//! Praxis proxies requests directly. `CreateResponse` declares
+//! [`HandlingMode::Transform`] to reflect contract ownership under the transformed
+//! profile.
 
 use std::ops::Deref;
 
@@ -436,7 +442,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "openai-conversations", feature = "openai-responses-openapi"))]
+    #[cfg(feature = "openai-responses-openapi")]
     #[test]
     fn transformed_operations_declare_owned_contracts() {
         assert!(
