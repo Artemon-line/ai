@@ -41,6 +41,9 @@ const STREAM_STATE_KEY: &str = "anthropic_stream.state";
 /// Internal stream state value recorded after emitting `message_start`.
 const STREAM_STATE_STARTED: &str = "started";
 
+/// Internal stream state value recorded after emitting a terminal error event.
+const STREAM_STATE_FAILED: &str = "failed";
+
 /// OpenAI Chat Completions SSE sentinel that marks logical stream completion.
 const OPENAI_DONE_SENTINEL: &str = "[DONE]";
 
@@ -214,6 +217,13 @@ impl HttpFilter for AnthropicMessagesToChatCompletionsStreamFilter {
             return Ok(FilterAction::Continue);
         }
 
+        if is_stream_failed(ctx) {
+            if body.is_some() {
+                *body = Some(Bytes::new());
+            }
+            return Ok(FilterAction::Continue);
+        }
+
         let Some(bytes) = body.as_ref() else {
             if end_of_stream {
                 let output = self
@@ -353,12 +363,7 @@ fn process_sse_chunk(
 
     let normalized = normalize_line_endings(to_normalize);
     let mut output = Vec::new();
-    let mut remaining = normalized.as_str();
-
-    while let Some((event_block, rest)) = remaining.split_once("\n\n") {
-        remaining = rest;
-        process_event_block(ctx, event_block, &mut output, max_tool_blocks)?;
-    }
+    let remaining = process_complete_event_blocks(ctx, &normalized, &mut output, max_tool_blocks)?;
 
     let to_buffer = if pending_cr {
         format!("{remaining}\r")
@@ -373,6 +378,23 @@ fn process_sse_chunk(
     } else {
         Ok(Bytes::from(output))
     }
+}
+
+/// Transform complete SSE event blocks and return the unconsumed suffix.
+fn process_complete_event_blocks<'a>(
+    ctx: &mut HttpFilterContext<'_>,
+    mut remaining: &'a str,
+    output: &mut Vec<u8>,
+    max_tool_blocks: usize,
+) -> Result<&'a str, FilterError> {
+    while let Some((event_block, rest)) = remaining.split_once("\n\n") {
+        remaining = rest;
+        process_event_block(ctx, event_block, output, max_tool_blocks)?;
+        if is_stream_failed(ctx) {
+            return Ok("");
+        }
+    }
+    Ok(remaining)
 }
 
 /// Store bounded incomplete SSE event data between response chunks.
@@ -401,6 +423,13 @@ fn store_line_buffer(
 /// Whether the filter has been armed in the response phase.
 fn is_armed(ctx: &HttpFilterContext<'_>) -> bool {
     ctx.filter_metadata.get(ARMED_KEY).is_some_and(|v| v == "true")
+}
+
+/// Whether a terminal error event has already ended the client-visible stream.
+fn is_stream_failed(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.filter_metadata
+        .get(STREAM_STATE_KEY)
+        .is_some_and(|v| v == STREAM_STATE_FAILED)
 }
 
 /// Whether the filter should arm: streaming request, SSE Content-Type, success status.
@@ -652,6 +681,9 @@ fn transform_delta(
         close_text_block_if_open(ctx, output);
         for tc in tool_calls {
             transform_tool_delta(ctx, tc, output, max_tool_blocks)?;
+            if is_stream_failed(ctx) {
+                break;
+            }
         }
     }
 
@@ -700,8 +732,10 @@ fn transform_tool_delta(
 ) -> Result<(), FilterError> {
     let tool_call_key = tool_call_key(tc);
 
-    if tc.get("id").and_then(Value::as_str).is_some() && !is_tool_block_open(ctx, &tool_call_key) {
-        emit_tool_block_start(ctx, &tool_call_key, tc, output, max_tool_blocks)?;
+    if !is_tool_block_open(ctx, &tool_call_key)
+        && !emit_tool_block_start(ctx, &tool_call_key, tc, output, max_tool_blocks)?
+    {
+        return Ok(());
     }
 
     emit_tool_arguments_delta(ctx, &tool_call_key, tc, output);
@@ -745,7 +779,7 @@ fn emit_tool_block_start(
     tc: &Value,
     output: &mut Vec<u8>,
     max_tool_blocks: usize,
-) -> Result<(), FilterError> {
+) -> Result<bool, FilterError> {
     let opened = get_tool_block_count(ctx);
     if opened >= max_tool_blocks {
         return Err(format!(
@@ -755,12 +789,9 @@ fn emit_tool_block_start(
     }
 
     let idx = get_block_index(ctx);
-    let id = tc.get("id").and_then(Value::as_str).unwrap_or_default();
-    let name = tc
-        .get("function")
-        .and_then(|f| f.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let Some((id, name)) = extract_or_fail_tool_call(ctx, tc, output) else {
+        return Ok(false);
+    };
     let content_block = ContentBlock::tool_use(id, serde_json::Map::new(), name);
 
     emit_event(
@@ -777,7 +808,55 @@ fn emit_tool_block_start(
     increment_block_index(ctx);
     ctx.set_metadata(TOOL_BLOCK_COUNT_KEY, (opened + 1).to_string());
 
-    Ok(())
+    Ok(true)
+}
+
+/// Validate an upstream tool call or terminate the client-visible stream.
+fn extract_or_fail_tool_call<'a>(
+    ctx: &mut HttpFilterContext<'_>,
+    tc: &'a Value,
+    output: &mut Vec<u8>,
+) -> Option<(&'a str, &'a str)> {
+    match extract_tool_id_and_name(tc) {
+        Ok(fields) => Some(fields),
+        Err(error) => {
+            debug!(%error, "invalid upstream streaming tool call");
+            emit_upstream_transform_error(output);
+            ctx.filter_metadata.remove(LINE_BUFFER_KEY);
+            ctx.filter_metadata.remove(UTF8_BUFFER_KEY);
+            ctx.set_metadata(STREAM_STATE_KEY, STREAM_STATE_FAILED.to_owned());
+            None
+        },
+    }
+}
+
+/// Extract and validate the tool-call ID and function name from an OpenAI tool-call delta.
+fn extract_tool_id_and_name(tc: &Value) -> Result<(&str, &str), FilterError> {
+    let id = tc
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            FilterError::from(
+                "anthropic_messages_to_chat_completions_stream: tool call missing required non-empty `id`",
+            )
+        })?;
+    if !crate::anthropic::wire::is_valid_tool_use_id(id) {
+        return Err(FilterError::from(
+            "anthropic_messages_to_chat_completions_stream: tool call `id` must match ^[a-zA-Z0-9_-]+$",
+        ));
+    }
+    let name = tc
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            FilterError::from(
+                "anthropic_messages_to_chat_completions_stream: tool call missing required non-empty function `name`",
+            )
+        })?;
+    Ok((id, name))
 }
 
 /// Emit an `input_json_delta` if the tool call has non-empty arguments.
@@ -835,6 +914,10 @@ fn close_tool_block(ctx: &mut HttpFilterContext<'_>, tool_call_key: &str, output
 /// `message_stop` never appear without the required opening event, yielding a
 /// structurally valid (empty) Anthropic stream instead of a malformed one.
 fn emit_done(ctx: &mut HttpFilterContext<'_>, output: &mut Vec<u8>) {
+    if is_stream_failed(ctx) {
+        return;
+    }
+
     let started = ctx
         .filter_metadata
         .get(STREAM_STATE_KEY)
@@ -1013,6 +1096,15 @@ fn open_tool_blocks(ctx: &HttpFilterContext<'_>) -> Vec<(u32, String)> {
 fn emit_event(output: &mut Vec<u8>, event_type: &str, data: &Value) {
     let data_str = serde_json::to_string(data).unwrap_or_default();
     output.extend_from_slice(format!("event: {event_type}\ndata: {data_str}\n\n").as_bytes());
+}
+
+/// Emit a client-safe terminal error when an upstream tool call cannot be
+/// represented in Anthropic's streaming schema.
+fn emit_upstream_transform_error(output: &mut Vec<u8>) {
+    let body = crate::anthropic::wire::error_body("api_error", "upstream response could not be transformed", None);
+    output.extend_from_slice(b"event: error\ndata: ");
+    output.extend_from_slice(&body);
+    output.extend_from_slice(b"\n\n");
 }
 
 /// Normalize SSE line endings: `\r\n` → `\n`, standalone `\r` → `\n`.
@@ -1585,6 +1677,62 @@ mod tests {
             "tool arguments should stream as input_json_delta"
         );
     }
+    const INVALID_TOOL_CALL_CASES: [(&str, &str, &str); 5] = [
+        (
+            "missing id",
+            r#"{"index":0,"function":{"name":"get_weather","arguments":"{}"}}"#,
+            "non-empty `id`",
+        ),
+        (
+            "empty id",
+            r#"{"index":0,"id":"","function":{"name":"get_weather","arguments":"{}"}}"#,
+            "non-empty `id`",
+        ),
+        (
+            "missing name",
+            r#"{"index":0,"id":"call_1","function":{"arguments":"{}"}}"#,
+            "non-empty function `name`",
+        ),
+        (
+            "empty name",
+            r#"{"index":0,"id":"call_1","function":{"name":"","arguments":"{}"}}"#,
+            "non-empty function `name`",
+        ),
+        (
+            "invalid id",
+            r#"{"index":0,"id":"call.bad","function":{"name":"get_weather","arguments":"{}"}}"#,
+            "must match ^[a-zA-Z0-9_-]+$",
+        ),
+    ];
+
+    #[test]
+    fn invalid_unopened_tool_call_deltas_emit_one_terminal_error() {
+        for (description, tool_call, expected_error) in INVALID_TOOL_CALL_CASES {
+            let (filter, mut ctx) = make_filter_and_context();
+            let chunk = format!(
+                "data: {{\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{{\"delta\":{{\"tool_calls\":[{tool_call}]}},\"index\":0}}]}}\n\n"
+            );
+            let mut body = Some(Bytes::from(chunk));
+            drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+            let output = String::from_utf8(body.unwrap().to_vec()).unwrap();
+            assert!(
+                output.contains("event: error")
+                    && output.contains(r#""type":"api_error""#)
+                    && output.contains("upstream response could not be transformed"),
+                "{description} should emit a terminal Anthropic error event: {output}"
+            );
+            assert!(!output.contains(r#""type":"tool_use""#));
+            assert!(!output.contains("event: message_stop"));
+
+            let error = extract_tool_id_and_name(&serde_json::from_str(tool_call).unwrap()).unwrap_err();
+            assert!(error.to_string().contains(expected_error));
+
+            let mut trailing_body = Some(Bytes::from_static(b"data: [DONE]\n\n"));
+            drop(filter.on_response_body(&mut ctx, &mut trailing_body, true).unwrap());
+            assert_eq!(trailing_body, Some(Bytes::new()));
+        }
+    }
+
 
     #[test]
     fn interleaved_tool_call_argument_delta_uses_matching_tool_block_index() {
