@@ -18,14 +18,18 @@ FILTER_EXPERIMENTAL_FEATURES := azure-ad-filter,gcp-adc-filter,http-callout-filt
 INTEGRATION_EXPERIMENTAL_FEATURES := azure-ad-filter,basic-auth-filter,gcp-adc-filter,http-callout-filter,token-rate-limit-filter
 # Features for `make release`; `full` matches the published container image.
 PRAXIS_AI_FEATURES ?= full
-# Crates that must never enter the default (standard) praxis-ai-proxy graph.
+# Crates that must never enter the explicit lean (`standard`) proxy graph.
 # openssl-sys is not on the list: praxis performs all cryptography through the
 # system OpenSSL, so its bindings are part of every build by design.
-DEFAULT_GRAPH_DENY := sqlx sqlx-core libsqlite3-sys native-tls rmcp sse-stream \
+LEAN_GRAPH_DENY := sqlx sqlx-core libsqlite3-sys native-tls rmcp sse-stream \
 	jsonschema utoipa tiktoken-rs reqwest serde_json_path tonic prost
 # Upper bound on crates (name@version, normal + build edges, host target) in the
-# default graph. Linux hosts measure about 428, macOS about 432.
-DEFAULT_GRAPH_BUDGET ?= 434
+# explicit lean graph. Linux hosts measure about 428, macOS about 432.
+LEAN_GRAPH_BUDGET ?= 434
+STORE_BACKEND_FREE_FEATURES := standard,openai-all
+STORE_POSTGRES_FEATURES := standard,openai-all,store-postgres
+STORE_SQLITE_FEATURES := standard,openai-all,store-sqlite
+STORE_COMBINED_FEATURES := standard,openai-all,store-all
 STORE_ALL_WORKSPACE_FEATURES := praxis-ai-proxy/store-all,praxis-tests-integration/store-all,praxis-tests-schema/store-all,praxis-tests-environment/store-all
 
 ifneq ($(V),)
@@ -67,7 +71,7 @@ build:
 	cargo build --workspace
 
 release:
-	cargo build --release -p praxis-ai-proxy --features $(PRAXIS_AI_FEATURES)
+	cargo build --release -p praxis-ai-proxy --no-default-features --features $(PRAXIS_AI_FEATURES)
 
 check:
 	cargo check --workspace
@@ -95,7 +99,7 @@ container-run: | require-container-engine
 # -------------------------------------------------------------------
 
 test:
-	cargo test --workspace $(_NOCAPTURE)
+	cargo test --workspace --features $(STORE_ALL_WORKSPACE_FEATURES) $(_NOCAPTURE)
 
 # `make test-unit` runs every crate's permutations serially for local use; CI
 # splits these into the test-unit-{apis,filters,proxy} targets so the three
@@ -120,11 +124,29 @@ test-unit-proxy:
 
 test-store-features:
 	cargo check -p praxis-ai-proxy
-	cargo check -p praxis-ai-proxy --no-default-features --features standard,openai-all,store-sqlite
-	cargo check -p praxis-ai-proxy --no-default-features --features standard,openai-all,store-all
+	cargo check -p praxis-ai-proxy --no-default-features --features $(STORE_BACKEND_FREE_FEATURES)
+	cargo check -p praxis-ai-proxy --no-default-features --features $(STORE_POSTGRES_FEATURES)
+	cargo check -p praxis-ai-proxy --no-default-features --features $(STORE_SQLITE_FEATURES)
+	cargo check -p praxis-ai-proxy --no-default-features --features $(STORE_COMBINED_FEATURES)
+	@set -eu; \
+	assert_has() { printf '%s\n' "$$1" | grep -q "^$$2 v" || { echo "ERROR: $$3 graph is missing $$2"; exit 1; }; }; \
+	assert_lacks() { if printf '%s\n' "$$1" | grep -q "^$$2 v"; then echo "ERROR: $$3 graph contains $$2"; exit 1; fi; }; \
+	backend_free="$$(cargo tree -p praxis-ai-proxy --no-default-features --features $(STORE_BACKEND_FREE_FEATURES) --edges normal --prefix none --format '{p}')"; \
+	postgres="$$(cargo tree -p praxis-ai-proxy --no-default-features --features $(STORE_POSTGRES_FEATURES) --edges normal --prefix none --format '{p}')"; \
+	sqlite="$$(cargo tree -p praxis-ai-proxy --no-default-features --features $(STORE_SQLITE_FEATURES) --edges normal --prefix none --format '{p}')"; \
+	combined="$$(cargo tree -p praxis-ai-proxy --no-default-features --features $(STORE_COMBINED_FEATURES) --edges normal --prefix none --format '{p}')"; \
+	default="$$(cargo tree -p praxis-ai-proxy --edges normal --prefix none --format '{p}')"; \
+	for crate in sqlx sqlx-core sqlx-postgres sqlx-sqlite libsqlite3-sys native-tls; do assert_lacks "$$backend_free" "$$crate" backend-free; done; \
+	for crate in sqlx sqlx-postgres native-tls; do assert_has "$$postgres" "$$crate" PostgreSQL-only; done; \
+	for crate in sqlx-sqlite libsqlite3-sys; do assert_lacks "$$postgres" "$$crate" PostgreSQL-only; done; \
+	for crate in sqlx sqlx-sqlite libsqlite3-sys; do assert_has "$$sqlite" "$$crate" SQLite-only; done; \
+	for crate in sqlx-postgres native-tls; do assert_lacks "$$sqlite" "$$crate" SQLite-only; done; \
+	for crate in sqlx sqlx-postgres sqlx-sqlite libsqlite3-sys native-tls; do assert_has "$$combined" "$$crate" combined; done; \
+	for crate in sqlx sqlx-postgres native-tls; do assert_has "$$default" "$$crate" default; done; \
+	for crate in sqlx-sqlite libsqlite3-sys; do assert_lacks "$$default" "$$crate" default; done
 	@# Lint each opt-in group on its own so a gate leak in a partial feature set
 	@# cannot hide behind the lean and full builds that other targets cover.
-	@for group in openai-responses openai-file-resolve-filter store store-sqlite \
+	@for group in openai-responses openai-file-resolve-filter store store-postgres store-sqlite \
 		openai-conversations openai-compact openai-mcp-tools; do \
 		echo "clippy: standard + $$group"; \
 		cargo clippy -p praxis-ai-apis -p praxis-ai-filters -p praxis-ai-proxy --all-targets \
@@ -257,26 +279,27 @@ lint-lean:
 	RUSTDOCFLAGS="-D warnings" cargo doc -p praxis-ai-apis -p praxis-ai-filters -p praxis-ai-proxy \
 		--no-deps --document-private-items --no-default-features --features praxis-ai-proxy/standard
 
-# Fail if a heavy crate enters the default praxis-ai-proxy graph, or if the
-# graph grows past DEFAULT_GRAPH_BUDGET crates.
+# Fail if a heavy crate enters the explicit lean proxy graph, or if that graph
+# grows past LEAN_GRAPH_BUDGET crates.
 check-dep-budget:
 	@tree="$$(cargo tree --locked -p praxis-ai-proxy -e normal,build --target all \
-		--prefix none --format '{p}')" || { echo "ERROR: cargo tree failed"; exit 1; }; \
+		--no-default-features --features standard --prefix none --format '{p}')" || { echo "ERROR: cargo tree failed"; exit 1; }; \
 	host="$$(cargo tree --locked -p praxis-ai-proxy -e normal,build \
-		--prefix none --format '{p}')" || { echo "ERROR: cargo tree failed"; exit 1; }; \
+		--no-default-features --features standard --prefix none --format '{p}')" || { echo "ERROR: cargo tree failed"; exit 1; }; \
 	graph="$$(printf '%s\n' "$$tree" | awk '{print $$1"@"$$2}' | sort -u)"; \
 	status=0; \
-	for crate in $(DEFAULT_GRAPH_DENY); do \
+	for crate in $(LEAN_GRAPH_DENY); do \
 		if printf '%s\n' "$$graph" | grep -q "^$$crate@"; then \
-			echo "ERROR: $$crate is in the default praxis-ai-proxy graph:"; \
-			cargo tree --locked -p praxis-ai-proxy -e normal,build --target all -i "$$crate" | head -n 15; \
+			echo "ERROR: $$crate is in the lean praxis-ai-proxy graph:"; \
+			cargo tree --locked -p praxis-ai-proxy -e normal,build --target all \
+				--no-default-features --features standard -i "$$crate" | head -n 15; \
 			status=1; \
 		fi; \
 	done; \
 	count=$$(printf '%s\n' "$$host" | awk '{print $$1"@"$$2}' | sort -u | wc -l); \
-	[ "$$count" -gt 1 ] || { echo "ERROR: empty default dependency graph"; exit 1; }; \
-	echo "default praxis-ai-proxy graph: $$count crates for the host target (budget $(DEFAULT_GRAPH_BUDGET))"; \
-	[ "$$count" -le $(DEFAULT_GRAPH_BUDGET) ] || { echo "ERROR: over budget"; status=1; }; \
+	[ "$$count" -gt 1 ] || { echo "ERROR: empty lean dependency graph"; exit 1; }; \
+	echo "lean praxis-ai-proxy graph: $$count crates for the host target (budget $(LEAN_GRAPH_BUDGET))"; \
+	[ "$$count" -le $(LEAN_GRAPH_BUDGET) ] || { echo "ERROR: over budget"; status=1; }; \
 	exit $$status
 
 fmt:
@@ -299,7 +322,7 @@ coverage-check:
 	PRAXIS_AI_BIN=$(abspath target/llvm-cov-target/debug/praxis-ai) \
 	cargo llvm-cov --workspace --features $(STORE_ALL_WORKSPACE_FEATURES) --json \
 		--exclude xtask \
-		--ignore-filename-regex '(target/|tests/|store/postgres\.rs)' \
+		--ignore-filename-regex '(target/|tests/|store-backends/src/postgres\.rs)' \
 		--output-path coverage.json
 	@LINE_PCT=$$(jq '.data[0].totals.lines.percent' coverage.json); \
 	echo "Line coverage: $${LINE_PCT}%"; \
@@ -762,7 +785,7 @@ help:
 	@echo ""
 	@echo "Build:"
 	@echo "  build                cargo build --workspace"
-	@echo "  release              cargo build --release -p praxis-ai-proxy --features $(PRAXIS_AI_FEATURES)"
+	@echo "  release              cargo build --release -p praxis-ai-proxy --no-default-features --features $(PRAXIS_AI_FEATURES)"
 	@echo "  check                cargo check --workspace"
 	@echo "  clean                cargo clean"
 	@echo ""

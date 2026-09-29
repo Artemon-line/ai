@@ -1,84 +1,58 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! [`PostgresResponseStore`] — `PostgreSQL` backend for the response store.
-
-use std::path::Path;
+//! [`SqliteResponseStore`] — `SQLite` backend for the response store.
 
 use async_trait::async_trait;
+use percent_encoding::percent_decode_str;
+use praxis_ai_store::StateOwner;
 use sqlx::{
-    AssertSqlSafe, Row as _,
-    postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode},
+    AssertSqlSafe, Row as _, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use tracing::info;
 
 use super::{
-    SslMode,
+    ConversationItemRecord, ConversationItemStore, ConversationRecord, PendingApprovalRecord, PoolConfig,
+    ResponseRecord, ResponseStore, StoreError,
     compression::{StoreCompressionConfig, decode, run_blocking},
-    pool::{PoolConfig, apply_pool_config},
-    postgres_tls::PgTlsConfig,
+    pool::apply_pool_config,
     schemas::{
         ActualKeyColumn, ActualTable, ActualUniqueIndex, SCHEMA_VERSION, SchemaCheck, SqlDialect, TableNames,
-        check_schema, expected_tables, generate_ddl, pending_approvals_table, pg_key_column_folding,
-        schema_version_table, validate_postgres_identifiers,
+        check_schema, expected_tables, generate_ddl, pending_approvals_table, schema_version_table,
+        sqlite_key_column_folding,
     },
-    trait_def::{ConversationItemStore, ResponseStore},
-    types::{ConversationItemRecord, ConversationRecord, PendingApprovalRecord, ResponseRecord, StoreError},
 };
-use crate::StateOwner;
-
-impl From<SslMode> for PgSslMode {
-    fn from(mode: SslMode) -> Self {
-        match mode {
-            SslMode::Disable => Self::Disable,
-            SslMode::Prefer => Self::Prefer,
-            SslMode::Require => Self::Require,
-            SslMode::VerifyCa => Self::VerifyCa,
-            SslMode::VerifyFull => Self::VerifyFull,
-        }
-    }
-}
 
 // -----------------------------------------------------------------------------
-// PostgresResponseStore
+// SqliteResponseStore
 // -----------------------------------------------------------------------------
 
-/// PostgreSQL-backed response store.
+/// SQLite-backed response store.
 ///
-/// Uses [`sqlx::PgPool`] for async connection pooling. Table names
-/// are configurable per provider (e.g., `openai_responses`,
+/// Uses [`sqlx::SqlitePool`] for async connection pooling. Table
+/// names are configurable per provider (e.g., `openai_responses`,
 /// `google_interactions`) to isolate data per provider.
-pub struct PostgresResponseStore {
+pub struct SqliteResponseStore {
     /// Connection pool.
-    pool: sqlx::PgPool,
+    pool: SqlitePool,
     /// Configured table names.
     tables: TableNames,
     /// Payload compression codec applied on write.
     compression: StoreCompressionConfig,
 }
 
-impl PostgresResponseStore {
+impl SqliteResponseStore {
     /// Create a new store and initialize the schema.
     ///
-    /// The `database_url` is a `PostgreSQL` connection string
-    /// (e.g., `"postgres://user:pass@host:5432/praxis"`).
+    /// The `database_url` is a `SQLite` connection string. Use
+    /// `"sqlite::memory:"` for in-memory databases (testing) or
+    /// `"sqlite:///path/to/db.sqlite?mode=rwc"` for file-backed.
     ///
     /// `responses_table` and `conversations_table` are the SQL
     /// table names to use. These come from the filter's YAML
-    /// config (e.g., `openai_responses`).
-    ///
-    /// `items_table`, when provided, enables the conversation items
-    /// table for storing individual conversation entries.
-    ///
-    /// `tls` carries the TLS mode and certificate paths. `ssl_mode`
-    /// always overrides any `sslmode` in the URL — explicitly when
-    /// provided, or with the [`SslMode::VerifyFull`] default when
-    /// omitted. Use [`SslMode::VerifyCa`] or [`SslMode::VerifyFull`]
-    /// with `ssl_root_cert` to verify the server against a custom CA,
-    /// and `ssl_client_cert`/`ssl_client_key` for mutual TLS.
-    /// Certificate path existence is validated at connection time, not
-    /// at construction. See [`PgTlsConfig`] for the certificate-
-    /// authentication compliance profile.
+    /// config (e.g., `openai_responses`). `items_table` is
+    /// optional and enables conversation item storage.
     ///
     /// `compression` selects the optional codec applied to the
     /// responses table's payload columns on write; when omitted, those
@@ -92,14 +66,13 @@ impl PostgresResponseStore {
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
-        reason = "distinct connection, table-name, TLS, pool, and compression inputs are clearer passed explicitly than bundled"
+        reason = "constructor grew a compression parameter alongside table and pool options"
     )]
     pub async fn new(
         database_url: &str,
         responses_table: &str,
         conversations_table: &str,
         items_table: Option<&str>,
-        tls: &PgTlsConfig<'_>,
         pool_config: Option<&PoolConfig>,
         compression: Option<&StoreCompressionConfig>,
     ) -> Result<Self, StoreError> {
@@ -111,14 +84,16 @@ impl PostgresResponseStore {
             conversations: conversations_table.to_owned(),
             items: items_table.map(str::to_owned),
         };
-        validate_postgres_identifiers(&tables)?;
-        let ddl = generate_ddl(&tables, SqlDialect::Postgres)?;
+        let ddl = generate_ddl(&tables, SqlDialect::Sqlite)?;
 
-        let options = pg_connect_options(database_url, tls)?;
-        let pool = Box::pin(apply_pool_config(PgPoolOptions::new(), pool_config).connect_with(options))
+        let options: SqliteConnectOptions = database_url
+            .parse()
+            .map_err(|e: sqlx::Error| StoreError::Database(e.to_string()))?;
+
+        let pool = sqlite_pool_options(database_url, pool_config)
+            .connect_with(options.create_if_missing(true))
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
-
         for statement in &ddl {
             sqlx::query(AssertSqlSafe(statement.as_str()))
                 .execute(&pool)
@@ -132,13 +107,21 @@ impl PostgresResponseStore {
         info!(
             responses = responses_table,
             conversations = conversations_table,
-            "postgres response store initialized"
+            "response store initialized"
         );
         Ok(Self {
             pool,
             tables,
             compression: compression.cloned().unwrap_or_default(),
         })
+    }
+
+    /// Close the connection pool, releasing its connections.
+    ///
+    /// Called when the backend is retired from the process-wide cache so a
+    /// reload does not leak pools.
+    pub async fn close(&self) {
+        self.pool.close().await;
     }
 
     /// Insert or update a conversation row shared by both store traits.
@@ -149,14 +132,14 @@ impl PostgresResponseStore {
         let sql = format!(
             "INSERT INTO {} \
              (conversation_id, tenant_id, owner_issuer, owner_subject, created_at, metadata, messages) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
-             ON CONFLICT (conversation_id) DO UPDATE SET \
-             messages = EXCLUDED.messages, \
-             metadata = EXCLUDED.metadata \
-             WHERE {}.tenant_id = EXCLUDED.tenant_id \
-               AND {}.owner_issuer = EXCLUDED.owner_issuer \
-               AND {}.owner_subject = EXCLUDED.owner_subject",
-            self.tables.conversations, self.tables.conversations, self.tables.conversations, self.tables.conversations
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(conversation_id) \
+             DO UPDATE SET messages = excluded.messages, \
+             metadata = excluded.metadata \
+             WHERE tenant_id = excluded.tenant_id \
+               AND owner_issuer = excluded.owner_issuer \
+               AND owner_subject = excluded.owner_subject",
+            self.tables.conversations
         );
 
         let result = sqlx::query(AssertSqlSafe(sql.as_str()))
@@ -180,10 +163,9 @@ impl PostgresResponseStore {
         conversation_id: &str,
     ) -> Result<Option<ConversationRecord>, StoreError> {
         let sql = format!(
-            "SELECT conversation_id, tenant_id, owner_issuer, owner_subject, created_at, \
-                    metadata, messages \
+            "SELECT conversation_id, tenant_id, owner_issuer, owner_subject, created_at, metadata, messages \
              FROM {} \
-             WHERE conversation_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4",
+             WHERE conversation_id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
             self.tables.conversations
         );
 
@@ -202,7 +184,7 @@ impl PostgresResponseStore {
     /// Delete only a conversation row.
     async fn delete_conversation_record(&self, owner: &StateOwner, conversation_id: &str) -> Result<bool, StoreError> {
         let sql = format!(
-            "DELETE FROM {} WHERE conversation_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4",
+            "DELETE FROM {} WHERE conversation_id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
             self.tables.conversations
         );
 
@@ -219,252 +201,222 @@ impl PostgresResponseStore {
     }
 }
 
-/// Build `PostgreSQL` connection options from a URL and TLS settings.
+/// Build pool options for the requested `SQLite` database URL.
 ///
-/// Always applies an SSL mode: the explicit override when provided,
-/// otherwise [`SslMode::VerifyFull`]. This overrides any `sslmode`
-/// embedded in the URL to ensure TLS-verified connections by default,
-/// and applies the configured root CA and client certificate/key.
-///
-/// When [`PgTlsConfig::require_certificate_authentication`] is set, the
-/// options are rebuilt from a password-file-free base so a stray
-/// `~/.pgpass` entry cannot inject a password that would drive
-/// application-side (`RustCrypto`) SCRAM/MD5 cryptography. Filter
-/// validation has already rejected any password embedded in the URL and
-/// the `PGPASSWORD` environment variable, so the effective password is
-/// `None`.
-fn pg_connect_options(database_url: &str, tls: &PgTlsConfig<'_>) -> Result<PgConnectOptions, StoreError> {
-    let parsed: PgConnectOptions = database_url
-        .parse()
-        .map_err(|e: sqlx::Error| StoreError::Database(e.to_string()))?;
-
-    let mut options = if tls.require_certificate_authentication {
-        rebuild_without_password_file(&parsed)
+/// In-memory databases are pinned to a single connection regardless
+/// of pool config (required to keep the database alive). For
+/// file-backed databases, user-supplied [`PoolConfig`] values are
+/// applied on top of sqlx defaults.
+fn sqlite_pool_options(database_url: &str, pool_config: Option<&PoolConfig>) -> SqlitePoolOptions {
+    if is_memory_database_url(database_url) {
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
     } else {
-        parsed
-    };
-
-    let effective_mode = tls.ssl_mode.unwrap_or_default();
-    options = options.ssl_mode(PgSslMode::from(effective_mode));
-
-    if let Some(cert_path) = tls.ssl_root_cert {
-        options = options.ssl_root_cert(Path::new(cert_path));
+        apply_pool_config(SqlitePoolOptions::new(), pool_config)
     }
-    if let Some(cert_path) = tls.ssl_client_cert {
-        options = options.ssl_client_cert(Path::new(cert_path));
-    }
-    if let Some(key_path) = tls.ssl_client_key {
-        options = options.ssl_client_key(Path::new(key_path));
-    }
-
-    Ok(options)
 }
 
-/// Rebuild connection options from a password-file-free base.
-///
-/// Copies only the addressing fields (host, port, socket, username,
-/// database) from `parsed` onto [`PgConnectOptions::new_without_pgpass`],
-/// which never reads `~/.pgpass`. TLS fields are applied by the caller.
-/// The resulting password is `None` (the `PGPASSWORD` environment
-/// variable is rejected by the compliance-profile validation before this
-/// runs), so no password reaches the connection.
-///
-/// Copying only addressing fields is lossless here because compliance-profile
-/// validation runs first and fails closed on any other URL connection parameter
-/// (`application_name`, `options`/`options[...]`, `statement-cache-capacity`) —
-/// see `postgres_url_dropped_connection_param`. `SQLx` exposes no getter for the
-/// statement-cache capacity and `get_options` cannot round-trip through the
-/// key/value `options` setter, so those parameters cannot be carried faithfully;
-/// rejecting them upstream keeps this rebuild from silently dropping settings
-/// such as `search_path` that would otherwise redirect store DDL and queries.
-fn rebuild_without_password_file(parsed: &PgConnectOptions) -> PgConnectOptions {
-    let mut rebuilt = PgConnectOptions::new_without_pgpass()
-        .host(parsed.get_host())
-        .port(parsed.get_port())
-        .username(parsed.get_username());
-    if let Some(database) = parsed.get_database() {
-        rebuilt = rebuilt.database(database);
+
+/// Return whether the database URL targets an in-memory `SQLite` database.
+pub(crate) fn is_memory_database_url(database_url: &str) -> bool {
+    let url = database_url
+        .trim()
+        .strip_prefix("sqlite://")
+        .or_else(|| database_url.trim().strip_prefix("sqlite:"))
+        .unwrap_or_else(|| database_url.trim());
+    let (database, query) = url.split_once('?').unwrap_or((url, ""));
+    let database = percent_decode_str(database).decode_utf8_lossy();
+    if matches!(database.as_ref(), ":memory:" | "file::memory:") {
+        return true;
     }
-    if let Some(socket) = parsed.get_socket() {
-        rebuilt = rebuilt.socket(socket);
-    }
-    rebuilt
+    query.split('&').any(|param| {
+        percent_decode_str(param)
+            .decode_utf8_lossy()
+            .eq_ignore_ascii_case("mode=memory")
+    })
 }
 
-/// Fetch column names for a `PostgreSQL` table from `information_schema`.
-async fn table_column_names(pool: &sqlx::PgPool, table: &str) -> Result<Vec<String>, StoreError> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT column_name FROM information_schema.columns \
-         WHERE table_schema = current_schema() AND table_name = $1",
-    )
-    .bind(table)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| StoreError::Database(e.to_string()))
+/// Fetch column names for a `SQLite` table via `PRAGMA table_info`.
+async fn table_column_names(pool: &SqlitePool, table: &str) -> Result<Vec<String>, StoreError> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let rows = sqlx::query(AssertSqlSafe(pragma.as_str()))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    rows.iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<Result<_, _>>()
+        .map_err(|e| StoreError::Database(e.to_string()))
 }
 
-/// Fetch a `PostgreSQL` table's primary key columns with the metadata needed to
-/// prove each preserves distinct key values, plus whether the key is immediate.
+/// Fetch ordered primary key columns for a `SQLite` table, each paired with
+/// its declared type.
 ///
-/// Reading the key from `pg_index.indisprimary` scoped to `t.relname = $1`
-/// returns only *this* table's own primary key, so a same-named constraint on
-/// another table cannot leak in. Only the leading `indnkeyatts` attributes are
-/// key columns, excluding any `PRIMARY KEY ... INCLUDE (...)` covering column; a
-/// primary key never contains an expression column, so `attname` and `typname`
-/// are always present.
-///
-/// Each key column carries: its type OID (`pg_attribute.atttypid`, read without
-/// resolving domains -- a domain reports its own OID and fails the allow-list
-/// with no recursive walk); whether its collation is deterministic
-/// (`pg_collation.collisdeterministic`, `NULL` for a non-collatable column); and
-/// whether its operator class is the built-in default B-tree class for the
-/// column type -- keyed structurally on `pg_opclass.opcnamespace = 'pg_catalog'`,
-/// `pg_am.amname = 'btree'`, `pg_opclass.opcdefault`, and `pg_opclass.opcintype =
-/// text` (see [`PRIMARY_KEY_QUERY`] for why the input type is `text`, not the
-/// column's own OID), never on a spoofable class name, and read as `NULL`/untrusted
-/// fail-closed. [`pg_key_column_folding`] turns that metadata into a verdict.
-/// `pg_index.indimmediate` is constant across the index's rows; a deferrable key
-/// cannot arbitrate an `ON CONFLICT` upsert.
-async fn table_primary_key(pool: &sqlx::PgPool, table: &str) -> Result<(Vec<ActualKeyColumn>, bool), StoreError> {
-    let rows = sqlx::query(PRIMARY_KEY_QUERY)
-        .bind(table)
+/// `PRAGMA table_info` reports `pk` as 0 for non-key columns and the
+/// column's 1-based position within the primary key otherwise, so sorting
+/// by it reconstructs the composite key in declaration order. The declared
+/// type carries the column's affinity, which the index pragmas do not expose.
+async fn primary_key_columns(pool: &SqlitePool, table: &str) -> Result<Vec<(String, String)>, StoreError> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let rows = sqlx::query(AssertSqlSafe(pragma.as_str()))
         .fetch_all(pool)
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
 
-    let mut columns = Vec::with_capacity(rows.len());
-    // A table with no primary key yields no rows; report it as immediate so the
-    // empty key fails the shape check rather than the deferrable check.
-    let mut immediate = true;
+    let mut key_columns: Vec<(i64, (String, String))> = Vec::new();
     for row in &rows {
-        let (column, row_immediate) = pk_row_to_key_column(row)?;
-        immediate = row_immediate;
-        columns.push(column);
+        let position: i64 = row.try_get("pk").map_err(|e| StoreError::Database(e.to_string()))?;
+        if position > 0 {
+            let name: String = row.try_get("name").map_err(|e| StoreError::Database(e.to_string()))?;
+            let declared_type: String = row.try_get("type").map_err(|e| StoreError::Database(e.to_string()))?;
+            key_columns.push((position, (name, declared_type)));
+        }
     }
-    Ok((columns, immediate))
+    key_columns.sort_by_key(|(position, _)| *position);
+    Ok(key_columns.into_iter().map(|(_, column)| column).collect())
 }
 
-/// Parse one row from [`PRIMARY_KEY_QUERY`] into a key column plus the index's
-/// `indimmediate` flag. That flag is index-level, so it is identical for every
-/// row of the key; the caller keeps the last one read.
-fn pk_row_to_key_column(row: &PgRow) -> Result<(ActualKeyColumn, bool), StoreError> {
-    let name: String = row
-        .try_get("column_name")
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-    let type_oid: i64 = row
-        .try_get("type_oid")
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-    let type_name: String = row
-        .try_get("type_name")
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-    let immediate: bool = row
-        .try_get("immediate")
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-    let collation_deterministic: Option<bool> = row
-        .try_get("collation_deterministic")
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-    // A missing operator class classifies as untrusted (fail-closed).
-    let operator_class_trusted: Option<bool> = row
-        .try_get("operator_class_trusted")
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-    let column = ActualKeyColumn {
-        folding: pg_key_column_folding(
-            type_oid,
-            &type_name,
-            collation_deterministic,
-            operator_class_trusted.unwrap_or(false),
-        ),
-        name,
+/// Build a `SQLite` table's primary key columns with per-column folding
+/// verdicts.
+///
+/// The declared type (carrying affinity) comes from `PRAGMA table_info` via
+/// [`primary_key_columns`]; the collation governing each key column's equality
+/// comes from the primary key's backing auto-index (`pragma_index_list` origin
+/// `'pk'`, then `pragma_index_xinfo`). A single-column `INTEGER PRIMARY KEY`
+/// aliases the rowid and has no auto-index, so it carries no collation and is
+/// caught by the affinity half of [`sqlite_key_column_folding`].
+async fn table_primary_key(pool: &SqlitePool, table: &str) -> Result<Vec<ActualKeyColumn>, StoreError> {
+    let declared = primary_key_columns(pool, table).await?;
+    let collations = match primary_key_index_name(pool, table).await? {
+        Some(index) => index_key_collations(pool, &index).await?,
+        None => Vec::new(),
     };
-    Ok((column, immediate))
+    Ok(declared
+        .into_iter()
+        .map(|(name, declared_type)| {
+            let collation = collations
+                .iter()
+                .find(|(column, _)| column == &name)
+                .and_then(|(_, collation)| collation.as_deref());
+            ActualKeyColumn {
+                folding: sqlite_key_column_folding(&declared_type, collation),
+                name,
+            }
+        })
+        .collect())
 }
 
-/// Catalog query backing [`table_primary_key`]. `$1` binds the table name; see
-/// that function's docs for how each selected column is interpreted.
+/// Fetch the name of a `SQLite` table's primary key auto-index, if any.
 ///
-/// `operator_class_trusted` is true only for `text_ops`, the `pg_catalog` default
-/// B-tree operator class whose input type is `text`. `PostgreSQL` backs both
-/// `text` and `varchar` key columns with `text_ops`: `varchar` is binary-coercible
-/// to `text`, so its default B-tree class is `text_ops` and reports
-/// `opcintype = text` even though the column's own type OID is `varchar`. (A
-/// built-in `varchar_ops` exists but is non-default and is never auto-selected for
-/// a column.) The check therefore compares against `text`'s OID rather than the
-/// column's own type, so both allow-listed key types (`text`, `varchar`) pass,
-/// while `bpchar_ops`, `citext_ops`, and any non-default custom class fail
-/// (`opcdefault` is false for a non-default class, and no second default class can
-/// exist for `text`).
-const PRIMARY_KEY_QUERY: &str = "SELECT a.attname AS column_name, a.atttypid::int8 AS type_oid, \
-            ty.typname AS type_name, i.indimmediate AS immediate, \
-            coll.collisdeterministic AS collation_deterministic, \
-            (oc.opcnamespace = 'pg_catalog'::regnamespace \
-             AND am.amname = 'btree' \
-             AND oc.opcdefault \
-             AND oc.opcintype = 'pg_catalog.text'::regtype) AS operator_class_trusted \
-     FROM pg_index i \
-     JOIN pg_class t ON t.oid = i.indrelid \
-     JOIN pg_namespace n ON n.oid = t.relnamespace \
-     CROSS JOIN LATERAL unnest(i.indkey::int2[], i.indcollation::oid[], i.indclass::oid[]) \
-         WITH ORDINALITY AS k(attnum, colloid, opclassoid, ord) \
-     JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
-     JOIN pg_type ty ON ty.oid = a.atttypid \
-     LEFT JOIN pg_collation coll ON coll.oid = k.colloid \
-     JOIN pg_opclass oc ON oc.oid = k.opclassoid \
-     JOIN pg_am am ON am.oid = oc.opcmethod \
-     WHERE i.indisprimary \
-       AND k.ord <= i.indnkeyatts \
-       AND t.relname = $1 \
-       AND n.nspname = current_schema() \
-     ORDER BY k.ord";
-
-/// Query for the unique indexes on a `PostgreSQL` table other than the primary
-/// key, each with the columns it covers.
-///
-/// `pg_index.indisunique AND NOT indisprimary` covers every `UNIQUE` constraint
-/// and standalone `CREATE UNIQUE INDEX`. No `indisready`/`indislive` filter is
-/// applied: an invalid or half-built unique index is still an unexpected
-/// deviation from the generated schema and is compared fail-closed. Each index's
-/// columns are resolved through `indkey` so [`check_schema`] can accept exactly
-/// the store's own generated unique indexes by column set and reject any other --
-/// a narrower key that reintroduces cross-tenant data loss, or a redundant one.
-///
-/// Expression index members have `attnum = 0` and are dropped by the
-/// `pg_attribute` join, so an expression-based unique index resolves to fewer
-/// columns than any expected set and is rejected fail-closed.
-const UNIQUE_INDEX_QUERY: &str = "SELECT ix.relname AS index_name, \
-            array_agg(a.attname ORDER BY k.ord) AS columns \
-     FROM pg_index i \
-     JOIN pg_class t ON t.oid = i.indrelid \
-     JOIN pg_class ix ON ix.oid = i.indexrelid \
-     JOIN pg_namespace n ON n.oid = t.relnamespace \
-     JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true \
-     JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
-     WHERE i.indisunique \
-       AND NOT i.indisprimary \
-       AND t.relname = $1 \
-       AND n.nspname = current_schema() \
-     GROUP BY ix.relname \
-     ORDER BY ix.relname";
-
-/// Fetch the unique indexes on a `PostgreSQL` table other than the primary key,
-/// each with the columns it covers, via [`UNIQUE_INDEX_QUERY`].
-async fn table_extra_unique_indexes(pool: &sqlx::PgPool, table: &str) -> Result<Vec<ActualUniqueIndex>, StoreError> {
-    let rows = sqlx::query(UNIQUE_INDEX_QUERY)
+/// A composite (or any non-`INTEGER`) primary key is backed by an auto-index
+/// reported by `pragma_index_list` with `origin = 'pk'`; a single-column
+/// `INTEGER PRIMARY KEY` aliases the rowid and has none. The table name is
+/// bound as a parameter so a quoted or special name does not break the query.
+async fn primary_key_index_name(pool: &SqlitePool, table: &str) -> Result<Option<String>, StoreError> {
+    let rows = sqlx::query("SELECT name, origin FROM pragma_index_list(?)")
         .bind(table)
         .fetch_all(pool)
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
-    rows.iter().map(pg_row_to_unique_index).collect()
+    for row in &rows {
+        let origin: String = row.try_get("origin").map_err(|e| StoreError::Database(e.to_string()))?;
+        if origin == "pk" {
+            return Ok(Some(
+                row.try_get("name").map_err(|e| StoreError::Database(e.to_string()))?,
+            ));
+        }
+    }
+    Ok(None)
 }
 
-/// Convert one [`UNIQUE_INDEX_QUERY`] row into an [`ActualUniqueIndex`].
-fn pg_row_to_unique_index(row: &PgRow) -> Result<ActualUniqueIndex, StoreError> {
-    let name: String = row
-        .try_get("index_name")
+/// Fetch the key columns of a `SQLite` index paired with their collations via
+/// the `pragma_index_xinfo` table-valued function.
+///
+/// The index name is bound as a parameter so a name that needs quoting does not
+/// break the query. `index_xinfo` marks the columns named in the index with
+/// `key = 1` and the auxiliary rowid/covering columns with `key = 0`, which are
+/// skipped. A NULL name is an expression key column (never present on our
+/// primary keys) and is also skipped. The collation is returned verbatim;
+/// [`sqlite_key_column_folding`] decides whether it folds distinct values.
+async fn index_key_collations(pool: &SqlitePool, index: &str) -> Result<Vec<(String, Option<String>)>, StoreError> {
+    let rows = sqlx::query("SELECT name, coll, \"key\" AS is_key FROM pragma_index_xinfo(?)")
+        .bind(index)
+        .fetch_all(pool)
+        .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
-    let columns: Vec<String> = row
-        .try_get("columns")
+    let mut collations = Vec::new();
+    for row in &rows {
+        let is_key: i64 = row.try_get("is_key").map_err(|e| StoreError::Database(e.to_string()))?;
+        if is_key == 0 {
+            continue;
+        }
+        let name: Option<String> = row.try_get("name").map_err(|e| StoreError::Database(e.to_string()))?;
+        let collation: Option<String> = row.try_get("coll").map_err(|e| StoreError::Database(e.to_string()))?;
+        if let Some(name) = name {
+            collations.push((name, collation));
+        }
+    }
+    Ok(collations)
+}
+
+/// Fetch the unique indexes on a `SQLite` table other than the primary key's
+/// auto-index, each with the columns it covers, via `pragma_index_list` and
+/// `pragma_index_info`.
+///
+/// The table name is bound as a parameter so a quoted or special name does not
+/// break the query. `pragma_index_list` reports every index with a `unique`
+/// flag and an `origin` (`'pk'` for the primary key, `'u'` for a `UNIQUE`
+/// constraint, `'c'` for a `CREATE UNIQUE INDEX`). Every unique index whose
+/// origin is not `'pk'` is compared against the store's own generated unique
+/// indexes by column set; anything else is rejected fail-closed rather than
+/// proved a safe superset, since a narrower unique key loses rows via
+/// `INSERT OR REPLACE`.
+async fn table_extra_unique_indexes(pool: &SqlitePool, table: &str) -> Result<Vec<ActualUniqueIndex>, StoreError> {
+    let rows = sqlx::query("SELECT name, \"unique\" AS is_unique, origin FROM pragma_index_list(?)")
+        .bind(table)
+        .fetch_all(pool)
+        .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
-    Ok(ActualUniqueIndex { name, columns })
+    let mut indexes = Vec::new();
+    for row in &rows {
+        let is_unique: i64 = row
+            .try_get("is_unique")
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+        let origin: String = row.try_get("origin").map_err(|e| StoreError::Database(e.to_string()))?;
+        if is_unique == 0 || origin == "pk" {
+            continue;
+        }
+        let name: String = row.try_get("name").map_err(|e| StoreError::Database(e.to_string()))?;
+        let columns = index_columns(pool, &name).await?;
+        indexes.push(ActualUniqueIndex { name, columns });
+    }
+    indexes.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(indexes)
+}
+
+/// Fetch the columns a `SQLite` index covers, in index order, via
+/// `pragma_index_info`.
+///
+/// The index name is bound as a parameter. `pragma_index_info` lists one row per
+/// indexed column ordered by `seqno`, so the returned columns preserve the
+/// index's declared order.
+async fn index_columns(pool: &SqlitePool, index: &str) -> Result<Vec<String>, StoreError> {
+    let rows = sqlx::query("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
+        .bind(index)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    let mut columns = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let name: Option<String> = row.try_get("name").map_err(|e| StoreError::Database(e.to_string()))?;
+        if let Some(name) = name {
+            columns.push(name);
+        }
+    }
+    Ok(columns)
 }
 
 /// Discover each tenant-scoped table's schema and compare it against the schema
@@ -472,23 +424,22 @@ fn pg_row_to_unique_index(row: &PgRow) -> Result<ActualUniqueIndex, StoreError> 
 ///
 /// The single [`check_schema`] comparison fails closed on any deviation -- a
 /// missing column, a primary key that is not the exact ordered contract, a key
-/// column with a folding type/collation/operator class, a deferrable key, or a
-/// unique index whose column set is not one the store itself generates -- because
+/// column with a non-TEXT affinity or folding collation, or a unique index whose
+/// column set is not one the store itself generates -- because
 /// `CREATE TABLE IF NOT EXISTS` preserves a pre-existing table that could
-/// silently lose data across tenants. The global schema version table holds no
-/// tenant data and is validated by value in [`check_schema_version`], not here.
-async fn validate_schema(pool: &sqlx::PgPool, tables: &TableNames) -> Result<(), StoreError> {
+/// silently lose data across tenants under `INSERT OR REPLACE`. The global schema
+/// version table holds no tenant data and is validated by value in
+/// [`check_schema_version`], not here.
+async fn validate_schema(pool: &SqlitePool, tables: &TableNames) -> Result<(), StoreError> {
     let expected = expected_tables(tables);
     let mut actuals = Vec::with_capacity(expected.len());
     for (table_name, _) in &expected {
-        let columns = table_column_names(pool, table_name).await?;
-        let (primary_key, primary_key_immediate) = table_primary_key(pool, table_name).await?;
-        let unique_indexes = table_extra_unique_indexes(pool, table_name).await?;
         actuals.push(ActualTable {
-            columns,
-            primary_key,
-            primary_key_immediate,
-            unique_indexes,
+            columns: table_column_names(pool, table_name).await?,
+            primary_key: table_primary_key(pool, table_name).await?,
+            // SQLite has no deferrable constraints; a primary key is always immediate.
+            primary_key_immediate: true,
+            unique_indexes: table_extra_unique_indexes(pool, table_name).await?,
         });
     }
 
@@ -501,7 +452,7 @@ async fn validate_schema(pool: &sqlx::PgPool, tables: &TableNames) -> Result<(),
 }
 
 /// Stamp or validate the schema version.
-async fn check_schema_version(pool: &sqlx::PgPool, tables: &TableNames) -> Result<(), StoreError> {
+async fn check_schema_version(pool: &SqlitePool, tables: &TableNames) -> Result<(), StoreError> {
     let vt = schema_version_table(&tables.responses);
     let select = format!("SELECT version FROM {vt}");
     let row: Option<i64> = sqlx::query_scalar(AssertSqlSafe(select.as_str()))
@@ -511,7 +462,7 @@ async fn check_schema_version(pool: &sqlx::PgPool, tables: &TableNames) -> Resul
 
     match row {
         None => {
-            let insert = format!("INSERT INTO {vt} (version) VALUES ($1) ON CONFLICT (version) DO NOTHING");
+            let insert = format!("INSERT OR IGNORE INTO {vt} (version) VALUES (?)");
             sqlx::query(AssertSqlSafe(insert.as_str()))
                 .bind(SCHEMA_VERSION)
                 .execute(pool)
@@ -522,7 +473,7 @@ async fn check_schema_version(pool: &sqlx::PgPool, tables: &TableNames) -> Resul
         Some(v) if v == SCHEMA_VERSION => Ok(()),
         Some(v) => Err(StoreError::Database(format!(
             "schema version mismatch in '{vt}': stored version {v}, \
-             expected {SCHEMA_VERSION}; database migration required"
+             expected {SCHEMA_VERSION}; database recreation required"
         ))),
     }
 }
@@ -532,24 +483,19 @@ async fn check_schema_version(pool: &sqlx::PgPool, tables: &TableNames) -> Resul
     clippy::too_many_lines,
     reason = "owner-scoped SQL methods keep all bindings explicit"
 )]
-impl ResponseStore for PostgresResponseStore {
+impl ResponseStore for SqliteResponseStore {
     async fn upsert_response(&self, record: &ResponseRecord) -> Result<(), StoreError> {
         let [response_object, input, messages] = self.compression.encode(record).await?;
 
         let sql = format!(
             "INSERT INTO {} \
              (id, tenant_id, owner_issuer, owner_subject, created_at, model, response_object, input, messages) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-             ON CONFLICT (id) DO UPDATE SET \
-             created_at = EXCLUDED.created_at, \
-             model = EXCLUDED.model, \
-             response_object = EXCLUDED.response_object, \
-             input = EXCLUDED.input, \
-             messages = EXCLUDED.messages \
-             WHERE {}.tenant_id = EXCLUDED.tenant_id \
-               AND {}.owner_issuer = EXCLUDED.owner_issuer \
-               AND {}.owner_subject = EXCLUDED.owner_subject",
-            self.tables.responses, self.tables.responses, self.tables.responses, self.tables.responses
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET created_at = excluded.created_at, model = excluded.model, \
+             response_object = excluded.response_object, input = excluded.input, messages = excluded.messages \
+             WHERE tenant_id = excluded.tenant_id AND owner_issuer = excluded.owner_issuer \
+               AND owner_subject = excluded.owner_subject",
+            self.tables.responses
         );
 
         let result = sqlx::query(AssertSqlSafe(sql.as_str()))
@@ -573,7 +519,7 @@ impl ResponseStore for PostgresResponseStore {
             "SELECT id, tenant_id, owner_issuer, owner_subject, created_at, model, \
                     response_object, input, messages \
              FROM {} \
-             WHERE id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4",
+             WHERE id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
             self.tables.responses
         );
 
@@ -593,20 +539,24 @@ impl ResponseStore for PostgresResponseStore {
     }
 
     async fn delete_response(&self, owner: &StateOwner, id: &str) -> Result<bool, StoreError> {
-        // Delete the response and any pending approvals it issued in one atomic
-        // transaction: a deleted response must leave no consumable approval
-        // behind and retain no sensitive tool arguments.
         let delete_response_sql = format!(
-            "DELETE FROM {} WHERE id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4",
+            "DELETE FROM {} WHERE id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
             self.tables.responses
         );
+        // Any pending approvals this response issued must go with it, so a
+        // deleted response leaves no consumable approval behind and retains no
+        // sensitive tool arguments. Both deletes commit atomically.
         let delete_approvals_sql = format!(
-            "DELETE FROM {} WHERE response_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4",
+            "DELETE FROM {} WHERE response_id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
             pending_approvals_table(&self.tables.responses)
         );
-        let mut tx = Box::pin(self.pool.begin())
+
+        let mut tx = self
+            .pool
+            .begin()
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
+
         let result = sqlx::query(AssertSqlSafe(delete_response_sql.as_str()))
             .bind(id)
             .bind(owner.tenant_id())
@@ -615,6 +565,7 @@ impl ResponseStore for PostgresResponseStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
+
         sqlx::query(AssertSqlSafe(delete_approvals_sql.as_str()))
             .bind(id)
             .bind(owner.tenant_id())
@@ -623,7 +574,9 @@ impl ResponseStore for PostgresResponseStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
+
         tx.commit().await.map_err(|e| StoreError::Database(e.to_string()))?;
+
         Ok(result.rows_affected() > 0)
     }
 
@@ -635,7 +588,6 @@ impl ResponseStore for PostgresResponseStore {
         self.get_conversation_record(owner, conversation_id).await
     }
 
-    #[expect(clippy::too_many_lines, reason = "sequential per-record bind within a transaction")]
     async fn record_pending_approvals(
         &self,
         owner: &StateOwner,
@@ -646,22 +598,11 @@ impl ResponseStore for PostgresResponseStore {
         if records.is_empty() {
             return Ok(());
         }
-        let table = pending_approvals_table(&self.tables.responses);
-        // Insert-if-absent: an approval already recorded (and possibly already
-        // consumed) must never be reset back to outstanding, so a re-emit is a
-        // no-op rather than a `consumed_at` reset that would enable replay.
-        let sql = format!(
-            "INSERT INTO {table} \
-             (tenant_id, owner_issuer, owner_subject, response_id, approval_id, server_label, tool_name, arguments, \
-             target_fingerprint, created_at, consumed_at) \
-             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11 \
-             WHERE EXISTS (SELECT 1 FROM {} WHERE id = $12 AND tenant_id = $13 \
-               AND owner_issuer = $14 AND owner_subject = $15) \
-             ON CONFLICT (response_id, approval_id) DO NOTHING",
-            self.tables.responses
-        );
+        let sql = pending_approval_insert_sql(&self.tables.responses);
 
-        let mut tx = Box::pin(self.pool.begin())
+        let mut tx = self
+            .pool
+            .begin()
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
@@ -707,37 +648,22 @@ impl ResponseStore for PostgresResponseStore {
         let upsert_sql = format!(
             "INSERT INTO {} \
              (id, tenant_id, owner_issuer, owner_subject, created_at, model, response_object, input, messages) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-             ON CONFLICT (id) DO UPDATE SET \
-             created_at = EXCLUDED.created_at, \
-             model = EXCLUDED.model, \
-             response_object = EXCLUDED.response_object, \
-             input = EXCLUDED.input, \
-             messages = EXCLUDED.messages \
-             WHERE {}.tenant_id = EXCLUDED.tenant_id \
-               AND {}.owner_issuer = EXCLUDED.owner_issuer \
-               AND {}.owner_subject = EXCLUDED.owner_subject",
-            self.tables.responses, self.tables.responses, self.tables.responses, self.tables.responses
-        );
-        let approvals_table = pending_approvals_table(&self.tables.responses);
-        // Insert-if-absent so a re-emit never resets an already-consumed row back
-        // to outstanding (which would enable replay).
-        let approval_sql = format!(
-            "INSERT INTO {approvals_table} \
-             (tenant_id, owner_issuer, owner_subject, response_id, approval_id, server_label, tool_name, arguments, \
-             target_fingerprint, created_at, consumed_at) \
-             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11 \
-             WHERE EXISTS (SELECT 1 FROM {} WHERE id = $12 AND tenant_id = $13 \
-               AND owner_issuer = $14 AND owner_subject = $15) \
-             ON CONFLICT (response_id, approval_id) DO NOTHING",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET created_at = excluded.created_at, model = excluded.model, \
+             response_object = excluded.response_object, input = excluded.input, messages = excluded.messages \
+             WHERE tenant_id = excluded.tenant_id AND owner_issuer = excluded.owner_issuer \
+               AND owner_subject = excluded.owner_subject",
             self.tables.responses
         );
+        let approval_sql = pending_approval_insert_sql(&self.tables.responses);
 
         // One transaction so the response and its pending approvals commit
         // together or not at all. Serialized against delete_response, this closes
         // the window where a concurrent DELETE could land between the two writes
         // and orphan an approval row still holding the tool arguments.
-        let mut tx = Box::pin(self.pool.begin())
+        let mut tx = self
+            .pool
+            .begin()
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
@@ -792,16 +718,14 @@ impl ResponseStore for PostgresResponseStore {
             return Ok(Vec::new());
         }
         let table = pending_approvals_table(&self.tables.responses);
-        // Owner occupies $1-$3 and the issuing response is $4.
-        let placeholders = (0..approval_ids.len())
-            .map(|i| format!("${}", i + 5))
+        let placeholders = std::iter::repeat_n("?", approval_ids.len())
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
             "SELECT approval_id, server_label, tool_name, arguments, target_fingerprint \
              FROM {table} \
-             WHERE tenant_id = $1 AND owner_issuer = $2 AND owner_subject = $3 \
-               AND response_id = $4 AND approval_id IN ({placeholders})"
+             WHERE tenant_id = ? AND owner_issuer = ? AND owner_subject = ? \
+               AND response_id = ? AND approval_id IN ({placeholders})"
         );
 
         let mut query = sqlx::query(AssertSqlSafe(sql.as_str()))
@@ -812,7 +736,8 @@ impl ResponseStore for PostgresResponseStore {
         for approval_id in approval_ids {
             query = query.bind(*approval_id);
         }
-        let rows = Box::pin(query.fetch_all(&self.pool))
+        let rows = query
+            .fetch_all(&self.pool)
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
@@ -835,18 +760,20 @@ impl ResponseStore for PostgresResponseStore {
         // so a zero-row update means the approval was already consumed rather
         // than never issued.
         let sql = format!(
-            "UPDATE {table} SET consumed_at = $1 \
-             WHERE tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4 \
-               AND response_id = $5 AND approval_id = $6 AND consumed_at IS NULL"
+            "UPDATE {table} SET consumed_at = ? \
+             WHERE tenant_id = ? AND owner_issuer = ? AND owner_subject = ? \
+               AND response_id = ? AND approval_id = ? AND consumed_at IS NULL"
         );
 
-        let mut tx = Box::pin(self.pool.begin())
+        let mut tx = self
+            .pool
+            .begin()
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
-        // Lock rows in a deterministic (id-sorted) order so two concurrent
-        // resumes overlapping in opposite order cannot deadlock (see trait doc);
-        // the returned index stays the caller-slice position.
+        // Lock rows in a deterministic (id-sorted) order, matching the Postgres
+        // backend for a uniform contract (SQLite serializes writers so it cannot
+        // itself deadlock); the returned index stays the caller-slice position.
         let mut ordered: Vec<(usize, &str)> = approval_ids.iter().copied().enumerate().collect();
         ordered.sort_unstable_by_key(|&(_, id)| id);
         for (index, approval_id) in ordered {
@@ -878,7 +805,7 @@ impl ResponseStore for PostgresResponseStore {
     reason = "async_trait counts the store method group as one expansion"
 )]
 #[async_trait]
-impl ConversationItemStore for PostgresResponseStore {
+impl ConversationItemStore for SqliteResponseStore {
     async fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), StoreError> {
         self.upsert_conversation_record(record).await
     }
@@ -891,8 +818,7 @@ impl ConversationItemStore for PostgresResponseStore {
     ) -> Result<bool, StoreError> {
         let messages = serde_json::to_string(messages).map_err(|e| StoreError::Serialization(e.to_string()))?;
         let sql = format!(
-            "UPDATE {} SET messages = $1 WHERE conversation_id = $2 AND tenant_id = $3 \
-             AND owner_issuer = $4 AND owner_subject = $5",
+            "UPDATE {} SET messages = ? WHERE conversation_id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
             self.tables.conversations
         );
 
@@ -917,8 +843,7 @@ impl ConversationItemStore for PostgresResponseStore {
     ) -> Result<bool, StoreError> {
         let metadata = serde_json::to_string(metadata).map_err(|e| StoreError::Serialization(e.to_string()))?;
         let sql = format!(
-            "UPDATE {} SET metadata = $1 WHERE conversation_id = $2 AND tenant_id = $3 \
-             AND owner_issuer = $4 AND owner_subject = $5",
+            "UPDATE {} SET metadata = ? WHERE conversation_id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
             self.tables.conversations
         );
 
@@ -946,8 +871,8 @@ impl ConversationItemStore for PostgresResponseStore {
             serde_json::to_string(expected_messages).map_err(|e| StoreError::Serialization(e.to_string()))?;
         let messages = serde_json::to_string(messages).map_err(|e| StoreError::Serialization(e.to_string()))?;
         let sql = format!(
-            "UPDATE {} SET messages = $1 WHERE conversation_id = $2 AND tenant_id = $3 \
-             AND owner_issuer = $4 AND owner_subject = $5 AND messages = $6",
+            "UPDATE {} SET messages = ? WHERE conversation_id = ? AND tenant_id = ? \
+             AND owner_issuer = ? AND owner_subject = ? AND messages = ?",
             self.tables.conversations
         );
         let result = sqlx::query(AssertSqlSafe(sql.as_str()))
@@ -982,16 +907,18 @@ impl ConversationItemStore for PostgresResponseStore {
             .as_deref()
             .ok_or_else(|| StoreError::Unavailable("items table not configured".to_owned()))?;
 
-        let mut tx = Box::pin(self.pool.begin())
+        let mut tx = self
+            .pool
+            .begin()
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
         let sql = format!(
             "INSERT INTO {table} \
              (item_id, tenant_id, owner_issuer, owner_subject, conversation_id, item_data, created_at, position) \
-             SELECT $1, tenant_id, owner_issuer, owner_subject, conversation_id, $2, $3, $4 \
+             SELECT ?, tenant_id, owner_issuer, owner_subject, conversation_id, ?, ?, ? \
              FROM {} \
-             WHERE conversation_id = $5 AND tenant_id = $6 AND owner_issuer = $7 AND owner_subject = $8",
+             WHERE conversation_id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
             self.tables.conversations
         );
 
@@ -1046,11 +973,11 @@ impl ConversationItemStore for PostgresResponseStore {
             let sql = format!(
                 "SELECT item_id, tenant_id, owner_issuer, owner_subject, conversation_id, item_data, created_at, position \
                  FROM {table} \
-                 WHERE tenant_id = $1 AND owner_issuer = $2 AND owner_subject = $3 AND conversation_id = $4 \
-                   AND (position {cursor_operator} $5 \
-                        OR (position = $6 AND item_id {cursor_operator} $7)) \
+                 WHERE tenant_id = ? AND owner_issuer = ? AND owner_subject = ? AND conversation_id = ? \
+                   AND (position {cursor_operator} ? \
+                        OR (position = ? AND item_id {cursor_operator} ?)) \
                  ORDER BY position {direction}, item_id {direction} \
-                 LIMIT $8"
+                 LIMIT ?"
             );
             sqlx::query(AssertSqlSafe(sql.as_str()))
                 .bind(owner.tenant_id())
@@ -1060,7 +987,7 @@ impl ConversationItemStore for PostgresResponseStore {
                 .bind(position)
                 .bind(position)
                 .bind(item_id)
-                .bind(i64::from(limit))
+                .bind(limit)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| StoreError::Database(e.to_string()))?
@@ -1068,16 +995,16 @@ impl ConversationItemStore for PostgresResponseStore {
             let sql = format!(
                 "SELECT item_id, tenant_id, owner_issuer, owner_subject, conversation_id, item_data, created_at, position \
                  FROM {table} \
-                 WHERE tenant_id = $1 AND owner_issuer = $2 AND owner_subject = $3 AND conversation_id = $4 \
+                 WHERE tenant_id = ? AND owner_issuer = ? AND owner_subject = ? AND conversation_id = ? \
                  ORDER BY position {direction}, item_id {direction} \
-                 LIMIT $5"
+                 LIMIT ?"
             );
             sqlx::query(AssertSqlSafe(sql.as_str()))
                 .bind(owner.tenant_id())
                 .bind(owner.issuer())
                 .bind(owner.subject())
                 .bind(conversation_id)
-                .bind(i64::from(limit))
+                .bind(limit)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| StoreError::Database(e.to_string()))?
@@ -1102,19 +1029,23 @@ impl ConversationItemStore for PostgresResponseStore {
             return Ok(Vec::new());
         }
 
+        let placeholders: String = std::iter::repeat_n("?", item_ids.len()).collect::<Vec<_>>().join(", ");
         let sql = format!(
             "SELECT item_id FROM {table} \
-             WHERE tenant_id = $1 AND owner_issuer = $2 AND owner_subject = $3 \
-               AND conversation_id = $4 AND item_id = ANY($5)"
+             WHERE tenant_id = ? AND owner_issuer = ? AND owner_subject = ? \
+               AND conversation_id = ? AND item_id IN ({placeholders})"
         );
 
-        let ids: Vec<&str> = item_ids.to_vec();
-        sqlx::query_scalar::<_, String>(AssertSqlSafe(sql.as_str()))
+        let mut query = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql.as_str()))
             .bind(owner.tenant_id())
             .bind(owner.issuer())
             .bind(owner.subject())
-            .bind(conversation_id)
-            .bind(&ids)
+            .bind(conversation_id);
+        for id in item_ids {
+            query = query.bind(*id);
+        }
+
+        query
             .fetch_all(&self.pool)
             .await
             .map_err(|e| StoreError::Database(e.to_string()))
@@ -1135,8 +1066,7 @@ impl ConversationItemStore for PostgresResponseStore {
         let sql = format!(
             "SELECT item_id, tenant_id, owner_issuer, owner_subject, conversation_id, item_data, created_at, position \
              FROM {table} \
-             WHERE item_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4 \
-               AND conversation_id = $5"
+             WHERE item_id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ? AND conversation_id = ?"
         );
 
         let row = sqlx::query(AssertSqlSafe(sql.as_str()))
@@ -1165,8 +1095,8 @@ impl ConversationItemStore for PostgresResponseStore {
             .ok_or_else(|| StoreError::Unavailable("items table not configured".to_owned()))?;
 
         let sql = format!(
-            "DELETE FROM {table} WHERE item_id = $1 AND tenant_id = $2 AND owner_issuer = $3 \
-             AND owner_subject = $4 AND conversation_id = $5"
+            "DELETE FROM {table} WHERE item_id = ? AND tenant_id = ? AND owner_issuer = ? \
+             AND owner_subject = ? AND conversation_id = ?"
         );
 
         let result = sqlx::query(AssertSqlSafe(sql.as_str()))
@@ -1196,8 +1126,7 @@ impl ConversationItemStore for PostgresResponseStore {
 
         let sql = format!(
             "SELECT position FROM {table} \
-             WHERE item_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4 \
-               AND conversation_id = $5"
+             WHERE item_id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ? AND conversation_id = ?"
         );
 
         let row = sqlx::query(AssertSqlSafe(sql.as_str()))
@@ -1224,7 +1153,7 @@ impl ConversationItemStore for PostgresResponseStore {
         let sql = format!(
             "SELECT COALESCE(MAX(position), 0) AS max_pos \
              FROM {table} \
-             WHERE tenant_id = $1 AND owner_issuer = $2 AND owner_subject = $3 AND conversation_id = $4"
+             WHERE tenant_id = ? AND owner_issuer = ? AND owner_subject = ? AND conversation_id = ?"
         );
 
         let row = sqlx::query(AssertSqlSafe(sql.as_str()))
@@ -1257,67 +1186,13 @@ impl ConversationItemStore for PostgresResponseStore {
             .ok_or_else(|| StoreError::Unavailable("items table not configured".to_owned()))?;
         let conv_table = &self.tables.conversations;
 
-        let mut tx = Box::pin(self.pool.begin())
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
-        let lock_sql = format!(
-            "SELECT 1 FROM {conv_table} \
-             WHERE conversation_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4 \
-             FOR UPDATE"
-        );
-        sqlx::query(AssertSqlSafe(lock_sql.as_str()))
-            .bind(conversation_id)
-            .bind(owner.tenant_id())
-            .bind(owner.issuer())
-            .bind(owner.subject())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        let max_sql = format!(
-            "SELECT COALESCE(MAX(position), 0) AS max_pos \
-             FROM {items_table} \
-             WHERE tenant_id = $1 AND owner_issuer = $2 AND owner_subject = $3 AND conversation_id = $4"
-        );
-        let max_row = sqlx::query(AssertSqlSafe(max_sql.as_str()))
-            .bind(owner.tenant_id())
-            .bind(owner.issuer())
-            .bind(owner.subject())
-            .bind(conversation_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-        let max_pos: i64 = max_row
-            .try_get("max_pos")
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        let insert_sql = format!(
-            "INSERT INTO {items_table} \
-             (item_id, tenant_id, owner_issuer, owner_subject, conversation_id, item_data, created_at, position) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
-        );
-        for (i, item) in items.iter().enumerate() {
-            let offset = i64::try_from(i).unwrap_or(i64::MAX);
-            let position = max_pos.saturating_add(1).saturating_add(offset);
-            let item_data =
-                serde_json::to_string(&item.item_data).map_err(|e| StoreError::Serialization(e.to_string()))?;
-
-            sqlx::query(AssertSqlSafe(insert_sql.as_str()))
-                .bind(&item.item_id)
-                .bind(owner.tenant_id())
-                .bind(owner.issuer())
-                .bind(owner.subject())
-                .bind(conversation_id)
-                .bind(&item_data)
-                .bind(item.created_at)
-                .bind(position)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| StoreError::Database(e.to_string()))?;
-        }
-
-        pg_rebuild_messages(&mut tx, items_table, conv_table, owner, conversation_id).await?;
+        sqlite_create_items_and_sync(&mut tx, items_table, conv_table, owner, conversation_id, items).await?;
 
         tx.commit().await.map_err(|e| StoreError::Database(e.to_string()))?;
         Ok(())
@@ -1336,54 +1211,118 @@ impl ConversationItemStore for PostgresResponseStore {
             .ok_or_else(|| StoreError::Unavailable("items table not configured".to_owned()))?;
         let conv_table = &self.tables.conversations;
 
-        let mut tx = Box::pin(self.pool.begin())
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
-        let lock_sql = format!(
-            "SELECT 1 FROM {conv_table} \
-             WHERE conversation_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4 \
-             FOR UPDATE"
-        );
-        sqlx::query(AssertSqlSafe(lock_sql.as_str()))
-            .bind(conversation_id)
-            .bind(owner.tenant_id())
-            .bind(owner.issuer())
-            .bind(owner.subject())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        let delete_sql = format!(
-            "DELETE FROM {items_table} \
-             WHERE item_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4 \
-               AND conversation_id = $5"
-        );
-        let result = sqlx::query(AssertSqlSafe(delete_sql.as_str()))
-            .bind(item_id)
-            .bind(owner.tenant_id())
-            .bind(owner.issuer())
-            .bind(owner.subject())
-            .bind(conversation_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        if result.rows_affected() == 0 {
-            tx.commit().await.map_err(|e| StoreError::Database(e.to_string()))?;
-            return Ok(false);
-        }
-
-        pg_rebuild_messages(&mut tx, items_table, conv_table, owner, conversation_id).await?;
+        let deleted =
+            sqlite_delete_item_and_sync(&mut tx, items_table, conv_table, owner, conversation_id, item_id).await?;
 
         tx.commit().await.map_err(|e| StoreError::Database(e.to_string()))?;
-        Ok(true)
+        Ok(deleted)
     }
 }
 
 // -----------------------------------------------------------------------------
 // Transactional Helpers
 // -----------------------------------------------------------------------------
+
+/// Body of [`SqliteResponseStore::create_items_and_sync_messages`].
+///
+/// Runs inside a `BEGIN IMMEDIATE` transaction managed by the caller.
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "transactional helper that threads table names and scope identifiers"
+)]
+async fn sqlite_create_items_and_sync(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    items_table: &str,
+    conv_table: &str,
+    owner: &StateOwner,
+    conversation_id: &str,
+    items: &[ConversationItemRecord],
+) -> Result<(), StoreError> {
+    let max_sql = format!(
+        "SELECT COALESCE(MAX(position), 0) AS max_pos \
+         FROM {items_table} \
+         WHERE tenant_id = ? AND owner_issuer = ? AND owner_subject = ? AND conversation_id = ?"
+    );
+    let max_row = sqlx::query(AssertSqlSafe(max_sql.as_str()))
+        .bind(owner.tenant_id())
+        .bind(owner.issuer())
+        .bind(owner.subject())
+        .bind(conversation_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    let max_pos: i64 = max_row
+        .try_get("max_pos")
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+
+    let insert_sql = format!(
+        "INSERT INTO {items_table} \
+         (item_id, tenant_id, owner_issuer, owner_subject, conversation_id, item_data, created_at, position) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    for (i, item) in items.iter().enumerate() {
+        let offset = i64::try_from(i).unwrap_or(i64::MAX);
+        let position = max_pos.saturating_add(1).saturating_add(offset);
+        let item_data = serde_json::to_string(&item.item_data).map_err(|e| StoreError::Serialization(e.to_string()))?;
+
+        sqlx::query(AssertSqlSafe(insert_sql.as_str()))
+            .bind(&item.item_id)
+            .bind(owner.tenant_id())
+            .bind(owner.issuer())
+            .bind(owner.subject())
+            .bind(conversation_id)
+            .bind(&item_data)
+            .bind(item.created_at)
+            .bind(position)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+    }
+
+    sqlite_rebuild_messages(tx, items_table, conv_table, owner, conversation_id).await
+}
+
+/// Body of [`SqliteResponseStore::delete_item_and_sync_messages`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "transactional helper that threads table names and scope identifiers"
+)]
+async fn sqlite_delete_item_and_sync(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    items_table: &str,
+    conv_table: &str,
+    owner: &StateOwner,
+    conversation_id: &str,
+    item_id: &str,
+) -> Result<bool, StoreError> {
+    let delete_sql = format!(
+        "DELETE FROM {items_table} WHERE item_id = ? AND tenant_id = ? AND owner_issuer = ? \
+         AND owner_subject = ? AND conversation_id = ?"
+    );
+    let result = sqlx::query(AssertSqlSafe(delete_sql.as_str()))
+        .bind(item_id)
+        .bind(owner.tenant_id())
+        .bind(owner.issuer())
+        .bind(owner.subject())
+        .bind(conversation_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+
+    sqlite_rebuild_messages(tx, items_table, conv_table, owner, conversation_id).await?;
+    Ok(true)
+}
 
 /// Read all item JSON values and overwrite the conversation message cache.
 ///
@@ -1393,8 +1332,8 @@ impl ConversationItemStore for PostgresResponseStore {
 /// run this inside a transaction, so the propagated error rolls back
 /// any item mutations made in the same transaction.
 #[expect(clippy::too_many_lines, reason = "sequential query pipeline within a transaction")]
-async fn pg_rebuild_messages(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+async fn sqlite_rebuild_messages(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     items_table: &str,
     conv_table: &str,
     owner: &StateOwner,
@@ -1402,7 +1341,7 @@ async fn pg_rebuild_messages(
 ) -> Result<(), StoreError> {
     let select_sql = format!(
         "SELECT item_data FROM {items_table} \
-         WHERE tenant_id = $1 AND owner_issuer = $2 AND owner_subject = $3 AND conversation_id = $4 \
+         WHERE tenant_id = ? AND owner_issuer = ? AND owner_subject = ? AND conversation_id = ? \
          ORDER BY position ASC, item_id ASC"
     );
     let rows = sqlx::query(AssertSqlSafe(select_sql.as_str()))
@@ -1428,8 +1367,8 @@ async fn pg_rebuild_messages(
         .map_err(|e| StoreError::Serialization(e.to_string()))?;
 
     let update_sql = format!(
-        "UPDATE {conv_table} SET messages = $1 \
-         WHERE conversation_id = $2 AND tenant_id = $3 AND owner_issuer = $4 AND owner_subject = $5"
+        "UPDATE {conv_table} SET messages = ? \
+         WHERE conversation_id = ? AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?"
     );
     let updated = sqlx::query(AssertSqlSafe(update_sql.as_str()))
         .bind(&messages_json)
@@ -1453,6 +1392,23 @@ async fn pg_rebuild_messages(
 // -----------------------------------------------------------------------------
 // Row Conversion
 // -----------------------------------------------------------------------------
+
+/// Build the insert-if-absent SQL for recording pending approvals.
+///
+/// `ON CONFLICT DO NOTHING` guarantees a re-emit never resets `consumed_at` back
+/// to outstanding, so an already-consumed approval can never be replayed.
+fn pending_approval_insert_sql(responses_table: &str) -> String {
+    let table = pending_approvals_table(responses_table);
+    format!(
+        "INSERT INTO {table} \
+         (tenant_id, owner_issuer, owner_subject, response_id, approval_id, server_label, tool_name, arguments, \
+         target_fingerprint, created_at, consumed_at) \
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? \
+         WHERE EXISTS (SELECT 1 FROM {responses_table} WHERE id = ? AND tenant_id = ? \
+           AND owner_issuer = ? AND owner_subject = ?) \
+         ON CONFLICT (response_id, approval_id) DO NOTHING"
+    )
+}
 
 /// Turn an owner-filtered upsert no-op into a bounded, identity-free error.
 fn require_owner_preserving_write(rows_affected: u64, resource: &str) -> Result<(), StoreError> {
@@ -1483,7 +1439,7 @@ fn require_matching_item_scope(
 }
 
 /// Convert a sqlx row to a [`PendingApprovalRecord`].
-fn row_to_pending_approval_record(row: &PgRow) -> Result<PendingApprovalRecord, StoreError> {
+fn row_to_pending_approval_record(row: &sqlx::sqlite::SqliteRow) -> Result<PendingApprovalRecord, StoreError> {
     Ok(PendingApprovalRecord {
         approval_id: row
             .try_get("approval_id")
@@ -1504,7 +1460,7 @@ fn row_to_pending_approval_record(row: &PgRow) -> Result<PendingApprovalRecord, 
 }
 
 /// Convert a sqlx row to a [`ResponseRecord`].
-fn row_to_response_record(row: &PgRow) -> Result<ResponseRecord, StoreError> {
+fn row_to_response_record(row: &sqlx::sqlite::SqliteRow) -> Result<ResponseRecord, StoreError> {
     let response_object_json: Vec<u8> = row
         .try_get("response_object")
         .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -1527,7 +1483,7 @@ fn row_to_response_record(row: &PgRow) -> Result<ResponseRecord, StoreError> {
 }
 
 /// Convert a sqlx row to a [`ConversationItemRecord`].
-fn row_to_conversation_item_record(row: &PgRow) -> Result<ConversationItemRecord, StoreError> {
+fn row_to_conversation_item_record(row: &sqlx::sqlite::SqliteRow) -> Result<ConversationItemRecord, StoreError> {
     let item_data_json: String = row
         .try_get("item_data")
         .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -1551,7 +1507,7 @@ fn row_to_conversation_item_record(row: &PgRow) -> Result<ConversationItemRecord
 }
 
 /// Convert a sqlx row to a [`ConversationRecord`].
-fn row_to_conversation_record(row: &PgRow) -> Result<ConversationRecord, StoreError> {
+fn row_to_conversation_record(row: &sqlx::sqlite::SqliteRow) -> Result<ConversationRecord, StoreError> {
     let messages_json: String = row
         .try_get("messages")
         .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -1573,7 +1529,7 @@ fn row_to_conversation_record(row: &PgRow) -> Result<ConversationRecord, StoreEr
 }
 
 /// Decode and validate the immutable owner columns in a persisted row.
-fn row_to_owner(row: &PgRow) -> Result<StateOwner, StoreError> {
+fn row_to_owner(row: &sqlx::sqlite::SqliteRow) -> Result<StateOwner, StoreError> {
     let tenant_id: String = row
         .try_get("tenant_id")
         .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -1598,84 +1554,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connect_options_defaults_to_verify_full() {
-        let options = pg_connect_options("postgres://user:pass@example.com/db", &PgTlsConfig::default())
-            .expect("URL without sslmode should parse");
-
+    fn memory_url_short_form() {
         assert!(
-            matches!(options.get_ssl_mode(), PgSslMode::VerifyFull),
-            "default ssl_mode should be VerifyFull"
+            is_memory_database_url("sqlite::memory:"),
+            "short-form memory URL should be detected"
         );
     }
 
     #[test]
-    fn connect_options_default_overrides_url_sslmode() {
-        let options = pg_connect_options(
-            "postgres://user:pass@example.com/db?sslmode=prefer",
-            &PgTlsConfig::default(),
-        )
-        .expect("URL with sslmode should parse");
-
+    fn memory_url_slash_form() {
         assert!(
-            matches!(options.get_ssl_mode(), PgSslMode::VerifyFull),
-            "default VerifyFull should override URL sslmode"
+            is_memory_database_url("sqlite://:memory:"),
+            "slash-form memory URL should be detected"
         );
     }
 
     #[test]
-    fn connect_options_uses_explicit_sslmode_override() {
-        let tls = PgTlsConfig {
-            ssl_mode: Some(SslMode::Disable),
-            ..PgTlsConfig::default()
-        };
-        let options = pg_connect_options("postgres://user:pass@example.com/db?sslmode=verify-full", &tls)
-            .expect("URL with override should parse");
+    fn memory_url_forms_with_query_parameters() {
+        for url in [
+            ":memory:",
+            "sqlite://file::memory:",
+            "sqlite://%3Amemory%3A",
+            "sqlite::memory:?cache=shared",
+            "sqlite://:memory:?cache=shared",
+        ] {
+            assert!(
+                is_memory_database_url(url),
+                "memory URL with query parameters should be detected: {url}"
+            );
+        }
+    }
 
+    #[test]
+    fn memory_url_query_param() {
         assert!(
-            matches!(options.get_ssl_mode(), PgSslMode::Disable),
-            "explicit ssl_mode should override URL sslmode"
+            is_memory_database_url("sqlite:///test.db?mode=memory"),
+            "mode=memory query param should be detected"
         );
     }
 
     #[test]
-    fn connect_options_applies_ssl_root_cert() {
-        let tls = PgTlsConfig {
-            ssl_root_cert: Some("/path/to/ca.pem"),
-            ..PgTlsConfig::default()
-        };
-        pg_connect_options("postgres://user:pass@example.com/db", &tls).expect("ssl_root_cert path should be accepted");
+    fn memory_url_query_param_not_first() {
+        assert!(
+            is_memory_database_url("sqlite:///test.db?cache=shared&mode=memory"),
+            "mode=memory should be detected even when not the first query param"
+        );
     }
 
     #[test]
-    fn connect_options_applies_client_cert_and_key() {
-        let tls = PgTlsConfig {
-            ssl_mode: Some(SslMode::VerifyFull),
-            ssl_root_cert: Some("/path/to/ca.pem"),
-            ssl_client_cert: Some("/path/to/client.pem"),
-            ssl_client_key: Some("/path/to/client.key"),
-            require_certificate_authentication: false,
-        };
-        pg_connect_options("postgres://user@example.com/db", &tls).expect("client cert/key paths should be accepted");
+    fn memory_url_whitespace_trimmed() {
+        assert!(
+            is_memory_database_url("  sqlite::memory:  "),
+            "leading/trailing whitespace should be trimmed"
+        );
     }
 
     #[test]
-    fn connect_options_cert_auth_preserves_addressing() {
-        // The compliance-profile rebuild must retain host, port, username, and
-        // database while dropping password sources.
-        let tls = PgTlsConfig {
-            ssl_mode: Some(SslMode::VerifyFull),
-            ssl_root_cert: Some("/path/to/ca.pem"),
-            ssl_client_cert: Some("/path/to/client.pem"),
-            ssl_client_key: Some("/path/to/client.key"),
-            require_certificate_authentication: true,
-        };
-        let options = pg_connect_options("postgres://cert-user@example.com:6543/praxis", &tls)
-            .expect("compliance profile URL should parse");
+    fn file_url_is_not_memory() {
+        assert!(
+            !is_memory_database_url("sqlite:///path/to/db.sqlite"),
+            "file-backed URL should not be detected as memory"
+        );
+    }
 
-        assert_eq!(options.get_host(), "example.com");
-        assert_eq!(options.get_port(), 6543);
-        assert_eq!(options.get_username(), "cert-user");
-        assert_eq!(options.get_database(), Some("praxis"));
-        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+    #[test]
+    fn file_url_with_mode_rwc_is_not_memory() {
+        assert!(
+            !is_memory_database_url("sqlite:///test.db?mode=rwc"),
+            "mode=rwc should not be detected as memory"
+        );
+    }
+
+    #[test]
+    fn empty_url_is_not_memory() {
+        assert!(
+            !is_memory_database_url(""),
+            "empty URL should not be detected as memory"
+        );
     }
 }

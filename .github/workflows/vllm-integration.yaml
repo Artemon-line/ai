@@ -13,10 +13,14 @@ on:
   push:
     branches: [main]
     paths:
+      - "store/**"
+      - "store-backends/**"
+      - "store-lifecycle/**"
       - "apis/src/openai/responses/**"
       - "apis/src/openai/conversations/**"
       - "apis/src/openai/sse/**"
       - "apis/src/store/**"
+      - "apis/src/service/**"
       - "server/**"
       - "tests/integration/sdk/openai/**"
       - "tests/utils/examples/conversations_tenant_proxy.rs"
@@ -130,10 +134,14 @@ jobs:
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: |
           CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
+            'store/' \
+            'store-backends/' \
+            'store-lifecycle/' \
             'apis/src/openai/responses/' \
             'apis/src/openai/conversations/' \
             'apis/src/openai/sse/' \
             'apis/src/store/' \
+            'apis/src/service/' \
             'server/' \
             'tests/integration/sdk/openai/' \
             'tests/utils/examples/conversations_tenant_proxy.rs' \

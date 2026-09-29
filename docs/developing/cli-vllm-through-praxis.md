@@ -151,7 +151,8 @@ local response store used by the native Codex example and is harmless for the
 other paths:
 
 ```console
-cargo build -p praxis-ai-proxy --features store-sqlite
+cargo build -p praxis-ai-proxy --no-default-features \
+  --features standard,openai-all,store-sqlite
 ./target/debug/praxis-ai -c praxis-vllm.yaml > /tmp/praxis-vllm.log 2>&1 &
 export PRAXIS_PID=$!
 ```
