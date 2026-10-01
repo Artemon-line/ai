@@ -955,6 +955,46 @@ class ResponsesWitnessHandler(BaseHTTPRequestHandler):
         self._forward()
 
 
+class NativeCompactionBackendHandler(BaseHTTPRequestHandler):
+    """Deterministic native Responses backend for SDK rehydration coverage."""
+
+    requests: ClassVar[list[dict]] = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b""
+        request_body = json.loads(body)
+        type(self).requests.append(request_body)
+        request_number = len(type(self).requests)
+        output = []
+        if request_number == 1:
+            output = [
+                {
+                    "type": "compaction",
+                    "id": "cmp_provider_sdk",
+                    "encrypted_content": "provider-opaque-state",
+                }
+            ]
+        payload = json.dumps(
+            {
+                "id": f"resp_provider_compaction_sdk_{request_number}",
+                "object": "response",
+                "created_at": 1,
+                "model": VLLM_MODEL,
+                "status": "completed",
+                "output": output,
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
 class SimulatorBackendHandler(BaseHTTPRequestHandler):
     """Record Praxis requests and script hosted-tool Chat responses.
 
@@ -1742,6 +1782,59 @@ def witness_replay_limited_tool_client(tmp_path_factory, request, search_server)
     yield from _witness_proxy_session(
         tmp_path_factory, request, search_server, max_event_bytes=1
     )
+
+
+@pytest.fixture()
+def provider_compaction_client(tmp_path_factory, request):
+    """Function-scoped native Responses backend with a provider compaction."""
+    NativeCompactionBackendHandler.requests = []
+    requests = NativeCompactionBackendHandler.requests
+    backend_port = _free_port()
+    server = HTTPServer(("127.0.0.1", backend_port), NativeCompactionBackendHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    port = _free_port()
+    db_dir = tmp_path_factory.mktemp("responses-provider-compaction")
+    db_path = str(db_dir / "responses.db")
+    config_path = _write_witness_config(port, db_path, backend_port)
+    binary = _find_binary()
+
+    log_path = str(db_dir / "praxis.log")
+    log_file = open(log_path, "w")
+    started = False
+    proc = subprocess.Popen(
+        [binary, "-c", config_path],
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        _wait_for_proxy(port, proc, log_path)
+        started = True
+        client = OpenAI(
+            base_url=f"http://127.0.0.1:{port}/v1",
+            api_key="test",
+            default_headers=TRUSTED_OWNER_HEADERS,
+            max_retries=0,
+            timeout=300,
+        )
+        yield client, requests
+    finally:
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        log_file.close()
+        server.shutdown()
+        if not started or request.session.testsfailed > 0:
+            with open(log_path) as f:
+                print(
+                    f"\n=== Provider compaction Praxis logs ===\n{f.read()}",
+                    file=sys.stderr,
+                )
+        os.unlink(config_path)
 
 
 def _reasoning_capture_session(tmp_path_factory, request):
@@ -2715,6 +2808,34 @@ class TestOpenAIResponsesVLLM:
             ResponsesWitnessHandler.terminal_gate = None
             if stream is not None:
                 stream.close()
+
+    def test_sdk_replays_provider_compaction_on_previous_response_id(
+        self, provider_compaction_client
+    ):
+        """Native provider compaction survives SDK-driven local rehydration."""
+        client, forwarded = provider_compaction_client
+        first = client.responses.create(
+            model=VLLM_MODEL,
+            input="Start the provider-compaction conversation.",
+            store=True,
+        )
+        second = client.responses.create(
+            model=VLLM_MODEL,
+            input="Continue after provider compaction.",
+            previous_response_id=first.id,
+            store=True,
+        )
+
+        assert second.status == "completed"
+        assert len(forwarded) == 2, forwarded
+        replayed = forwarded[1]
+        assert replayed.get("previous_response_id") is None, replayed
+        assert any(
+            item.get("type") == "compaction"
+            and item.get("id") == "cmp_provider_sdk"
+            and item.get("encrypted_content") == "provider-opaque-state"
+            for item in replayed.get("input", [])
+        ), replayed
 
     def test_truncation_forwarded_to_backend_through_rehydration(
         self, witness_backend_client
