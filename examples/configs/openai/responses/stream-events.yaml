@@ -151,8 +151,8 @@ filter_chains:
               # openai_responses_proxy buffers the request body, so IRR runs
               # that phase before load balancing; an earlier placement never
               # sees ctx.upstream. timeout_secs is an absolute deadline from
-              # the first SSE chunk (default 300). Each chunk recaps leftover
-              # budget onto the live body through cap_stream_read_timeout.
+              # the first SSE chunk (default 300). Each chunk recaps that
+              # absolute cutoff onto the live body through cap_stream_deadline.
               - filter: openai_stream_events
                 # max_tool_call_argument_bytes: 1048576
                 # Aggregate accumulation budget bounding total process memory even
