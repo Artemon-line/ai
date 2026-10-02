@@ -848,6 +848,7 @@ class ResponsesWitnessHandler(BaseHTTPRequestHandler):
         pass
 
     def _forward(self):
+        """Capture the request and serve a synthetic or forwarded response."""
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
         request_body = None
@@ -859,6 +860,9 @@ class ResponsesWitnessHandler(BaseHTTPRequestHandler):
                 pass
         if request_body and request_body.get("background") is True:
             self._send_background_response(request_body)
+            return
+        if request_body and request_body.get("prompt") is not None:
+            self._send_prompt_response(request_body)
             return
         if request_body and request_body.get("model") in {
             "sdk-conversation-stream",
@@ -916,6 +920,48 @@ class ResponsesWitnessHandler(BaseHTTPRequestHandler):
                     "type": "response.completed",
                     "sequence_number": 1,
                     "response": completed,
+                },
+            ]
+            payload = b"".join(
+                f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+                for event in events
+            ) + b"data: [DONE]\n\n"
+            content_type = "text/event-stream"
+        else:
+            payload = json.dumps(response).encode()
+            content_type = "application/json"
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+        self.wfile.flush()
+
+    def _send_prompt_response(self, request_body):
+        """Serve an OpenAI-owned prompt-template response."""
+        response = {
+            "id": f"resp_sdk_prompt_{time.time_ns()}",
+            "object": "response",
+            "created_at": int(time.time()),
+            "model": request_body.get("model", "gpt-5"),
+            "status": "completed",
+            "background": False,
+            "output": [],
+        }
+
+        if request_body.get("stream"):
+            created = {**response, "status": "in_progress"}
+            events = [
+                {
+                    "type": "response.created",
+                    "sequence_number": 0,
+                    "response": created,
+                },
+                {
+                    "type": "response.completed",
+                    "sequence_number": 1,
+                    "response": response,
                 },
             ]
             payload = b"".join(
@@ -3392,6 +3438,69 @@ class TestOpenAIResponsesVLLM:
             True,
         }
 
+    def test_prompt_template_policy_follows_provider_binding(
+        self, witness_backend_client
+    ):
+        """Managed routes reject prompt templates; OpenAI-owned routes preserve them."""
+        client, forwarded = witness_backend_client
+        prompt = {
+            "id": "pmpt_sdk_provider_policy",
+            "version": "2",
+            "variables": {"name": "Ada"},
+        }
+
+        with pytest.raises(BadRequestError) as exc_info:
+            client.responses.create(
+                model=VLLM_MODEL,
+                input="This managed request must not reach inference.",
+                prompt=prompt,
+                store=False,
+            )
+
+        error = exc_info.value
+        assert error.status_code == 400
+        assert error.body == {
+            "code": "invalid_request_error",
+            "message": (
+                "prompt templates are supported only for OpenAI-owned upstreams"
+            ),
+            "param": None,
+            "type": "invalid_request_error",
+        }
+
+        response = client.responses.create(
+            model="gpt-5",
+            input="Use the OpenAI-owned prompt template.",
+            prompt=prompt,
+            store=False,
+        )
+        assert response.status == "completed"
+
+        stream = client.responses.create(
+            model="gpt-5",
+            input="Stream the OpenAI-owned prompt template.",
+            prompt=prompt,
+            store=False,
+            stream=True,
+        )
+        events = list(stream)
+        assert [event.type for event in events] == [
+            "response.created",
+            "response.completed",
+        ]
+        assert events[-1].response.status == "completed"
+
+        prompt_creates = [
+            body for body in forwarded if body.get("prompt") is not None
+        ]
+        assert len(prompt_creates) == 2
+        assert {body.get("stream", False) for body in prompt_creates} == {
+            False,
+            True,
+        }
+        assert all(body["model"] == "gpt-5" for body in prompt_creates)
+        assert all(body["prompt"] == prompt for body in prompt_creates)
+
     @pytest.mark.critical_vllm
     @requires_real_inference
     def test_doc_extract_inline_file_to(self, openai_client):
@@ -3852,6 +3961,24 @@ class TestResponsesReasoningVLLM:
 class TestResponsesCompactionVLLM:
     """Live coverage for automatic context-management compaction."""
 
+    def test_prompt_template_is_rejected_by_combined_request_filter(
+        self, compact_client
+    ):
+        with pytest.raises(BadRequestError) as exc_info:
+            compact_client.responses.create(
+                model=VLLM_MODEL,
+                input="This prompt reference must not reach inference.",
+                prompt={"id": "pmpt_compact_rejected"},
+                store=False,
+            )
+
+        error = exc_info.value
+        assert error.status_code == 400
+        assert error.type == "invalid_request_error"
+        assert error.body["message"] == (
+            "prompt templates are supported only for OpenAI-owned upstreams"
+        )
+
     def test_invalid_compaction_threshold_is_rejected(self, compact_client):
         with pytest.raises(BadRequestError) as exc_info:
             compact_client.responses.create(
@@ -4137,33 +4264,6 @@ class TestResponsesToChatCompletionsVLLM:
             assert exc_info.value.status_code == 400, "unsupported output must return 400"
             assert reason in str(exc_info.value), "error message must name the unsupported field"
             assert not forwarded, "unsupported output must not reach the Chat backend"
-
-    def test_prompt_template_is_rejected_before_chat_backend(
-        self, chat_streaming_client
-    ):
-        with pytest.raises(BadRequestError) as exc_info:
-            chat_streaming_client.responses.create(
-                model=VLLM_MODEL,
-                input="This prompt reference must not reach vLLM.",
-                prompt={"id": "pmpt_sdk_rejected"},
-                store=False,
-            )
-
-        error = exc_info.value
-        assert error.status_code == 400, "prompt template rejection must return 400"
-        assert (
-            error.type == "invalid_request_error"
-        ), "prompt template rejection must be an invalid_request_error"
-        assert error.param is None, "prompt template rejection must not set param"
-        assert error.body == {
-            "message": (
-                "Responses `prompt` has no Chat Completions representation: "
-                "got object, this adapter supports only `prompt` null"
-            ),
-            "type": "invalid_request_error",
-            "param": None,
-            "code": "invalid_request_error",
-        }, "prompt template rejection must return the full invalid_request_error envelope"
 
     def test_finite_response_round_trip(self, chat_streaming_client):
         response = chat_streaming_client.responses.create(
