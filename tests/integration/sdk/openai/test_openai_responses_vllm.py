@@ -8416,7 +8416,10 @@ class _FileUrlStubHandler(BaseHTTPRequestHandler):
     credentialed outbound chain never runs for client-supplied URLs.
     """
 
+    requests: ClassVar[int] = 0
+
     def do_GET(self):
+        type(self).requests += 1
         if self.headers.get("x-file-callout") is not None:
             self.send_response(403)
             self.end_headers()
@@ -8491,6 +8494,7 @@ def file_resolve_stub_env(tmp_path_factory, request):
     ``(client, files_stub, backend, file_url)``.
     """
     _FilesApiStubHandler.callout_headers = []
+    _FileUrlStubHandler.requests = 0
     _FileResolveBackendHandler.captured = []
 
     files_port = _free_port()
@@ -8604,6 +8608,44 @@ class TestFileResolveOutboundChain:
         assert files_stub.callout_headers, "Files API stub should receive callouts"
         assert all(h == "file-resolve" for h in files_stub.callout_headers), (
             files_stub.callout_headers
+        )
+
+    def test_repeated_file_references_reuse_source_specific_cache(
+        self, file_resolve_stub_env
+    ):
+        client, files_stub, backend, file_url = file_resolve_stub_env
+
+        response = client.responses.create(
+            model="gpt-4.1",
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_file", "file_id": _FILE_RESOLVE_ID},
+                        {"type": "input_file", "file_id": _FILE_RESOLVE_ID},
+                        {"type": "input_file", "file_url": file_url},
+                        {"type": "input_file", "file_url": file_url},
+                    ],
+                }
+            ],
+            store=False,
+        )
+
+        assert response.status == "completed", "file resolution should complete"
+        assert len(backend.captured) == 1, "one Responses request should reach the backend"
+        content = backend.captured[0]["input"][0]["content"]
+        assert [part["file_data"] for part in content] == [
+            _FILE_RESOLVE_B64,
+            _FILE_RESOLVE_B64,
+            f"data:text/plain;base64,{_FILE_RESOLVE_B64}",
+            f"data:text/plain;base64,{_FILE_RESOLVE_B64}",
+        ], "repeated file IDs and URLs should inline in input order"
+        assert len(files_stub.callout_headers) == 2, (
+            "one metadata and one content fetch should serve both file_id parts"
+        )
+        assert _FileUrlStubHandler.requests == 1, (
+            "repeated file_url parts should share one fetch"
         )
 
 
