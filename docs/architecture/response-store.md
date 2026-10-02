@@ -49,11 +49,15 @@ persistence profiles:
 | SQLite-only | `standard,openai-all,store-sqlite` | SQLite |
 | Combined | `standard,openai-all,store-all` | PostgreSQL and SQLite |
 
+The released container image builds `full,store-sqlite`, so it carries both
+backends. SQLite configurations use a database path under the image's writable
+state directory, as described below.
+
 The backend-free profile is an internal composition and testing lane. A config
 that selects an implementation absent from the binary is rejected during
 pipeline construction with an actionable backend-unavailable diagnostic.
 
-SQLite examples require an explicit build:
+SQLite examples require an explicit build from source:
 
 ```console
 cargo run -p praxis-ai-proxy --no-default-features \
@@ -69,6 +73,16 @@ the cached pool; changed configurations retire the previous pool after drain.
 Expanding an active in-memory SQLite Responses store into a combined Responses
 and Conversations topology requires a restart. A replacement pool would be a
 different transient database and would otherwise lose the active store state.
+
+The examples use a relative `database_url` such as
+`sqlite://responses.db?mode=rwc`, which resolves against the working directory.
+In the container image the working directory is the root-owned `/etc/praxis`,
+so point `database_url` at the writable state directory instead:
+`sqlite:///var/lib/praxis/responses.db?mode=rwc`. Mount a volume there to
+keep the database across container restarts.
+
+A configuration that selects a backend absent from the binary is rejected
+while the filter pipeline is constructed, before the proxy serves traffic.
 
 ## Request Phases
 
