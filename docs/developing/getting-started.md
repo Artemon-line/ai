@@ -55,16 +55,16 @@ podman run --detach --name inference-sim --network host \
   --model=praxis-test-model --served-model-name=praxis-test-model --mode=echo --max-model-len=8192 --skip-tool-validation --port=8000
 ```
 
-To run tests against the OpenAI SDK 2.x lane:
+To run tests against the OpenAI SDK 2.x lane (adding `-k "not file_search"` when running without local OGX vector search):
 ```console
 uv run --with "openai<3" tests/integration/sdk/openai/test_openai_conversations.py -v
-VLLM_MODEL=praxis-test-model VLLM_TEST_BACKEND=simulator uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py -s -m "not real_inference and not vllm_compat"
+VLLM_MODEL=praxis-test-model VLLM_TEST_BACKEND=simulator uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py -s -m "not real_inference and not vllm_compat" -k "not file_search"
 ```
 
 To run tests against the OpenAI SDK 3.x lane:
 ```console
 uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_conversations.py -v
-VLLM_MODEL=praxis-test-model VLLM_TEST_BACKEND=simulator uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py -s -m "not real_inference and not vllm_compat"
+VLLM_MODEL=praxis-test-model VLLM_TEST_BACKEND=simulator uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py -s -m "not real_inference and not vllm_compat" -k "not file_search"
 ```
 
 You can also pass `--sdk-version=2.x` or `--sdk-version=3.x` to enforce version verification during pytest startup.
