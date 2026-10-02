@@ -56,12 +56,15 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use self::config::{CompactFilterConfig, ValidatedConfig, build_config};
-use super::{error::responses_error_rejection, is_explicit_compact_request, state::ResponsesState};
+use super::{
+    error::responses_error_rejection,
+    is_explicit_compact_request,
+    state::{ResponsesState, mark_local_compaction_item},
+};
 use crate::{
     callout_policy::OnFailure,
-    service::responses::ResponsesService,
     state_owner::{StateOwner, require_state_owner},
-    store::{ResponseRecord, ResponseStoreRegistry},
+    store::{OwnerScopedResponseStore, ResponseRecord, ResponseStoreRegistry},
     subrequest::{self, SubRequest, SubRequestClient},
 };
 
@@ -290,7 +293,7 @@ impl CompactFilter {
         };
         replace_messages(
             state,
-            build_compaction_item(&compaction_id, summary, &self.config.summary_prefix),
+            &build_compaction_item(&compaction_id, summary, &self.config.summary_prefix),
         );
     }
 
@@ -329,12 +332,12 @@ impl CompactFilter {
         body: &Option<Bytes>,
     ) -> Result<FilterAction, FilterAction> {
         let req = parse_compact_request_body(body)?;
-        let (service, owner) = resolve_service_and_owner(ctx)?;
-        let messages = collect_compact_messages(&service, &req).await?;
+        let (store, owner) = resolve_store_and_owner(ctx)?;
+        let messages = collect_compact_messages(&store, &req).await?;
         let writer = CompactionWriter {
             filter: self,
             ctx,
-            service: &service,
+            store: &store,
             owner: &owner,
             req: &req,
             messages: &messages,
@@ -612,16 +615,17 @@ fn parse_compact_input(input: Option<&Value>) -> Vec<Value> {
     }
 }
 
-/// Look up the service and immutable owner from the request context.
-fn resolve_service_and_owner(ctx: &HttpFilterContext<'_>) -> Result<(ResponsesService, StateOwner), FilterAction> {
+/// Look up the store and immutable owner from the request context.
+fn resolve_store_and_owner(
+    ctx: &HttpFilterContext<'_>,
+) -> Result<(OwnerScopedResponseStore, StateOwner), FilterAction> {
     let owner = require_state_owner(ctx)?.clone();
-    let service = ctx
+    let store = ctx
         .extensions
         .get::<ResponseStoreRegistry>()
         .and_then(|r| r.get_scoped("default", &owner))
-        .map(ResponsesService::new)
         .ok_or_else(|| reject_compact(500, "server_error", "response store not available"))?;
-    Ok((service, owner))
+    Ok((store, owner))
 }
 
 /// Assemble the conversation to compact from stored history and inline input.
@@ -629,12 +633,12 @@ fn resolve_service_and_owner(ctx: &HttpFilterContext<'_>) -> Result<(ResponsesSe
 /// When `previous_response_id` is set, its stored messages are loaded
 /// first and the inline `input` items are appended after.
 async fn collect_compact_messages(
-    service: &ResponsesService,
+    store: &OwnerScopedResponseStore,
     req: &ExplicitCompactRequest,
 ) -> Result<Vec<Value>, FilterAction> {
     let mut messages = Vec::new();
     if let Some(prev) = req.previous_response_id.as_deref() {
-        let record = fetch_response(service, prev).await?;
+        let record = fetch_response(store, prev).await?;
         messages.extend(stored_message_array(record.messages));
     }
     messages.extend(req.input.iter().cloned());
@@ -645,8 +649,8 @@ async fn collect_compact_messages(
 }
 
 /// Fetch a stored response by id.
-async fn fetch_response(service: &ResponsesService, response_id: &str) -> Result<ResponseRecord, FilterAction> {
-    match service.get(response_id).await {
+async fn fetch_response(store: &OwnerScopedResponseStore, response_id: &str) -> Result<ResponseRecord, FilterAction> {
+    match store.get_response(response_id).await {
         Ok(Some(r)) => Ok(r),
         Ok(None) => Err(reject_compact(404, "not_found_error", "response not found")),
         Err(e) => {
@@ -671,8 +675,8 @@ struct CompactionWriter<'a> {
     filter: &'a CompactFilter,
     /// Request context, used for id and timestamp generation.
     ctx: &'a HttpFilterContext<'a>,
-    /// Responses service the compaction record is persisted through.
-    service: &'a ResponsesService,
+    /// Responses store the compaction record is persisted through.
+    store: &'a OwnerScopedResponseStore,
     /// Immutable owner the record is scoped to.
     owner: &'a StateOwner,
     /// The parsed explicit compact request (supplies the response model).
@@ -687,13 +691,11 @@ impl CompactionWriter<'_> {
     /// compaction item.
     async fn persist_compacted(&self, summary: &Summarization) -> Result<Value, FilterAction> {
         let compaction_id = format!("compact_{}", self.ctx.id_generator.generate(self.ctx.time_source));
-        let item = Value::Array(vec![build_compaction_item(
-            &compaction_id,
-            &summary.content,
-            &self.filter.config.summary_prefix,
-        )]);
+        let item = build_compaction_item(&compaction_id, &summary.content, &self.filter.config.summary_prefix);
+        let stored_item = mark_local_compaction_item(&item);
         let usage = build_compaction_usage(self.messages, Some(summary), &self.filter.config.tiktoken_encoding);
-        self.persist_response(item.clone(), item, usage).await
+        self.persist_response(Value::Array(vec![item]), Value::Array(vec![stored_item]), usage)
+            .await
     }
 
     /// Persist an uncompacted no-op when the summarization callout fails under
@@ -741,7 +743,7 @@ impl CompactionWriter<'_> {
             input: stored_messages.clone(),
             messages: stored_messages,
         };
-        self.service.upsert(&record).await.map_err(|e| {
+        self.store.upsert_response(&record).await.map_err(|e| {
             warn!(error = %e, "failed to persist explicit compaction response");
             reject_compact(500, "server_error", "failed to persist compaction response")
         })?;
@@ -1001,17 +1003,18 @@ fn build_compaction_item(id: &str, summary: &str, summary_prefix: &str) -> Value
 /// matches `state.input`. File resolution and document extraction
 /// rewrite that tail in place and leave `state.input` as the original
 /// client payload, so compaction must not rebuild from `state.input`.
-fn replace_messages(state: &mut ResponsesState, compaction_item: Value) {
+fn replace_messages(state: &mut ResponsesState, compaction_item: &Value) {
     let input_len = state.input.len();
     let message_tail = split_current_turn(&mut state.messages, input_len);
     let persisted_tail = split_current_turn(&mut state.persisted_messages, input_len);
+    let persisted_compaction_item = mark_local_compaction_item(compaction_item);
 
     state.messages.clear();
     state.messages.push(compaction_item.clone());
     state.messages.extend(message_tail);
 
     state.persisted_messages.clear();
-    state.persisted_messages.push(compaction_item);
+    state.persisted_messages.push(persisted_compaction_item);
     state.persisted_messages.extend(persisted_tail);
 }
 
