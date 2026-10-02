@@ -1690,8 +1690,9 @@ jobs:
           PRAXIS_QUALIFICATION_RESULTS: ${{ runner.temp }}/qualification-responses-cases.json
         run: |
           set +e
-          uv run tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
+          uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
             -p qualification_plugin -k "not live_tavily_web_search_returns_real_sources" \
+            --sdk-version=3.x \
             2>&1 | tee "$RUNNER_TEMP/qualification-responses-pytest.log"
           exit "${PIPESTATUS[0]}"
 
@@ -1712,8 +1713,9 @@ jobs:
           PRAXIS_QUALIFICATION_RESULTS: ${{ runner.temp }}/qualification-credentialed-cases.json
         run: |
           set +e
-          uv run tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
+          uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
             -p qualification_plugin -k live_tavily_web_search_returns_real_sources \
+            --sdk-version=3.x \
             2>&1 | tee "$RUNNER_TEMP/qualification-credentialed-pytest.log"
           exit "${PIPESTATUS[0]}"
 
