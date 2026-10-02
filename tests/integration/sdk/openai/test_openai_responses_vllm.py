@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "httpx>=0.27,<1",
-#     "openai>=2.0,<3",
+#     "openai>=2.0",
 #     "pytest>=8.0,<9",
 # ]
 # ///
@@ -37,6 +37,7 @@ from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 import httpx
+import openai
 import pytest
 from openai import BadRequestError, NotFoundError, OpenAI
 
@@ -208,12 +209,18 @@ def _persist_config(config: str) -> str:
     return path
 
 
-def _write_config(praxis_port: int, db_path: str, compression: bool = False) -> str:
+def _write_config(
+    praxis_port: int,
+    db_path: str,
+    compression: bool = False,
+    backend_endpoint: str | None = None,
+) -> str:
     with open(CONFIG_PATH) as f:
         config = f.read()
 
+    endpoint = backend_endpoint if backend_endpoint else _vllm_endpoint()
     config = config.replace("127.0.0.1:8080", f"127.0.0.1:{praxis_port}")
-    config = config.replace("127.0.0.1:3001", _vllm_endpoint())
+    config = config.replace("127.0.0.1:3001", endpoint)
     config = config.replace("127.0.0.1:9999", _ogx_endpoint())
     # The unified gateway wires openai_web_search into the IRR; its config
     # resolves ${WEB_SEARCH_API_KEY} at startup and fails closed when unset.
@@ -1183,12 +1190,12 @@ def backend_endpoint():
 
 
 @pytest.fixture(scope="session")
-def praxis_proxy(tmp_path_factory, request):
+def praxis_proxy(tmp_path_factory, request, backend_endpoint):
     """Start a Praxis proxy backed by vLLM for the test session."""
     port = _free_port()
     db_dir = tmp_path_factory.mktemp("responses")
     db_path = str(db_dir / "responses.db")
-    config_path = _write_config(port, db_path)
+    config_path = _write_config(port, db_path, backend_endpoint=backend_endpoint)
     binary = _find_binary()
 
     log_path = str(db_dir / "praxis.log")
@@ -1222,12 +1229,12 @@ def praxis_proxy(tmp_path_factory, request):
 
 
 @pytest.fixture(scope="session")
-def compression_proxy(tmp_path_factory, request):
+def compression_proxy(tmp_path_factory, request, backend_endpoint):
     """Start a Praxis proxy whose response store has zstd compression enabled."""
     port = _free_port()
     db_dir = tmp_path_factory.mktemp("responses-compression")
     db_path = str(db_dir / "responses.db")
-    config_path = _write_config(port, db_path, compression=True)
+    config_path = _write_config(port, db_path, compression=True, backend_endpoint=backend_endpoint)
     binary = _find_binary()
 
     log_path = str(db_dir / "praxis.log")

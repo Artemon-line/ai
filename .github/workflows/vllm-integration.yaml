@@ -263,12 +263,19 @@ jobs:
             exit 1
           fi
 
-      - name: Run Conversations SDK integration tests
+      - name: Run Conversations SDK integration tests (SDK 2.x)
         env:
           PRAXIS_TENANT_TEST_BIN: target/debug/examples/conversations_tenant_proxy
           VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
         run: |
-          uv run tests/integration/sdk/openai/test_openai_conversations.py -s
+          uv run --with "openai<3" tests/integration/sdk/openai/test_openai_conversations.py -s --sdk-version=2.x
+
+      - name: Run Conversations SDK integration tests (SDK 3.x)
+        env:
+          PRAXIS_TENANT_TEST_BIN: target/debug/examples/conversations_tenant_proxy
+          VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
+        run: |
+          uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_conversations.py -s --sdk-version=3.x
 
       - name: Wait for OGX readiness
         run: |
@@ -299,14 +306,32 @@ jobs:
           done
           echo "OGX is ready"
 
-      - name: Run simulated Responses integration tests
+      - name: Run simulated Responses integration tests (SDK 2.x)
         env:
           VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
           VLLM_TEST_BACKEND: simulator
         run: |
           test_cmd=(
-            uv run tests/integration/sdk/openai/test_openai_responses_vllm.py
-            -s -m "not real_inference and not vllm_compat"
+            uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py
+            -s -m "not real_inference and not vllm_compat" --sdk-version=2.x
+          )
+          if "${test_cmd[@]}"; then
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" != "merge_group" ]; then
+            exit 1
+          fi
+          echo "::warning::Retrying failed simulator tests once for the merge queue"
+          "${test_cmd[@]}" --last-failed --last-failed-no-failures none
+
+      - name: Run simulated Responses integration tests (SDK 3.x)
+        env:
+          VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
+          VLLM_TEST_BACKEND: simulator
+        run: |
+          test_cmd=(
+            uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py
+            -s -m "not real_inference and not vllm_compat" --sdk-version=3.x
           )
           if "${test_cmd[@]}"; then
             exit 0
@@ -1722,13 +1747,21 @@ jobs:
             exit 1
           fi
 
-      - name: Run Conversations SDK integration tests (PostgreSQL store)
+      - name: Run Conversations SDK integration tests (PostgreSQL store, SDK 2.x)
         env:
           DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
           PRAXIS_TENANT_TEST_BIN: target/debug/examples/conversations_tenant_proxy
           VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
         run: |
-          uv run tests/integration/sdk/openai/test_openai_conversations.py -s
+          uv run --with "openai<3" tests/integration/sdk/openai/test_openai_conversations.py -s --sdk-version=2.x
+
+      - name: Run Conversations SDK integration tests (PostgreSQL store, SDK 3.x)
+        env:
+          DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
+          PRAXIS_TENANT_TEST_BIN: target/debug/examples/conversations_tenant_proxy
+          VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
+        run: |
+          uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_conversations.py -s --sdk-version=3.x
 
       - name: Wait for OGX readiness
         run: |
@@ -1759,15 +1792,34 @@ jobs:
           done
           echo "OGX is ready"
 
-      - name: Run simulated Responses integration tests (PostgreSQL store)
+      - name: Run simulated Responses integration tests (PostgreSQL store, SDK 2.x)
         env:
           DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
           VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
           VLLM_TEST_BACKEND: simulator
         run: |
           test_cmd=(
-            uv run tests/integration/sdk/openai/test_openai_responses_vllm.py
-            -s -m "not real_inference and not vllm_compat"
+            uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py
+            -s -m "not real_inference and not vllm_compat" --sdk-version=2.x
+          )
+          if "${test_cmd[@]}"; then
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" != "merge_group" ]; then
+            exit 1
+          fi
+          echo "::warning::Retrying failed simulator tests once for the merge queue"
+          "${test_cmd[@]}" --last-failed --last-failed-no-failures none
+
+      - name: Run simulated Responses integration tests (PostgreSQL store, SDK 3.x)
+        env:
+          DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
+          VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
+          VLLM_TEST_BACKEND: simulator
+        run: |
+          test_cmd=(
+            uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py
+            -s -m "not real_inference and not vllm_compat" --sdk-version=3.x
           )
           if "${test_cmd[@]}"; then
             exit 0
