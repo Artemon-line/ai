@@ -1697,6 +1697,7 @@ jobs:
           exit "${PIPESTATUS[0]}"
 
       - name: Run complete live vLLM Responses suite (SDK 3.x)
+        if: ${{ always() && !cancelled() && steps.qualification_build.outcome == 'success' && steps.qualification_vllm_ready.outcome == 'success' && steps.qualification_ogx_ready.outcome == 'success' }}
         env:
           DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
           VLLM_TEST_BACKEND: live
@@ -1780,7 +1781,9 @@ jobs:
             ${{ runner.temp }}/qualification-raw.json
             ${{ runner.temp }}/qualification-responses-cases.json
             ${{ runner.temp }}/qualification-credentialed-cases.json
+            ${{ runner.temp }}/qualification-responses-sdk2-pytest.log
             ${{ runner.temp }}/qualification-responses-pytest.log
+            ${{ runner.temp }}/qualification-credentialed-sdk2-pytest.log
             ${{ runner.temp }}/qualification-credentialed-pytest.log
             ${{ runner.temp }}/qualification-vllm.log
             ${{ runner.temp }}/qualification-postgres.log

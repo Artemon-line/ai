@@ -116,6 +116,15 @@ def pytest_sessionfinish(session, exitstatus):
               "sdk_lane": sdk_lane} for nodeid in _selected]
     deselected = [{**item, "sdk_version": sdk_version, "sdk_lane": sdk_lane} for item in _deselected]
 
+    dependencies = {
+        name: installed_version(name)
+        for name in ("openai", "anthropic", "pytest", "httpx")
+    }
+    if sdk_version:
+        dependencies["openai"] = sdk_version
+    if sdk_lane and sdk_version:
+        dependencies[f"openai_{sdk_lane}"] = sdk_version
+
     path = Path(destination)
     if path.exists():
         try:
@@ -123,11 +132,19 @@ def pytest_sessionfinish(session, exitstatus):
             existing_selected = existing.get("selected", [])
             existing_deselected = existing.get("deselected", [])
             existing_exit_code = existing.get("exit_code", 0)
+            existing_deps = existing.get("dependencies", {})
             cases = existing_selected + cases
             deselected = existing_deselected + deselected
             exitstatus = max(int(exitstatus), int(existing_exit_code))
-        except Exception:
-            pass
+            merged_deps = {**existing_deps, **dependencies}
+            existing_openai = existing_deps.get("openai")
+            current_openai = dependencies.get("openai")
+            if existing_openai and current_openai and existing_openai != current_openai:
+                if current_openai not in existing_openai:
+                    merged_deps["openai"] = f"{existing_openai}, {current_openai}"
+            dependencies = merged_deps
+        except Exception as err:
+            raise RuntimeError(f"Failed to read or merge existing qualification results from {path}: {err}") from err
 
     data = {
         "exit_code": int(exitstatus),
@@ -135,10 +152,7 @@ def pytest_sessionfinish(session, exitstatus):
         "finished_at": timestamp(),
         "selected": cases,
         "deselected": deselected,
-        "dependencies": {
-            name: installed_version(name)
-            for name in ("openai", "anthropic", "pytest", "httpx")
-        },
+        "dependencies": dependencies,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")

@@ -277,6 +277,31 @@ class QualificationTest(unittest.TestCase):
         self.assertIn("OpenAI Python `2.9.0`", notes)
         self.assertIn("Credentialed Tools: skipped", notes)
 
+    def test_qualification_plugin_merges_lanes_and_fails_on_corrupt_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "qualification.json"
+            session = SimpleNamespace(
+                config=SimpleNamespace(_openai_sdk_version="2.9.0", _openai_sdk_lane="2.x")
+            )
+            with mock.patch.dict("os.environ", {"PRAXIS_QUALIFICATION_RESULTS": str(destination)}):
+                plugin.pytest_sessionfinish(session, 0)
+                data_lane1 = json.loads(destination.read_text(encoding="utf-8"))
+                self.assertEqual(data_lane1["dependencies"]["openai"], "2.9.0")
+                self.assertEqual(data_lane1["dependencies"]["openai_2.x"], "2.9.0")
+
+                session_lane2 = SimpleNamespace(
+                    config=SimpleNamespace(_openai_sdk_version="3.0.0", _openai_sdk_lane="3.x")
+                )
+                plugin.pytest_sessionfinish(session_lane2, 0)
+                data_lane2 = json.loads(destination.read_text(encoding="utf-8"))
+                self.assertEqual(data_lane2["dependencies"]["openai"], "2.9.0, 3.0.0")
+                self.assertEqual(data_lane2["dependencies"]["openai_2.x"], "2.9.0")
+                self.assertEqual(data_lane2["dependencies"]["openai_3.x"], "3.0.0")
+
+                destination.write_text("invalid json {")
+                with self.assertRaises(RuntimeError):
+                    plugin.pytest_sessionfinish(session, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
