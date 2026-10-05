@@ -302,6 +302,21 @@ class QualificationTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     plugin.pytest_sessionfinish(session, 0)
 
+    def test_qualification_plugin_merges_prerelease_and_release_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "qualification.json"
+            rc_session = SimpleNamespace(
+                config=SimpleNamespace(_openai_sdk_version="3.0.0rc1", _openai_sdk_lane="3.x")
+            )
+            rel_session = SimpleNamespace(
+                config=SimpleNamespace(_openai_sdk_version="3.0.0", _openai_sdk_lane="3.x")
+            )
+            with mock.patch.dict("os.environ", {"PRAXIS_QUALIFICATION_RESULTS": str(destination)}):
+                plugin.pytest_sessionfinish(rc_session, 0)
+                plugin.pytest_sessionfinish(rel_session, 0)
+                data = json.loads(destination.read_text(encoding="utf-8"))
+                self.assertEqual(data["dependencies"]["openai"], "3.0.0rc1, 3.0.0")
+
 
 if __name__ == "__main__":
     unittest.main()

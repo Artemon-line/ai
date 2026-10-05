@@ -140,8 +140,10 @@ def pytest_sessionfinish(session, exitstatus):
             existing_openai = existing_deps.get("openai")
             current_openai = dependencies.get("openai")
             if existing_openai and current_openai and existing_openai != current_openai:
-                if current_openai not in existing_openai:
-                    merged_deps["openai"] = f"{existing_openai}, {current_openai}"
+                tokens = [token.strip() for token in existing_openai.split(",") if token.strip()]
+                if current_openai.strip() not in tokens:
+                    tokens.append(current_openai.strip())
+                    merged_deps["openai"] = ", ".join(tokens)
             dependencies = merged_deps
         except Exception as err:
             raise RuntimeError(f"Failed to read or merge existing qualification results from {path}: {err}") from err
