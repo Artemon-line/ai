@@ -115,6 +115,20 @@ def pytest_sessionfinish(session, exitstatus):
               "sdk_version": sdk_version,
               "sdk_lane": sdk_lane} for nodeid in _selected]
     deselected = [{**item, "sdk_version": sdk_version, "sdk_lane": sdk_lane} for item in _deselected]
+
+    path = Path(destination)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing_selected = existing.get("selected", [])
+            existing_deselected = existing.get("deselected", [])
+            existing_exit_code = existing.get("exit_code", 0)
+            cases = existing_selected + cases
+            deselected = existing_deselected + deselected
+            exitstatus = max(int(exitstatus), int(existing_exit_code))
+        except Exception:
+            pass
+
     data = {
         "exit_code": int(exitstatus),
         "started_at": _started_at,
@@ -126,7 +140,6 @@ def pytest_sessionfinish(session, exitstatus):
             for name in ("openai", "anthropic", "pytest", "httpx")
         },
     }
-    path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")

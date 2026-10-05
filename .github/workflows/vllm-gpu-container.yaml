@@ -281,8 +281,8 @@ jobs:
           VLLM_TEST_BACKEND: live
           VLLM_MODEL: ${{ env.INFERENCE_MODEL }}
         run: |
-          uv run tests/integration/sdk/openai/test_openai_responses_vllm.py \
-            -s -m "critical_vllm"
+          uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py \
+            -s -m "critical_vllm" --sdk-version=3.x
 
       - name: vLLM container logs
         if: failure()

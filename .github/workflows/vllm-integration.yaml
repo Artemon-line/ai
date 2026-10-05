@@ -1682,7 +1682,21 @@ jobs:
           done
           echo "OGX is ready"
 
-      - name: Run complete live vLLM Responses suite
+      - name: Run complete live vLLM Responses suite (SDK 2.x)
+        env:
+          DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
+          VLLM_TEST_BACKEND: live
+          VLLM_MODEL: ${{ env.VLLM_GPU_MODEL }}
+          PRAXIS_QUALIFICATION_RESULTS: ${{ runner.temp }}/qualification-responses-cases.json
+        run: |
+          set +e
+          uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
+            -p qualification_plugin -k "not live_tavily_web_search_returns_real_sources" \
+            --sdk-version=2.x \
+            2>&1 | tee "$RUNNER_TEMP/qualification-responses-sdk2-pytest.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Run complete live vLLM Responses suite (SDK 3.x)
         env:
           DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
           VLLM_TEST_BACKEND: live
@@ -1696,7 +1710,30 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/qualification-responses-pytest.log"
           exit "${PIPESTATUS[0]}"
 
-      - name: Run credentialed live Tavily web search
+      - name: Run credentialed live Tavily web search (SDK 2.x)
+        if: ${{ always() && !cancelled() && steps.qualification_ogx_ready.outcome == 'success' }}
+        env:
+          DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
+          # The generated YAML keeps the ${TAVILY_API_KEY} reference, so the
+          # secret is consumed only by this one-test process and is never written
+          # into or printed with the config.
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          # Scheduled/manual full runs are controlled environments and must prove
+          # the real provider path. Labeled fork PRs do not receive secrets, so
+          # they retain deterministic coverage and skip only this credentialed test.
+          PRAXIS_TEST_REQUIRE_LIVE_WEB_SEARCH: ${{ github.event_name != 'pull_request' && '1' || '0' }}
+          VLLM_TEST_BACKEND: live
+          VLLM_MODEL: ${{ env.VLLM_GPU_MODEL }}
+          PRAXIS_QUALIFICATION_RESULTS: ${{ runner.temp }}/qualification-credentialed-cases.json
+        run: |
+          set +e
+          uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
+            -p qualification_plugin -k live_tavily_web_search_returns_real_sources \
+            --sdk-version=2.x \
+            2>&1 | tee "$RUNNER_TEMP/qualification-credentialed-sdk2-pytest.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Run credentialed live Tavily web search (SDK 3.x)
         if: ${{ always() && !cancelled() && steps.qualification_ogx_ready.outcome == 'success' }}
         env:
           DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
