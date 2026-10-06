@@ -16,8 +16,14 @@ use serde_json::{Map, Value, json};
 use tracing::warn;
 
 // -----------------------------------------------------------------------------
-// Tool-call Slots
+// Tool-call Slots & Bounds
 // -----------------------------------------------------------------------------
+
+/// Maximum candidate choices allowed in a single stream.
+pub(crate) const MAX_STREAM_CANDIDATES: u64 = 64;
+
+/// Maximum tool-call slots allowed per candidate in a single stream.
+pub(crate) const MAX_STREAM_TOOL_CALL_SLOTS: usize = 128;
 
 /// Disambiguator mixed into minted OpenAI `tool_calls[].id` values.
 ///
@@ -107,7 +113,7 @@ impl StreamTranslateState {
 
     /// Set the number of terminal candidates required before EOF is successful.
     pub(crate) fn set_expected_candidate_count(&mut self, count: u64) {
-        self.expected_candidate_count = count.max(1);
+        self.expected_candidate_count = count.clamp(1, MAX_STREAM_CANDIDATES);
     }
 
     /// Enable the OpenAI trailing usage chunk for this stream.
@@ -721,6 +727,12 @@ fn build_stream_choice(
     if should_ignore_finished_candidate(candidate, candidate_index, state)? {
         return Ok(None);
     }
+    if candidate_index >= state.expected_candidate_count {
+        return Err(format!(
+            "candidate index {candidate_index} exceeds expected candidate count ({})",
+            state.expected_candidate_count
+        ));
+    }
     state.seen_candidates.insert(candidate_index);
     let parts = candidate
         .get("content")
@@ -887,7 +899,7 @@ fn stream_tool_call_delta(
     fc: &Map<String, Value>,
     slots: &mut Vec<ToolCallSlot>,
 ) -> Result<Option<Value>, String> {
-    let index = resolve_stream_slot(fc, slots);
+    let index = resolve_stream_slot(fc, slots)?;
     #[expect(
         clippy::indexing_slicing,
         reason = "resolve_stream_slot returns an existing index or the slot just pushed"
@@ -969,16 +981,22 @@ fn attach_first_stream_tool_call_fields(call: &mut Map<String, Value>, slot: &To
 }
 
 /// Find or create the slot for this `functionCall`.
-fn resolve_stream_slot(fc: &Map<String, Value>, slots: &mut Vec<ToolCallSlot>) -> usize {
+fn resolve_stream_slot(fc: &Map<String, Value>, slots: &mut Vec<ToolCallSlot>) -> Result<usize, String> {
     if let Some(gid) = google_function_call_id(fc)
         && let Some(index) = slots.iter().position(|s| s.google_id.as_deref() == Some(gid))
     {
-        return index;
+        return Ok(index);
     }
 
     let name = fc.get("name").and_then(Value::as_str).unwrap_or("");
     if name.is_empty() && google_function_call_id(fc).is_none() && !slots.is_empty() {
-        return slots.len() - 1;
+        return Ok(slots.len() - 1);
+    }
+
+    if slots.len() >= MAX_STREAM_TOOL_CALL_SLOTS {
+        return Err(format!(
+            "exceeded maximum tool-call slots per candidate ({MAX_STREAM_TOOL_CALL_SLOTS})"
+        ));
     }
 
     let google_id = google_function_call_id(fc).map(ToOwned::to_owned);
@@ -992,7 +1010,7 @@ fn resolve_stream_slot(fc: &Map<String, Value>, slots: &mut Vec<ToolCallSlot>) -
         thought_sent: None,
         emitted_args: None,
     });
-    slots.len() - 1
+    Ok(slots.len() - 1)
 }
 
 /// Build the `delta` object for a streaming chunk.
@@ -1974,6 +1992,7 @@ mod tests {
     #[test]
     fn stream_preserves_all_candidates_and_their_indices() {
         let mut state = new_stream_state(1);
+        state.set_expected_candidate_count(2);
         let parsed = translate_stream(
             &mut state,
             br#"{"candidates":[{"index":0,"content":{"parts":[{"text":"first"}]}},{"index":1,"content":{"parts":[{"text":"second"}]},"finishReason":"STOP"}]}"#,
@@ -2001,6 +2020,7 @@ mod tests {
     #[test]
     fn stream_multi_candidate_frame_requires_explicit_indices() {
         let mut state = new_stream_state(1);
+        state.set_expected_candidate_count(2);
         let err = transform_stream_chunk(
             br#"{"candidates":[{"index":1,"content":{"parts":[{"text":"second"}]}},{"content":{"parts":[{"text":"first"}]}}]}"#,
             "gemini-1.5-pro",
@@ -2014,6 +2034,7 @@ mod tests {
     #[test]
     fn stream_multi_candidate_frame_rejects_duplicate_indices() {
         let mut state = new_stream_state(1);
+        state.set_expected_candidate_count(2);
         let err = transform_stream_chunk(
             br#"{"candidates":[{"index":1,"content":{"parts":[{"text":"one"}]}},{"index":1,"content":{"parts":[{"text":"two"}]}}]}"#,
             "gemini-1.5-pro",
@@ -2027,6 +2048,7 @@ mod tests {
     #[test]
     fn stream_late_single_candidate_uses_explicit_index() {
         let mut state = new_stream_state(1);
+        state.set_expected_candidate_count(2);
         let parsed = translate_stream(
             &mut state,
             br#"{"candidates":[{"index":1,"content":{"parts":[{"text":"continued"}]}}]}"#,
@@ -2080,6 +2102,7 @@ mod tests {
     #[test]
     fn stream_tracks_first_delta_and_tool_slots_per_candidate() {
         let mut state = new_stream_state(1);
+        state.set_expected_candidate_count(2);
         let first = translate_stream(
             &mut state,
             br#"{"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"first"}}}]}}]}"#,
@@ -2206,5 +2229,60 @@ mod tests {
             br#"{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}]}"#,
         );
         assert_eq!(parsed["choices"][0]["finish_reason"], "content_filter");
+    }
+
+    #[test]
+    fn stream_candidate_index_exceeding_expected_count_is_rejected() {
+        let mut state = new_stream_state(1); // n: 1 -> expected_candidate_count = 1
+        let data = br#"{"candidates":[{"index":1,"content":{"parts":[{"text":"hello"}]}}]}"#;
+        let err = transform_stream_chunk(data, "gemini-2.0-flash", &mut state).unwrap_err();
+        assert!(
+            err.contains("candidate index 1 exceeds expected candidate count (1)"),
+            "expected candidate index error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stream_tool_call_slots_exceeding_max_limit_is_rejected() {
+        let mut state = new_stream_state(1);
+        for i in 0..MAX_STREAM_TOOL_CALL_SLOTS {
+            let data = json!({
+                "candidates": [{
+                    "index": 0,
+                    "content": {
+                        "parts": [{
+                            "functionCall": {
+                                "id": format!("id-{i}"),
+                                "name": "f",
+                                "args": {}
+                            }
+                        }]
+                    }
+                }]
+            })
+            .to_string();
+            transform_stream_chunk(data.as_bytes(), "gemini-2.0-flash", &mut state).unwrap();
+        }
+
+        let overflow_data = json!({
+            "candidates": [{
+                "index": 0,
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "id": "id-overflow",
+                            "name": "f",
+                            "args": {}
+                        }
+                    }]
+                }
+            }]
+        })
+        .to_string();
+        let err = transform_stream_chunk(overflow_data.as_bytes(), "gemini-2.0-flash", &mut state).unwrap_err();
+        assert!(
+            err.contains("exceeded maximum tool-call slots per candidate"),
+            "expected slot limit error, got: {err}"
+        );
     }
 }
