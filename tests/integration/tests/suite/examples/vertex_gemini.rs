@@ -177,7 +177,7 @@ fn vertex_gemini_streaming_rejects_candidate_index_exceeding_requested_n() {
         "out-of-bounds candidate must prevent [DONE] sentinel"
     );
     assert!(
-        body.contains("APIError"),
+        body.contains("server_error"),
         "rejected stream must end with terminal error frame"
     );
 
@@ -220,7 +220,7 @@ fn vertex_gemini_streaming_rejects_excess_tool_call_slots() {
         "tool slot overflow must prevent [DONE] sentinel"
     );
     assert!(
-        body.contains("APIError"),
+        body.contains("server_error"),
         "tool slot overflow must end with terminal error frame"
     );
 
