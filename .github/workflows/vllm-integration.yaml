@@ -269,12 +269,19 @@ jobs:
             exit 1
           fi
 
-      - name: Run Conversations SDK integration tests
+      - name: Run Conversations SDK integration tests (SDK 2.x)
         env:
           PRAXIS_TENANT_TEST_BIN: target/debug/examples/conversations_tenant_proxy
           VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
         run: |
-          uv run tests/integration/sdk/openai/test_openai_conversations.py -s
+          uv run --with "openai<3" tests/integration/sdk/openai/test_openai_conversations.py -s --sdk-version=2.x
+
+      - name: Run Conversations SDK integration tests (SDK 3.x)
+        env:
+          PRAXIS_TENANT_TEST_BIN: target/debug/examples/conversations_tenant_proxy
+          VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
+        run: |
+          uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_conversations.py -s --sdk-version=3.x
 
       - name: Wait for OGX readiness
         run: |
@@ -305,14 +312,32 @@ jobs:
           done
           echo "OGX is ready"
 
-      - name: Run simulated Responses integration tests
+      - name: Run simulated Responses integration tests (SDK 2.x)
         env:
           VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
           VLLM_TEST_BACKEND: simulator
         run: |
           test_cmd=(
-            uv run tests/integration/sdk/openai/test_openai_responses_vllm.py
-            -s -m "not real_inference and not vllm_compat"
+            uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py
+            -s -m "not real_inference and not vllm_compat" --sdk-version=2.x
+          )
+          if "${test_cmd[@]}"; then
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" != "merge_group" ]; then
+            exit 1
+          fi
+          echo "::warning::Retrying failed simulator tests once for the merge queue"
+          "${test_cmd[@]}" --last-failed --last-failed-no-failures none
+
+      - name: Run simulated Responses integration tests (SDK 3.x)
+        env:
+          VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
+          VLLM_TEST_BACKEND: simulator
+        run: |
+          test_cmd=(
+            uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py
+            -s -m "not real_inference and not vllm_compat" --sdk-version=3.x
           )
           if "${test_cmd[@]}"; then
             exit 0
@@ -1657,7 +1682,7 @@ jobs:
           done
           echo "OGX is ready"
 
-      - name: Run complete live vLLM Responses suite
+      - name: Run complete live vLLM Responses suite (SDK 2.x)
         env:
           DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
           VLLM_TEST_BACKEND: live
@@ -1665,12 +1690,28 @@ jobs:
           PRAXIS_QUALIFICATION_RESULTS: ${{ runner.temp }}/qualification-responses-cases.json
         run: |
           set +e
-          uv run tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
+          uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
             -p qualification_plugin -k "not live_tavily_web_search_returns_real_sources" \
+            --sdk-version=2.x \
+            2>&1 | tee "$RUNNER_TEMP/qualification-responses-sdk2-pytest.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Run complete live vLLM Responses suite (SDK 3.x)
+        if: ${{ always() && !cancelled() && steps.qualification_build.outcome == 'success' && steps.qualification_vllm_ready.outcome == 'success' && steps.qualification_ogx_ready.outcome == 'success' }}
+        env:
+          DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
+          VLLM_TEST_BACKEND: live
+          VLLM_MODEL: ${{ env.VLLM_GPU_MODEL }}
+          PRAXIS_QUALIFICATION_RESULTS: ${{ runner.temp }}/qualification-responses-cases.json
+        run: |
+          set +e
+          uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
+            -p qualification_plugin -k "not live_tavily_web_search_returns_real_sources" \
+            --sdk-version=3.x \
             2>&1 | tee "$RUNNER_TEMP/qualification-responses-pytest.log"
           exit "${PIPESTATUS[0]}"
 
-      - name: Run credentialed live Tavily web search
+      - name: Run credentialed live Tavily web search (SDK 2.x)
         if: ${{ always() && !cancelled() && steps.qualification_ogx_ready.outcome == 'success' }}
         env:
           DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
@@ -1687,8 +1728,32 @@ jobs:
           PRAXIS_QUALIFICATION_RESULTS: ${{ runner.temp }}/qualification-credentialed-cases.json
         run: |
           set +e
-          uv run tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
+          uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
             -p qualification_plugin -k live_tavily_web_search_returns_real_sources \
+            --sdk-version=2.x \
+            2>&1 | tee "$RUNNER_TEMP/qualification-credentialed-sdk2-pytest.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Run credentialed live Tavily web search (SDK 3.x)
+        if: ${{ always() && !cancelled() && steps.qualification_ogx_ready.outcome == 'success' }}
+        env:
+          DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
+          # The generated YAML keeps the ${TAVILY_API_KEY} reference, so the
+          # secret is consumed only by this one-test process and is never written
+          # into or printed with the config.
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          # Scheduled/manual full runs are controlled environments and must prove
+          # the real provider path. Labeled fork PRs do not receive secrets, so
+          # they retain deterministic coverage and skip only this credentialed test.
+          PRAXIS_TEST_REQUIRE_LIVE_WEB_SEARCH: ${{ github.event_name != 'pull_request' && '1' || '0' }}
+          VLLM_TEST_BACKEND: live
+          VLLM_MODEL: ${{ env.VLLM_GPU_MODEL }}
+          PRAXIS_QUALIFICATION_RESULTS: ${{ runner.temp }}/qualification-credentialed-cases.json
+        run: |
+          set +e
+          uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py -s \
+            -p qualification_plugin -k live_tavily_web_search_returns_real_sources \
+            --sdk-version=3.x \
             2>&1 | tee "$RUNNER_TEMP/qualification-credentialed-pytest.log"
           exit "${PIPESTATUS[0]}"
 
@@ -1716,7 +1781,9 @@ jobs:
             ${{ runner.temp }}/qualification-raw.json
             ${{ runner.temp }}/qualification-responses-cases.json
             ${{ runner.temp }}/qualification-credentialed-cases.json
+            ${{ runner.temp }}/qualification-responses-sdk2-pytest.log
             ${{ runner.temp }}/qualification-responses-pytest.log
+            ${{ runner.temp }}/qualification-credentialed-sdk2-pytest.log
             ${{ runner.temp }}/qualification-credentialed-pytest.log
             ${{ runner.temp }}/qualification-vllm.log
             ${{ runner.temp }}/qualification-postgres.log
@@ -1959,13 +2026,21 @@ jobs:
             exit 1
           fi
 
-      - name: Run Conversations SDK integration tests (PostgreSQL store)
+      - name: Run Conversations SDK integration tests (PostgreSQL store, SDK 2.x)
         env:
           DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
           PRAXIS_TENANT_TEST_BIN: target/debug/examples/conversations_tenant_proxy
           VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
         run: |
-          uv run tests/integration/sdk/openai/test_openai_conversations.py -s
+          uv run --with "openai<3" tests/integration/sdk/openai/test_openai_conversations.py -s --sdk-version=2.x
+
+      - name: Run Conversations SDK integration tests (PostgreSQL store, SDK 3.x)
+        env:
+          DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
+          PRAXIS_TENANT_TEST_BIN: target/debug/examples/conversations_tenant_proxy
+          VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
+        run: |
+          uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_conversations.py -s --sdk-version=3.x
 
       - name: Wait for OGX readiness
         run: |
@@ -1996,15 +2071,34 @@ jobs:
           done
           echo "OGX is ready"
 
-      - name: Run simulated Responses integration tests (PostgreSQL store)
+      - name: Run simulated Responses integration tests (PostgreSQL store, SDK 2.x)
         env:
           DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
           VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
           VLLM_TEST_BACKEND: simulator
         run: |
           test_cmd=(
-            uv run tests/integration/sdk/openai/test_openai_responses_vllm.py
-            -s -m "not real_inference and not vllm_compat"
+            uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py
+            -s -m "not real_inference and not vllm_compat" --sdk-version=2.x
+          )
+          if "${test_cmd[@]}"; then
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" != "merge_group" ]; then
+            exit 1
+          fi
+          echo "::warning::Retrying failed simulator tests once for the merge queue"
+          "${test_cmd[@]}" --last-failed --last-failed-no-failures none
+
+      - name: Run simulated Responses integration tests (PostgreSQL store, SDK 3.x)
+        env:
+          DATABASE_URL: postgres://praxis:praxis@127.0.0.1:5432/praxis
+          VLLM_MODEL: ${{ env.INFERENCE_SIM_MODEL }}
+          VLLM_TEST_BACKEND: simulator
+        run: |
+          test_cmd=(
+            uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py
+            -s -m "not real_inference and not vllm_compat" --sdk-version=3.x
           )
           if "${test_cmd[@]}"; then
             exit 0

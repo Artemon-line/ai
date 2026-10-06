@@ -39,14 +39,14 @@ def report():
         "configuration": {"reference_path": "examples/configs/openai/responses/full-flow-agentic.yaml",
                           "sha256": "d" * 64, "storage_backend": "postgresql"},
         "suites": {"native_responses": {"status": "passed",
-                                        "selected": [{"id": "native text", "profile": "native", "outcome": "passed", "reason": ""}],
+                                        "selected": [{"id": "native text", "profile": "native", "outcome": "passed", "reason": "", "sdk_version": "2.9.0", "sdk_lane": "2.x"}],
                                         "totals": {"passed": 1, "xfailed": 0},
                                         "dependencies": {"openai": "2.9.0"}},
                    "translation": {"status": "passed",
-                                   "selected": [{"id": "translated stream", "profile": "translation", "outcome": "passed", "reason": ""}],
+                                   "selected": [{"id": "translated stream", "profile": "translation", "outcome": "passed", "reason": "", "sdk_version": "2.9.0", "sdk_lane": "2.x"}],
                                    "totals": {"passed": 1, "xfailed": 0}},
                    "supporting": {"status": "passed",
-                                  "selected": [{"id": "stubbed replay", "profile": "supporting", "outcome": "passed", "reason": ""}],
+                                  "selected": [{"id": "stubbed replay", "profile": "supporting", "outcome": "passed", "reason": "", "sdk_version": "2.9.0", "sdk_lane": "2.x"}],
                                   "totals": {"passed": 1, "xfailed": 0}},
                    "unclassified": {"status": "empty", "selected": []},
                    "credentialed_tools": {"status": "skipped"},
@@ -276,6 +276,46 @@ class QualificationTest(unittest.TestCase):
         self.assertEqual(notes, fixture)
         self.assertIn("OpenAI Python `2.9.0`", notes)
         self.assertIn("Credentialed Tools: skipped", notes)
+
+    def test_qualification_plugin_merges_lanes_and_fails_on_corrupt_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "qualification.json"
+            session = SimpleNamespace(
+                config=SimpleNamespace(_openai_sdk_version="2.9.0", _openai_sdk_lane="2.x")
+            )
+            with mock.patch.dict("os.environ", {"PRAXIS_QUALIFICATION_RESULTS": str(destination)}):
+                plugin.pytest_sessionfinish(session, 0)
+                data_lane1 = json.loads(destination.read_text(encoding="utf-8"))
+                self.assertEqual(data_lane1["dependencies"]["openai"], "2.9.0")
+                self.assertEqual(data_lane1["dependencies"]["openai_2.x"], "2.9.0")
+
+                session_lane2 = SimpleNamespace(
+                    config=SimpleNamespace(_openai_sdk_version="3.0.0", _openai_sdk_lane="3.x")
+                )
+                plugin.pytest_sessionfinish(session_lane2, 0)
+                data_lane2 = json.loads(destination.read_text(encoding="utf-8"))
+                self.assertEqual(data_lane2["dependencies"]["openai"], "2.9.0, 3.0.0")
+                self.assertEqual(data_lane2["dependencies"]["openai_2.x"], "2.9.0")
+                self.assertEqual(data_lane2["dependencies"]["openai_3.x"], "3.0.0")
+
+                destination.write_text("invalid json {")
+                with self.assertRaises(RuntimeError):
+                    plugin.pytest_sessionfinish(session, 0)
+
+    def test_qualification_plugin_merges_prerelease_and_release_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "qualification.json"
+            rc_session = SimpleNamespace(
+                config=SimpleNamespace(_openai_sdk_version="3.0.0rc1", _openai_sdk_lane="3.x")
+            )
+            rel_session = SimpleNamespace(
+                config=SimpleNamespace(_openai_sdk_version="3.0.0", _openai_sdk_lane="3.x")
+            )
+            with mock.patch.dict("os.environ", {"PRAXIS_QUALIFICATION_RESULTS": str(destination)}):
+                plugin.pytest_sessionfinish(rc_session, 0)
+                plugin.pytest_sessionfinish(rel_session, 0)
+                data = json.loads(destination.read_text(encoding="utf-8"))
+                self.assertEqual(data["dependencies"]["openai"], "3.0.0rc1, 3.0.0")
 
 
 if __name__ == "__main__":

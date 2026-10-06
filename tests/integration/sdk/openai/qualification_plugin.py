@@ -108,20 +108,54 @@ def pytest_sessionfinish(session, exitstatus):
     destination = os.environ.get("PRAXIS_QUALIFICATION_RESULTS")
     if not destination:
         return
+    sdk_version = getattr(session.config, "_openai_sdk_version", installed_version("openai"))
+    sdk_lane = getattr(session.config, "_openai_sdk_lane", "unknown")
     cases = [{**_cases.get(nodeid, {"id": nodeid, "outcome": "unexecuted", "reason": "test did not run"}),
-              "profile": _profiles[nodeid]} for nodeid in _selected]
+              "profile": _profiles[nodeid],
+              "sdk_version": sdk_version,
+              "sdk_lane": sdk_lane} for nodeid in _selected]
+    deselected = [{**item, "sdk_version": sdk_version, "sdk_lane": sdk_lane} for item in _deselected]
+
+    dependencies = {
+        name: installed_version(name)
+        for name in ("openai", "anthropic", "pytest", "httpx")
+    }
+    if sdk_version:
+        dependencies["openai"] = sdk_version
+    if sdk_lane and sdk_version:
+        dependencies[f"openai_{sdk_lane}"] = sdk_version
+
+    path = Path(destination)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing_selected = existing.get("selected", [])
+            existing_deselected = existing.get("deselected", [])
+            existing_exit_code = existing.get("exit_code", 0)
+            existing_deps = existing.get("dependencies", {})
+            cases = existing_selected + cases
+            deselected = existing_deselected + deselected
+            exitstatus = max(int(exitstatus), int(existing_exit_code))
+            merged_deps = {**existing_deps, **dependencies}
+            existing_openai = existing_deps.get("openai")
+            current_openai = dependencies.get("openai")
+            if existing_openai and current_openai and existing_openai != current_openai:
+                tokens = [token.strip() for token in existing_openai.split(",") if token.strip()]
+                if current_openai.strip() not in tokens:
+                    tokens.append(current_openai.strip())
+                    merged_deps["openai"] = ", ".join(tokens)
+            dependencies = merged_deps
+        except Exception as err:
+            raise RuntimeError(f"Failed to read or merge existing qualification results from {path}: {err}") from err
+
     data = {
         "exit_code": int(exitstatus),
         "started_at": _started_at,
         "finished_at": timestamp(),
         "selected": cases,
-        "deselected": _deselected,
-        "dependencies": {
-            name: installed_version(name)
-            for name in ("openai", "anthropic", "pytest", "httpx")
-        },
+        "deselected": deselected,
+        "dependencies": dependencies,
     }
-    path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
