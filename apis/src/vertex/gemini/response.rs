@@ -113,7 +113,12 @@ impl StreamTranslateState {
 
     /// Set the number of terminal candidates required before EOF is successful.
     pub(crate) fn set_expected_candidate_count(&mut self, count: u64) {
-        self.expected_candidate_count = count.clamp(1, MAX_STREAM_CANDIDATES);
+        self.expected_candidate_count = count.max(1);
+    }
+
+    /// Return the maximum candidate count allowed for admission.
+    pub(crate) fn allowed_candidate_count(&self) -> u64 {
+        self.expected_candidate_count.min(MAX_STREAM_CANDIDATES)
     }
 
     /// Enable the OpenAI trailing usage chunk for this stream.
@@ -731,10 +736,10 @@ fn build_stream_choice(
     if should_ignore_finished_candidate(candidate, candidate_index, state)? {
         return Ok(None);
     }
-    if candidate_index >= state.expected_candidate_count {
+    let max_allowed = state.allowed_candidate_count();
+    if candidate_index >= max_allowed {
         return Err(format!(
-            "candidate index {candidate_index} exceeds expected candidate count ({})",
-            state.expected_candidate_count
+            "candidate index {candidate_index} exceeds allowed candidate count ({max_allowed})"
         ));
     }
     state.seen_candidates.insert(candidate_index);
@@ -2241,8 +2246,25 @@ mod tests {
         let data = br#"{"candidates":[{"index":1,"content":{"parts":[{"text":"hello"}]}}]}"#;
         let err = transform_stream_chunk(data, "gemini-2.0-flash", &mut state).unwrap_err();
         assert!(
-            err.contains("candidate index 1 exceeds expected candidate count (1)"),
+            err.contains("candidate index 1 exceeds allowed candidate count (1)"),
             "expected candidate index error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stream_candidate_count_above_max_limit_fails_completion() {
+        let mut state = new_stream_state(1);
+        state.set_expected_candidate_count(65);
+        assert_eq!(state.expected_candidate_count, 65);
+        assert_eq!(state.allowed_candidate_count(), MAX_STREAM_CANDIDATES);
+
+        for i in 0..MAX_STREAM_CANDIDATES {
+            state.seen_candidates.insert(i);
+            state.finished_candidates.insert(i);
+        }
+        assert!(
+            !state.is_complete(),
+            "64 finished candidates when 65 expected must not be complete"
         );
     }
 

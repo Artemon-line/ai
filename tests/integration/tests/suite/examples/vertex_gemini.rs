@@ -180,6 +180,10 @@ fn vertex_gemini_streaming_rejects_candidate_index_exceeding_requested_n() {
         body.contains("server_error"),
         "rejected stream must end with terminal error frame"
     );
+    assert!(
+        body.contains("upstream SSE stream ended with errors or was truncated"),
+        "rejected stream error message must indicate terminal stream error"
+    );
 
     drop(proxy);
 }
@@ -227,6 +231,15 @@ fn vertex_gemini_streaming_rejects_excess_tool_call_slots() {
     let body = parse_body(&raw);
 
     assert_eq!(parse_status(&raw), 200, "streaming response start status should be 200");
+    assert!(body.contains("id-0"), "stream must contain first tool call slot delta");
+    assert!(
+        body.contains("id-127"),
+        "stream must contain 128th tool call slot delta"
+    );
+    assert!(
+        !body.contains("id-128"),
+        "129th tool call slot must be rejected before translation"
+    );
     assert!(
         !body.contains("[DONE]"),
         "tool slot overflow must prevent [DONE] sentinel"
@@ -234,6 +247,10 @@ fn vertex_gemini_streaming_rejects_excess_tool_call_slots() {
     assert!(
         body.contains("server_error"),
         "tool slot overflow must end with terminal error frame"
+    );
+    assert!(
+        body.contains("upstream SSE stream ended with errors or was truncated"),
+        "tool slot overflow terminal error must contain standard error message"
     );
 
     drop(proxy);
