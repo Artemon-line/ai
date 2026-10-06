@@ -189,9 +189,21 @@ fn vertex_gemini_streaming_rejects_candidate_index_exceeding_requested_n() {
 fn vertex_gemini_streaming_rejects_excess_tool_call_slots() {
     let mut sse_lines = Vec::new();
     for i in 0..129 {
-        sse_lines.push(format!(
-            "data: {{\"candidates\":[{{\"index\":0,\"content\":{{\"parts\":[{{\"functionCall\":{{\"id\":\"id-{i}\",\"name\":\"f\",\"args\":{{}}}}}}]}}]}}}}\n\n"
-        ));
+        let frame_json = serde_json::json!({
+            "candidates": [{
+                "index": 0,
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "id": format!("id-{i}"),
+                            "name": "f",
+                            "args": {}
+                        }
+                    }]
+                }
+            }]
+        });
+        sse_lines.push(format!("data: {frame_json}\n\n"));
     }
     sse_lines.push(
         "data: {\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\",\"content\":{\"parts\":[]}}]}\n\n".to_owned(),
