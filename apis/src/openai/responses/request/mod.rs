@@ -332,7 +332,7 @@ fn classify_matched_operation(obj: &serde_json::Map<String, serde_json::Value>) 
 /// The declared request-body shape when this is a body-bearing operation.
 ///
 /// Resolved from the request head through the shared registry — the same source
-/// of truth the `openai_operation` classifier uses — so no body heuristic
+/// of truth the `ai_operation` classifier uses — so no body heuristic
 /// decides whether this filter applies, and the filter works whether or not the
 /// classifier is present in the chain.
 ///

@@ -62,7 +62,7 @@ pub(crate) mod responses_to_chat_completions;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on module")]
 #[allow(
     dead_code,
-    reason = "the Responses operation registry is consumed by the openai_operation classifier"
+    reason = "the Responses operation registry is consumed by the ai_operation classifier"
 )]
 pub(crate) mod routes;
 #[cfg(feature = "openai-responses")]

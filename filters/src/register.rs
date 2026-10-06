@@ -340,7 +340,7 @@ fn register_openai_filters(registry: &mut FilterRegistry) {
     );
     praxis_filter::register_filters!(
         @register registry,
-        http "openai_operation" => praxis_ai_apis::openai::OpenaiOperationFilter::from_config
+        http "ai_operation" => praxis_ai_apis::operation_classifier::AiOperationFilter::from_config
     );
 }
 
@@ -696,7 +696,7 @@ mod tests {
             "openai_responses_format",
             "openai_responses_model_rewrite",
             "openai_tool_parse",
-            "openai_operation",
+            "ai_operation",
             "a2a",
             "intelligent_route",
             "provider_route",

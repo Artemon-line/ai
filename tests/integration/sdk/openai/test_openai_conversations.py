@@ -152,7 +152,7 @@ def _write_config(
         },
     ]
     if include_operation_classifier:
-        filters.append({"filter": "openai_operation"})
+        filters.append({"filter": "ai_operation"})
     filters.append(_conversations_filter(f"sdk_{port}", db_path))
 
     config = {
@@ -194,7 +194,7 @@ def _write_tenant_config(port: int, db_path: str) -> str:
                 "name": "tenant-conversations-pipeline",
                 "filters": [
                     {"filter": "test_tenant_identity"},
-                    {"filter": "openai_operation"},
+                    {"filter": "ai_operation"},
                     conversations_filter,
                 ],
             }

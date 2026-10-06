@@ -204,10 +204,10 @@ pipeline:
       S13:
         state: active
         note: projects before the managed chat-completions round
-  - id: openai_operation
-    name: openai_operation
+  - id: ai_operation
+    name: ai_operation
     group: classification
-    filter_type: openai_operation
+    filter_type: ai_operation
     phase: request-phase classification; no response phase
     config: {}
     promotes: classifies the request head (method + path + transport) against the registered OpenAI operation registries (Conversations, Chat Completions, Responses); on a match publishes the typed operation into request extensions, sets x-praxis-ai-application-protocol + x-praxis-ai-operation, and records application_protocol/operation_id filter results consumed by on_result branches and openai_conversations; on no match strips those headers and continues. Must precede openai_conversations.

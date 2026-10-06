@@ -43,7 +43,7 @@
 #      context-only configuration must be combined with owner-scoped store
 #      enforcement before it is exposed as a multi-owner state service.
 #
-#   0. openai_operation publishes the typed registry match consumed by
+#   0. ai_operation publishes the typed registry match consumed by
 #      openai_conversations. It must remain earlier in this filter chain.
 #
 #   1. openai_conversations handles the Conversations API only for managed
@@ -352,7 +352,7 @@ filter_chains:
         subject_header: x-user-id
 
       # Publishes the typed operation consumed by openai_conversations.
-      - filter: openai_operation
+      - filter: ai_operation
 
       - filter: openai_responses_format
         on_invalid: continue

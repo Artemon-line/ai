@@ -362,7 +362,7 @@ filter_chains:
         mode: single_tenant
         tenant_id: default
 
-      - filter: openai_operation
+      - filter: ai_operation
 
       - filter: openai_conversations
         backend: sqlite
