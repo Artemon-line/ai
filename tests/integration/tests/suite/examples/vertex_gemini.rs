@@ -185,6 +185,7 @@ fn vertex_gemini_streaming_rejects_candidate_index_exceeding_requested_n() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "tests streaming tool call slot overflow")]
 fn vertex_gemini_streaming_rejects_excess_tool_call_slots() {
     let mut sse_lines = Vec::new();
     for i in 0..129 {

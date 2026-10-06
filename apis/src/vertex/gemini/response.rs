@@ -719,6 +719,10 @@ fn resolve_stream_candidate_indices(candidates: &[Value]) -> Result<Vec<u64>, St
 }
 
 /// Build a single OpenAI streaming choice from a Gemini candidate.
+#[expect(
+    clippy::too_many_lines,
+    reason = "builds streaming choice delta and extracts logprobs and tool calls"
+)]
 fn build_stream_choice(
     candidate: &Value,
     candidate_index: u64,
@@ -2243,6 +2247,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "tests tool call slot overflow limit")]
     fn stream_tool_call_slots_exceeding_max_limit_is_rejected() {
         let mut state = new_stream_state(1);
         for i in 0..MAX_STREAM_TOOL_CALL_SLOTS {
