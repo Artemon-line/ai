@@ -75,25 +75,6 @@ impl ListParams {
 // InputItemPage
 // -----------------------------------------------------------------------------
 
-/// Borrowed view of an input item page formatted for direct JSON response serialization.
-#[derive(Serialize)]
-struct InputItemPageView<'a> {
-    /// Responses API object type (always `"list"`).
-    object: &'static str,
-
-    /// Page window data items.
-    data: &'a [serde_json::Value],
-
-    /// Whether additional items exist beyond this page window.
-    has_more: bool,
-
-    /// First item ID cursor in the page window.
-    first_id: Option<&'a str>,
-
-    /// Last item ID cursor (or fallback cursor) in the page window.
-    last_id: Option<&'a str>,
-}
-
 /// A page of input items from an `OpenAI` Responses API response.
 pub(crate) struct InputItemPage {
     /// Input items as JSON values (heterogeneous types).
@@ -143,6 +124,25 @@ impl Serialize for InputItemPage {
         }
         .serialize(serializer)
     }
+}
+
+/// Borrowed view of an input item page formatted for direct JSON response serialization.
+#[derive(Serialize)]
+struct InputItemPageView<'a> {
+    /// Responses API object type (always `"list"`).
+    object: &'static str,
+
+    /// Page window data items.
+    data: &'a [serde_json::Value],
+
+    /// Whether additional items exist beyond this page window.
+    has_more: bool,
+
+    /// First item ID cursor in the page window.
+    first_id: Option<&'a str>,
+
+    /// Last item ID cursor (or fallback cursor) in the page window.
+    last_id: Option<&'a str>,
 }
 
 // -----------------------------------------------------------------------------
