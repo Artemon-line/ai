@@ -286,6 +286,7 @@ def _write_full_flow_config(
     *,
     backend_endpoint: str | None = None,
     search_port: int | None = None,
+    nemo_port: int | None = None,
     max_event_bytes: int | None = None,
 ) -> str:
     """Patch the shared full-flow example for live or recording backends."""
@@ -308,6 +309,13 @@ def _write_full_flow_config(
             "api_key: test-key\n"
             f"                base_url: http://127.0.0.1:{search_port}\n"
             "                # Require the per-user key",
+        )
+    if nemo_port is not None:
+        nemo_anchor = "http://127.0.0.1:3003/v1/checks"
+        assert config.count(nemo_anchor) == 1
+        config = config.replace(
+            nemo_anchor,
+            f"http://127.0.0.1:{nemo_port}/v1/checks",
         )
     if max_event_bytes is not None:
         anchor = (
@@ -731,6 +739,36 @@ class BraveSearchHandler(BaseHTTPRequestHandler):
                 }
             }
         ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+class NemoGuardrailsHandler(BaseHTTPRequestHandler):
+    """Passing NeMo `/v1/checks` mock used by the full-flow SDK tests."""
+
+    #: Total `/v1/checks` requests served across all instances since the last reset.
+    request_count: ClassVar[int] = 0
+    requests: ClassVar[list[dict[str, Any]]] = []
+    lock: ClassVar[threading.Lock] = threading.Lock()
+
+    @classmethod
+    def reset(cls):
+        with cls.lock:
+            cls.requests.clear()
+            cls.request_count = 0
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with self.lock:
+            type(self).requests.append(json.loads(body))
+            type(self).request_count += 1
+        payload = json.dumps({"status": "passed", "content": "safe"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -1795,7 +1833,7 @@ def compact_proxy(tmp_path_factory, request, compaction_server):
 
 
 def _witness_proxy_session(
-    tmp_path_factory, request, search_port=None, max_event_bytes=None
+    tmp_path_factory, request, search_port=None, max_event_bytes=None, nemo_port=None
 ):
     """Start a proxy whose native backend is a recording shim in front of vLLM.
 
@@ -1820,6 +1858,7 @@ def _witness_proxy_session(
         db_path,
         backend_endpoint=f"127.0.0.1:{backend_port}",
         search_port=search_port,
+        nemo_port=nemo_port,
         max_event_bytes=max_event_bytes,
     )
     binary = _find_binary()
@@ -1864,16 +1903,37 @@ def witness_backend_client(tmp_path_factory, request):
 
 
 @pytest.fixture()
-def witness_tool_client(tmp_path_factory, request, search_server):
-    """Full-flow witness with a deterministic hosted web-search endpoint."""
-    yield from _witness_proxy_session(tmp_path_factory, request, search_server)
+def witness_backend_tool_client(tmp_path_factory, request, nemo_guardrails_server):
+    """Witness proxy whose IRR tool-result guardrail has a reachable NeMo endpoint.
+
+    A request-side tool-limit completion still produces a (failed) tool result
+    that the full-flow guardrail screens before re-entry, so the phase needs a
+    live endpoint even though no hosted search is dispatched.
+    """
+    yield from _witness_proxy_session(
+        tmp_path_factory, request, nemo_port=nemo_guardrails_server
+    )
 
 
 @pytest.fixture()
-def witness_replay_limited_tool_client(tmp_path_factory, request, search_server):
+def witness_tool_client(tmp_path_factory, request, search_server, nemo_guardrails_server):
+    """Full-flow witness with a deterministic hosted web-search endpoint."""
+    yield from _witness_proxy_session(
+        tmp_path_factory, request, search_server, nemo_port=nemo_guardrails_server
+    )
+
+
+@pytest.fixture()
+def witness_replay_limited_tool_client(
+    tmp_path_factory, request, search_server, nemo_guardrails_server
+):
     """Hosted web-search witness whose Response replay limit is one byte."""
     yield from _witness_proxy_session(
-        tmp_path_factory, request, search_server, max_event_bytes=1
+        tmp_path_factory,
+        request,
+        search_server,
+        max_event_bytes=1,
+        nemo_port=nemo_guardrails_server,
     )
 
 
@@ -2640,6 +2700,8 @@ class TestOpenAIResponsesVLLM:
         client, forwarded = witness_tool_client
         conversation = client.conversations.create()
         searches_before = BraveSearchHandler.request_count
+        with NemoGuardrailsHandler.lock:
+            nemo_before = NemoGuardrailsHandler.request_count
         try:
             events = list(
                 client.responses.create(
@@ -2658,6 +2720,12 @@ class TestOpenAIResponsesVLLM:
             output = completed[0].response.output
             assert [item.type for item in output] == ["web_search_call", "message"]
             assert BraveSearchHandler.request_count == searches_before + 1
+            with NemoGuardrailsHandler.lock:
+                assert NemoGuardrailsHandler.request_count == nemo_before + 1
+                nemo_request = NemoGuardrailsHandler.requests[-1]
+            assert "Mock Search Result" in json.dumps(nemo_request["messages"]), (
+                "NeMo must inspect the hosted search result before model re-entry"
+            )
             assert len(forwarded) == 2, "one tool dispatch should produce one re-entry"
             assert "Mock Search Result" in json.dumps(forwarded[1]["input"])
 
@@ -2821,10 +2889,10 @@ class TestOpenAIResponsesVLLM:
                 stream.close()
 
     def test_streamed_local_completion_append_failure_withholds_terminal(
-        self, witness_backend_client
+        self, witness_backend_tool_client
     ):
         """A request-side tool-limit completion must append before its SSE terminal."""
-        client, _ = witness_backend_client
+        client, _ = witness_backend_tool_client
         conversation = client.conversations.create()
         gate = threading.Event()
         ResponsesWitnessHandler.terminal_gate = gate
@@ -4892,6 +4960,18 @@ def search_server():
     """Start an in-process mock Brave search server for the test session."""
     port = _free_port()
     server = HTTPServer(("127.0.0.1", port), BraveSearchHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield port
+    server.shutdown()
+
+
+@pytest.fixture(scope="session")
+def nemo_guardrails_server():
+    """Start a deterministic passing NeMo mock for guarded SDK tool tests."""
+    NemoGuardrailsHandler.reset()
+    port = _free_port()
+    server = ThreadingHTTPServer(("127.0.0.1", port), NemoGuardrailsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield port
