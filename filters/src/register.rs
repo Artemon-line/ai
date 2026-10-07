@@ -397,10 +397,6 @@ fn register_openai_responses_filters(registry: &mut FilterRegistry, subrequest_c
         @register registry,
         http "openai_responses_request" => praxis_ai_apis::openai::OpenaiResponsesRequestFilter::from_config
     );
-    praxis_filter::register_filters!(
-        @register registry,
-        http "openai_responses_validate" => praxis_ai_apis::openai::OpenaiResponsesValidateFilter::from_config
-    );
     #[cfg(feature = "store")]
     praxis_filter::register_filters!(
         @register registry,
@@ -717,12 +713,10 @@ mod tests {
     fn build_ai_registry_includes_responses_request_when_enabled() {
         let registry = build_ai_registry();
         let names = registry.available_filters();
-        for name in ["openai_responses_request", "openai_responses_validate"] {
-            assert!(
-                names.contains(&name),
-                "expected {name} in registry when openai-responses is enabled"
-            );
-        }
+        assert!(
+            names.contains(&"openai_responses_request"),
+            "expected openai_responses_request in registry when openai-responses is enabled"
+        );
     }
 
     #[cfg(feature = "policy-engine")]
@@ -810,7 +804,6 @@ provider:
     /// Every opt-in filter paired with whether its cargo feature is enabled.
     const OPTIONAL_FILTERS: &[(&str, bool)] = &[
         ("aws_sigv4_sign", cfg!(feature = "aws-sigv4-filter")),
-        ("openai_responses_validate", cfg!(feature = "openai-responses")),
         ("openai_responses_proxy", cfg!(feature = "openai-responses")),
         ("openai_stream_events", cfg!(feature = "openai-responses")),
         ("responses_to_chat_completions", cfg!(feature = "openai-responses")),

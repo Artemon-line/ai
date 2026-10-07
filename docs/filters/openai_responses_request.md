@@ -7,11 +7,11 @@ Processes a Responses request body once and initializes state.
 
 ## Configuration Notes
 
-Replaces the `openai_responses_format` and `openai_responses_validate` pair. Configuration is unchanged from `openai_responses_format`, so a chain that ran both swaps them for this one filter and keeps the same `on_invalid` and `headers` settings.
+Configuration matches `openai_responses_format`, so a chain keeps the same `on_invalid` and `headers` settings wherever this filter is placed.
 
 The operation is recognized from the request head, and the registry decides which operations carry a body worth parsing: create, compact, and input token counts. Bodyless operations — fetch, delete, cancel, list input items, and the `WebSocket` handshake — are released untouched, as is Conversations API traffic. `on_invalid` governs only bodies that fail to parse.
 
-Rejects `background=true` and non-null `prompt` with a 400, matching the managed-path policy enforced by `openai_responses_validate`.
+Rejects `background=true` and non-null `prompt` with a 400, the managed-path policy this filter now owns.
 
 Promotes `openai_responses_format.*` metadata, publishes filter results under `openai_responses_request`, and generates `responses.response_id` (`resp_` + 32 hex chars, CSPRNG), `responses.conversation_id`, `responses.store`, `responses.background`, and `responses.stream`.
 

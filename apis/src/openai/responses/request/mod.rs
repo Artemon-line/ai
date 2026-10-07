@@ -14,10 +14,10 @@
 //! because Praxis does not implement the asynchronous Responses lifecycle or
 //! provider-owned prompt templates on gateway-managed paths.
 //!
-//! This replaces the pair of `openai_responses_format` and
-//! `openai_responses_validate`. Those two each parsed the
-//! same body independently, so routing facts, proxy-owned defaults, and state
-//! could be derived from different parses of one request.
+//! This filter owns that parse outright. The separate validation stage it
+//! replaced parsed the body a second time after `openai_responses_format` had
+//! already parsed it, so routing facts, proxy-owned defaults, and state could
+//! be derived from different parses of one request.
 //!
 //! Metadata keeps the `openai_responses_format` namespace, because twelve
 //! downstream filters read those keys and renaming them is a separate change
@@ -42,13 +42,14 @@ mod tests;
 use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_filter::{
-    FilterAction, FilterError, HttpFilter, HttpFilterContext,
+    BoundUpstreamBodyOutcome, FilterAction, FilterError, HttpFilter, HttpFilterContext,
     body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
     parse_filter_config,
 };
 use tracing::{debug, trace};
 
 use super::{
+    bound_body_outcome,
     config::{ResponsesFormatConfig, ResponsesRequestConfig, build_config},
     error::responses_error_rejection_with_code,
     extract_conversation_id,
@@ -65,10 +66,8 @@ const FILTER_NAME: &str = "openai_responses_request";
 
 /// Processes a Responses request body once and initializes state.
 ///
-/// Replaces the `openai_responses_format` and `openai_responses_validate` pair.
-/// Configuration is unchanged from `openai_responses_format`, so a chain that
-/// ran both swaps them for this one filter and keeps the same `on_invalid` and
-/// `headers` settings.
+/// Configuration matches `openai_responses_format`, so a chain keeps the same
+/// `on_invalid` and `headers` settings wherever this filter is placed.
 ///
 /// The operation is recognized from the request head, and the registry decides
 /// which operations carry a body worth parsing: create, compact, and input
@@ -76,8 +75,8 @@ const FILTER_NAME: &str = "openai_responses_request";
 /// and the `WebSocket` handshake — are released untouched, as is Conversations
 /// API traffic. `on_invalid` governs only bodies that fail to parse.
 ///
-/// Rejects `background=true` and non-null `prompt` with a 400, matching the
-/// managed-path policy enforced by `openai_responses_validate`.
+/// Rejects `background=true` and non-null `prompt` with a 400, the
+/// managed-path policy this filter now owns.
 ///
 /// Promotes `openai_responses_format.*` metadata, publishes filter results
 /// under `openai_responses_request`, and generates
@@ -114,10 +113,34 @@ impl HttpFilter for OpenaiResponsesRequestFilter {
         BodyAccess::ReadOnly
     }
 
+    /// Also offer the bound-upstream phase, so a chain can defer this work
+    /// until the router has selected a logical provider.
+    ///
+    /// Declaring both hooks is what lets the operator choose with a
+    /// `bound_upstream` condition: core schedules the bound-upstream hook when
+    /// that condition is present and the pre-read hook otherwise, never both.
+    /// Deferring matters for mixed chains, where provider-owned traffic must
+    /// reach its upstream with its own fields intact while gateway-managed
+    /// requests are still held to the managed-path policy.
+    fn bound_upstream_request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
     fn request_body_mode(&self) -> BodyMode {
         BodyMode::StreamBuffer {
             max_bytes: Some(MAX_JSON_BODY_BYTES),
         }
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    /// Streamed, because the response body is never buffered here.
+    ///
+    /// The response path exists only for end-of-stream teardown.
+    fn response_body_mode(&self) -> BodyMode {
+        BodyMode::Stream
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -173,6 +196,48 @@ impl HttpFilter for OpenaiResponsesRequestFilter {
 
         Ok(FilterAction::Release)
     }
+
+    /// Same processing, deferred until a logical provider is bound.
+    ///
+    /// Shares one implementation with the pre-read hook so the two phases
+    /// cannot diverge, and so state is initialized exactly once however the
+    /// chain scheduled this filter.
+    async fn on_bound_upstream_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<BoundUpstreamBodyOutcome, FilterError> {
+        // The bound-upstream phase receives the complete body, so end-of-stream
+        // is always reached.
+        let action = self.on_request_body(ctx, body, true).await?;
+        bound_body_outcome(action)
+    }
+
+    /// Release per-request MCP sessions once the outer response is finished.
+    ///
+    /// This filter runs outside the iterative request/response loop, so its
+    /// terminal response-body hook sees extensions restored after every finite
+    /// or streamed agentic round — unlike a response-header hook, which precedes
+    /// streamed body execution. Draining here gives every warm session its final
+    /// opportunity for reuse before bounded graceful shutdown.
+    fn on_response_body(
+        &self,
+        #[cfg_attr(
+            not(feature = "openai-mcp-tools"),
+            expect(unused_variables, reason = "the response context only carries the MCP session pool")
+        )]
+        ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if end_of_stream {
+            #[cfg(feature = "openai-mcp-tools")]
+            if let Some(pool) = ctx.extensions.remove::<crate::mcp_client::McpSessionPool>() {
+                pool.drain_in_background();
+            }
+        }
+        Ok(FilterAction::Continue)
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -221,6 +286,11 @@ fn publish_request_facts(
     let conversation_id = resolve_conversation_id(ctx, &parsed);
 
     enrich_context(ctx, classified, &response_id, &conversation_id);
+    // Must follow `enrich_context`: the owner is bound to the canonical
+    // conversation ID that call publishes, and the Conversations response path
+    // reads this immutable owner when appending the completed turn.
+    #[cfg(feature = "openai-conversations")]
+    crate::openai::conversations::capture_validated_append_owner(ctx);
     insert_responses_state(ctx, parsed, &response_id);
 
     debug!(

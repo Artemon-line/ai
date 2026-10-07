@@ -372,7 +372,13 @@ filter_chains:
 
       - filter: openai_responses_format
 
-      - filter: openai_responses_validate
+      - filter: openai_responses_request
+        on_invalid: reject
+        headers:
+          format: ~
+          model: ~
+          stream: ~
+          mode: ~
 
       - filter: openai_response_store
         backend: sqlite

@@ -65,7 +65,7 @@
 #      This order is required: it binds the logical provider/protocol before
 #      their `unless application_provider=openai` conditions are evaluated.
 #      The filters then run once against the buffered request. The OpenAI route
-#      is true passthrough; on managed routes openai_responses_validate checks
+#      is true passthrough; on managed routes openai_responses_request checks
 #      JSON, initializes ResponsesState, and rejects gateway-unsupported fields
 #      such as background=true and non-null prompt templates. Protocol adapters
 #      later in the IRR assume this managed-provider validation already ran.
@@ -494,7 +494,13 @@ filter_chains:
       # The filters below participate in the once-per-request bound-body phase.
       # OpenAI owns these capabilities on its direct path, so the condition
       # suppresses their request, response, and response-body lifecycle hooks.
-      - filter: openai_responses_validate
+      - filter: openai_responses_request
+        on_invalid: reject
+        headers:
+          format: ~
+          model: ~
+          stream: ~
+          mode: ~
         conditions:
           - unless:
               bound_upstream:
