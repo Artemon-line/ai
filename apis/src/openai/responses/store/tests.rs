@@ -16,7 +16,7 @@ use praxis_filter::{
 use serde_json::json;
 
 use super::{
-    ListParams, MAX_PAGE_LIMIT, Order, ResponseStoreFilter,
+    InputItemPage, ListParams, MAX_PAGE_LIMIT, Order, ResponseStoreFilter,
     config::{ResponseStoreConfig, revalidate_postgres_host, validate_config},
     input_items::DEFAULT_PAGE_LIMIT,
     list_input_items,
@@ -6160,5 +6160,190 @@ conversations_table: openai_conversations
     assert!(
         ResponseStoreFilter::from_config(&yaml).is_ok(),
         "SQLite compares names case-insensitively, so uppercase must still be accepted"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// InputItemPage serialization & allocation tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn input_item_page_serialization_empty_page() {
+    let page = InputItemPage {
+        data: vec![],
+        next_cursor: None,
+        has_more: false,
+    };
+    let json_str = serde_json::to_string(&page).expect("empty page should serialize");
+    let val: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+    assert_eq!(val["object"], "list");
+    assert_eq!(val["data"], json!([]));
+    assert_eq!(val["has_more"], false);
+    assert_eq!(val["first_id"], serde_json::Value::Null);
+    assert_eq!(val["last_id"], serde_json::Value::Null);
+}
+
+#[test]
+fn input_item_page_serialization_full_page() {
+    let items: Vec<serde_json::Value> = (0..20)
+        .map(|i| {
+            json!({
+                "id": format!("msg_item_{i}"),
+                "type": "message",
+                "role": "user",
+                "content": format!("content {i}")
+            })
+        })
+        .collect();
+    let page = InputItemPage {
+        data: items,
+        next_cursor: Some("msg_item_19".to_owned()),
+        has_more: true,
+    };
+    let json_str = serde_json::to_string(&page).expect("full page should serialize");
+    let val: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+    assert_eq!(val["object"], "list");
+    assert_eq!(val["data"].as_array().unwrap().len(), 20);
+    assert_eq!(val["has_more"], true);
+    assert_eq!(val["first_id"], "msg_item_0");
+    assert_eq!(val["last_id"], "msg_item_19");
+}
+
+#[test]
+fn input_item_page_serialization_maximum_size_100_items() {
+    let items: Vec<serde_json::Value> = (0..100)
+        .map(|i| {
+            json!({
+                "id": format!("msg_max_{i}"),
+                "type": "message",
+                "role": if i % 2 == 0 { "user" } else { "assistant" },
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": format!("Nontrivial text payload for item {i} with additional metadata and details.")
+                    }
+                ],
+                "metadata": {
+                    "index": i,
+                    "tag": "max_page_test"
+                }
+            })
+        })
+        .collect();
+    let page = InputItemPage {
+        data: items,
+        next_cursor: Some("msg_max_99".to_owned()),
+        has_more: true,
+    };
+    let json_str = serde_json::to_string(&page).expect("100-item page should serialize");
+    let val: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+    assert_eq!(val["object"], "list");
+    assert_eq!(val["data"].as_array().unwrap().len(), 100);
+    assert_eq!(val["has_more"], true);
+    assert_eq!(val["first_id"], "msg_max_0");
+    assert_eq!(val["last_id"], "msg_max_99");
+}
+
+#[test]
+fn input_item_page_serialization_non_object_and_cursor_fallback() {
+    let page = InputItemPage {
+        data: vec![json!("plain string input"), json!(12345)],
+        next_cursor: Some("2".to_owned()),
+        has_more: true,
+    };
+    let json_str = serde_json::to_string(&page).expect("non-object page should serialize");
+    let val: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+    assert_eq!(val["object"], "list");
+    assert_eq!(val["data"], json!(["plain string input", 12345]));
+    assert_eq!(val["has_more"], true);
+    assert_eq!(val["first_id"], serde_json::Value::Null);
+    assert_eq!(
+        val["last_id"], "2",
+        "last_id should fall back to next_cursor when last item has no 'id' field"
+    );
+}
+
+#[test]
+fn input_item_page_serialization_100_item_nontrivial_allocation_evidence() {
+    let items: Vec<serde_json::Value> = (0..100)
+        .map(|i| {
+            json!({
+                "id": format!("msg_nontrivial_{i}"),
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": format!("Nontrivial text payload for item {i}: {}", "x".repeat(200))
+                    }
+                ],
+                "metadata": {
+                    "item_index": i,
+                    "nested_info": {
+                        "key_a": "value_a",
+                        "key_b": 42
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let page = InputItemPage {
+        data: items,
+        next_cursor: Some("msg_nontrivial_99".to_owned()),
+        has_more: true,
+    };
+
+    // Legacy pattern: serde_json::json! deep-copies page.data into a second Value tree
+    let legacy_fn = |p: &InputItemPage| -> Vec<u8> {
+        let first_id = p.data.first().and_then(|v| v.get("id")).and_then(|v| v.as_str());
+        let last_id = p
+            .data
+            .last()
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .or(p.next_cursor.as_deref());
+
+        let body = serde_json::json!({
+            "object": "list",
+            "data": p.data,
+            "has_more": p.has_more,
+            "first_id": first_id,
+            "last_id": last_id,
+        });
+        serde_json::to_vec(&body).unwrap()
+    };
+
+    // New pattern: direct serialization from &page without second Value or Vec<Value> tree
+    let direct_fn = |p: &InputItemPage| -> Vec<u8> { serde_json::to_vec(p).unwrap() };
+
+    let legacy_bytes = legacy_fn(&page);
+    let direct_bytes = direct_fn(&page);
+
+    assert_eq!(
+        legacy_bytes, direct_bytes,
+        "direct serialization output must match legacy json! output byte-for-byte"
+    );
+
+    let legacy_allocs = allocation_counter::measure(|| {
+        std::hint::black_box(legacy_fn(&page));
+    });
+
+    let direct_allocs = allocation_counter::measure(|| {
+        std::hint::black_box(direct_fn(&page));
+    });
+
+    assert!(
+        direct_allocs.count_total < legacy_allocs.count_total,
+        "direct serialization must perform fewer allocations: direct={} legacy={}",
+        direct_allocs.count_total,
+        legacy_allocs.count_total
+    );
+
+    assert!(
+        direct_allocs.bytes_total < legacy_allocs.bytes_total,
+        "direct serialization must allocate fewer bytes: direct={} legacy={}",
+        direct_allocs.bytes_total,
+        legacy_allocs.bytes_total
     );
 }
