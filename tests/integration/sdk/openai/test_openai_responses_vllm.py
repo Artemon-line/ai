@@ -5264,6 +5264,98 @@ class TestClientToolCompatVLLM:
         # Request phase echo: the client sees its original ``custom`` tool back.
         assert any(t.type == "custom" for t in response.tools), response.tools
 
+    def test_shell_tool_round_trip_lowers_and_restores(
+        self, client_tool_compat_client
+    ):
+        """A local ``shell`` tool is lowered to a private ``function`` vLLM
+        accepts; the returned call is restored to a schema-complete
+        ``shell_call`` with its parsed action moved into the result."""
+        response = client_tool_compat_client.responses.create(
+            model=VLLM_MODEL,
+            input=(
+                "You MUST call the shell tool with the command: echo ok. "
+                "Do not answer directly. /no_think"
+            ),
+            tools=[{"type": "shell", "environment": {"type": "local"}}],
+            tool_choice={"type": "shell"},
+            temperature=0,
+            store=False,
+            max_output_tokens=256,
+        )
+
+        assert response.status == "completed", response
+        shell_calls = [item for item in response.output if item.type == "shell_call"]
+        assert len(shell_calls) >= 1, (
+            "compat filter must restore the function_call to a shell_call; "
+            f"got output types: {[i.type for i in response.output]}"
+        )
+        call = shell_calls[0]
+        assert call.call_id, call
+        assert call.action is not None, call
+        assert call.action.commands, (
+            "restored shell action must include commands: "
+            f"{call.action}"
+        )
+        assert all(command for command in call.action.commands), (
+            "every restored shell command must be non-empty: "
+            f"{call.action}"
+        )
+        assert (
+            call.action.timeout_ms is None or call.action.timeout_ms >= 0
+        ), call.action
+        assert (
+            call.action.max_output_length is None
+            or call.action.max_output_length >= 0
+        ), call.action
+        assert call.environment is not None, (
+            "restored shell call must include its environment: "
+            f"{call}"
+        )
+        assert call.environment.type == "local", (
+            "restored shell call must identify a local environment: "
+            f"{call.environment}"
+        )
+        assert all(item.type != "function_call" for item in response.output), (
+            f"lowered function must not leak: {[i.type for i in response.output]}"
+        )
+        assert any(t.type == "shell" for t in response.tools), response.tools
+
+    def test_tool_search_round_trip_lowers_and_restores(
+        self, client_tool_compat_client
+    ):
+        """A client-executed ``tool_search`` declaration is lowered to a private
+        ``function`` and its restored call preserves client ownership and parsed
+        arguments through the OpenAI SDK."""
+        response = client_tool_compat_client.responses.create(
+            model=VLLM_MODEL,
+            input=(
+                "You MUST call tool_search for client tools. Do not answer "
+                "directly. /no_think"
+            ),
+            tools=[{"type": "tool_search"}],
+            tool_choice="required",
+            temperature=0,
+            store=False,
+            max_output_tokens=256,
+        )
+
+        assert response.status == "completed", response
+        search_calls = [
+            item for item in response.output if item.type == "tool_search_call"
+        ]
+        assert len(search_calls) >= 1, (
+            "compat filter must restore the function_call to a tool_search_call; "
+            f"got output types: {[i.type for i in response.output]}"
+        )
+        call = search_calls[0]
+        assert call.call_id, call
+        assert call.execution == "client", call
+        assert call.arguments is not None, call
+        assert all(item.type != "function_call" for item in response.output), (
+            f"lowered function must not leak: {[i.type for i in response.output]}"
+        )
+        assert any(t.type == "tool_search" for t in response.tools), response.tools
+
     def test_single_round_declared_and_discovered_tools_lower_without_leaking(
         self, client_tool_compat_client
     ):
