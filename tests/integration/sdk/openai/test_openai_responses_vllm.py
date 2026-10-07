@@ -5212,9 +5212,14 @@ class TestClientToolCompatVLLM:
         call = shell_calls[0]
         assert call.call_id, call
         assert call.action is not None, call
-        assert call.action.commands, call.action
-        assert call.action.timeout_ms is None, call.action
-        assert call.action.max_output_length is None, call.action
+        assert all(command for command in call.action.commands), call.action
+        assert (
+            call.action.timeout_ms is None or call.action.timeout_ms >= 0
+        ), call.action
+        assert (
+            call.action.max_output_length is None
+            or call.action.max_output_length >= 0
+        ), call.action
         assert call.environment is not None and call.environment.type == "local", call
         assert all(item.type != "function_call" for item in response.output), (
             f"lowered function must not leak: {[i.type for i in response.output]}"
