@@ -125,25 +125,60 @@ pub(crate) struct ResponsesFormatConfig {
     pub headers: ResponsesFormatHeaders,
 }
 
+/// Configuration for the create request processor.
+///
+/// Extends the shared classification settings with the one option that only
+/// this filter honours, so the classifier it replaces does not advertise an
+/// option it ignores.
+#[cfg(feature = "openai-responses")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResponsesRequestConfig {
+    /// Classification and promotion settings, shared with the classifier.
+    #[serde(flatten)]
+    pub shared: ResponsesFormatConfig,
+
+    /// Whether to initialize `ResponsesState` for a create request.
+    ///
+    /// On by default, because the stateful Responses filters read it. A
+    /// passthrough chain that only classifies and routes consumes none of it,
+    /// and building it there costs an identifier, a conversation resolution,
+    /// and retaining the parsed body for the rest of the request.
+    ///
+    /// Classification metadata, headers, and filter results are published
+    /// either way, so routing is unaffected.
+    #[serde(default = "default_initialize_state")]
+    pub initialize_state: bool,
+}
+
+/// `ResponsesState` is initialized unless a chain opts out.
+///
+/// Only the create request processor honours this, and that filter is compiled
+/// in with the Responses feature.
+#[cfg(feature = "openai-responses")]
+const fn default_initialize_state() -> bool {
+    true
+}
+
 // -----------------------------------------------------------------------------
 // Config Validation
 // -----------------------------------------------------------------------------
 
 /// Validate the parsed configuration.
-pub(crate) fn build_config(cfg: ResponsesFormatConfig) -> Result<ResponsesFormatConfig, FilterError> {
-    validate_responses_format_headers(&cfg.headers)?;
+pub(crate) fn build_config(filter: &str, cfg: ResponsesFormatConfig) -> Result<ResponsesFormatConfig, FilterError> {
+    validate_responses_format_headers(filter, &cfg.headers)?;
     Ok(cfg)
 }
 
 /// Validate dedicated names and reject collisions across header fields.
-fn validate_responses_format_headers(headers: &ResponsesFormatHeaders) -> Result<(), FilterError> {
+fn validate_responses_format_headers(filter: &str, headers: &ResponsesFormatHeaders) -> Result<(), FilterError> {
     for (field, name, dedicated) in [
         ("format", headers.format.as_deref(), "x-praxis-ai-format"),
         ("model", headers.model.as_deref(), "x-praxis-ai-model"),
         ("stream", headers.stream.as_deref(), "x-praxis-ai-stream"),
         ("mode", headers.mode.as_deref(), "x-praxis-responses-mode"),
     ] {
-        crate::promotion::validate_dedicated_promotion_header("openai_responses_format", field, name, &[dedicated])?;
+        crate::promotion::validate_dedicated_promotion_header(filter, field, name, &[dedicated])?;
     }
     crate::promotion::reject_duplicate_promotion_fields(
         "openai_responses_format",
@@ -218,7 +253,7 @@ extra: true
     #[test]
     fn build_config_minimal_ok() {
         let cfg: ResponsesFormatConfig = serde_yaml::from_str("{}").unwrap();
-        assert!(build_config(cfg).is_ok());
+        assert!(build_config("openai_responses_format", cfg).is_ok());
     }
 
     #[test]
@@ -232,7 +267,7 @@ extra: true
                 mode: default_mode_header(),
             },
         };
-        let err = build_config(cfg).unwrap_err();
+        let err = build_config("openai_responses_format", cfg).unwrap_err();
         assert!(
             err.to_string().contains("not a valid HTTP header name"),
             "expected invalid header error, got: {err}"
@@ -250,7 +285,7 @@ extra: true
                 mode: Some("x-custom-mode".into()),
             },
         };
-        assert!(build_config(cfg).is_ok());
+        assert!(build_config("openai_responses_format", cfg).is_ok());
     }
 
     #[test]
@@ -264,7 +299,7 @@ extra: true
                 mode: default_mode_header(),
             },
         };
-        let err = build_config(cfg).unwrap_err();
+        let err = build_config("openai_responses_format", cfg).unwrap_err();
         assert!(
             err.to_string().contains("authorization"),
             "authorization promotion header should be rejected: {err}"
@@ -282,7 +317,7 @@ extra: true
                 mode: default_mode_header(),
             },
         };
-        let err = build_config(cfg).unwrap_err();
+        let err = build_config("openai_responses_format", cfg).unwrap_err();
         assert!(
             err.to_string().contains("x-api-key"),
             "x-api-key promotion header should be rejected: {err}"
@@ -300,7 +335,7 @@ extra: true
                 mode: default_mode_header(),
             },
         };
-        let err = build_config(cfg).unwrap_err();
+        let err = build_config("openai_responses_format", cfg).unwrap_err();
         assert!(
             err.to_string().contains("x-praxis-route"),
             "unrelated x-praxis-* promotion header should be rejected: {err}"
@@ -318,7 +353,7 @@ extra: true
                 mode: default_mode_header(),
             },
         };
-        let err = build_config(cfg).unwrap_err();
+        let err = build_config("openai_responses_format", cfg).unwrap_err();
         assert!(
             err.to_string().contains("x-praxis-ai-format"),
             "client-derived model must not overwrite format routing: {err}"
@@ -336,7 +371,7 @@ extra: true
                 mode: default_mode_header(),
             },
         };
-        let err = build_config(cfg).unwrap_err();
+        let err = build_config("openai_responses_format", cfg).unwrap_err();
         assert!(
             err.to_string().contains("x-praxis-ai-effective-model"),
             "format fact must not overwrite model-rewrite routing: {err}"
@@ -350,7 +385,7 @@ extra: true
             headers: ResponsesFormatHeaders::default(),
         };
         assert!(
-            build_config(cfg).is_ok(),
+            build_config("openai_responses_format", cfg).is_ok(),
             "dedicated classification defaults should remain allowed"
         );
     }
@@ -366,7 +401,7 @@ extra: true
                 mode: Some("x-praxis-responses-mode".into()),
             },
         };
-        let err = build_config(cfg).unwrap_err();
+        let err = build_config("openai_responses_format", cfg).unwrap_err();
         assert!(
             err.to_string().contains("same header name"),
             "duplicate format and model headers should be rejected: {err}"
@@ -392,6 +427,6 @@ headers:
         assert!(cfg.headers.model.is_none());
         assert!(cfg.headers.stream.is_none());
         assert!(cfg.headers.mode.is_none());
-        assert!(build_config(cfg).is_ok());
+        assert!(build_config("openai_responses_format", cfg).is_ok());
     }
 }

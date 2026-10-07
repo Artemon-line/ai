@@ -14,13 +14,14 @@
 //! discriminator is a Responses request rather than unknown JSON. A
 //! `GET /v1/responses` `WebSocket` upgrade is classified from the method,
 //! path, and upgrade headers without inferring body-derived facts.
-//! Create requests with `background=true` are rejected because Praxis does not
-//! implement the asynchronous Responses lifecycle.
+//! `background` is preserved as routing metadata. Gateway-owned validation
+//! rejects unsupported `background=true` after logical provider binding, while
+//! provider-owned passthrough keeps the field intact.
 //! Promotes classification facts to configurable headers, durable
 //! metadata, and filter results for routing. Does not mutate the
 //! request body.
 //!
-//! The `openai_responses_validate` filter runs after the classifier
+//! The `openai_responses_request` filter runs after the classifier
 //! to validate JSON syntax, reject conflicting history selectors, and
 //! extract additional fields without rejecting provider-owned parameter
 //! combinations.
@@ -61,7 +62,7 @@ pub(crate) mod responses_to_chat_completions;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on module")]
 #[allow(
     dead_code,
-    reason = "the Responses operation registry is consumed by the openai_operation classifier"
+    reason = "the Responses operation registry is consumed by the ai_operation classifier"
 )]
 pub(crate) mod routes;
 #[cfg(feature = "openai-responses")]
@@ -73,6 +74,8 @@ pub(crate) mod stream_events;
 #[cfg(feature = "openai-responses")]
 pub(crate) mod usage;
 
+#[cfg(feature = "openai-responses")]
+pub use agentic_loop::AgenticLoopFilter;
 #[cfg(feature = "openai-responses")]
 pub use doc_extract::DocExtractFilter;
 #[cfg(feature = "openai-file-resolve-filter")]
@@ -112,9 +115,12 @@ use std::io;
 use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_filter::{
-    BodyAccess, BodyMode, ErrorResponseFormatterHandle, FilterAction, FilterError, HttpFilter, HttpFilterContext,
-    body::MAX_JSON_BODY_BYTES, builtins::http::payload_processing::OnInvalidBehavior, parse_filter_config,
+    BodyAccess, BodyMode, BoundUpstreamBodyOutcome, ErrorResponseFormatterHandle, FilterAction, FilterError,
+    HttpFilter, HttpFilterContext, body::MAX_JSON_BODY_BYTES, builtins::http::payload_processing::OnInvalidBehavior,
+    parse_filter_config,
 };
+#[cfg(feature = "openai-responses")]
+use praxis_filter::{Rejection, RequestExtensions, SubRequestResponseMode};
 use tracing::{debug, trace};
 
 use self::config::{ResponsesFormatConfig, build_config};
@@ -125,6 +131,62 @@ use crate::{
     },
     promotion::is_promotable_value,
 };
+
+/// Reduce an ordinary request-body action to the bound-upstream body's
+/// deliberately narrow continue-or-reject contract.
+///
+/// The bound phase runs after the complete request body has been buffered, so
+/// `Release` and `BodyDone` both mean that processing may continue. Terminal
+/// responses are invalid at this lifecycle point; callers that need one must
+/// stash the required state and emit it from their later header hook.
+pub(crate) fn bound_body_outcome(action: FilterAction) -> Result<BoundUpstreamBodyOutcome, FilterError> {
+    match action {
+        FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone => {
+            Ok(BoundUpstreamBodyOutcome::Continue)
+        },
+        FilterAction::Reject(rejection) => Ok(BoundUpstreamBodyOutcome::Reject(rejection)),
+        FilterAction::TerminalResponse(_) | FilterAction::StreamingTerminalResponse(_) => {
+            Err("terminal response is invalid during bound-upstream body processing".into())
+        },
+    }
+}
+
+/// Per-round marker set by `openai_agentic_loop` before the selected protocol
+/// adapter chooses the effective response transport.
+#[cfg(feature = "openai-responses")]
+const AGENTIC_STREAM_GUARD_KEY: &str = "responses.agentic_stream_guard";
+
+/// Arm the agentic streaming safety check for the current IRR round.
+#[cfg(feature = "openai-responses")]
+pub(crate) fn arm_agentic_stream_guard(ctx: &mut HttpFilterContext<'_>) {
+    ctx.set_metadata(AGENTIC_STREAM_GUARD_KEY, "true");
+}
+
+/// Enforce the agentic streaming safety check after transport selection.
+///
+/// Protocol adapters select their transport in the selected-upstream body
+/// phase, after request-header filters have run. `openai_agentic_loop` arms the
+/// check during its request hook; the selected adapter consumes it here once
+/// the effective outbound `stream` bit is known. This still rejects before any
+/// backend dispatch while allowing the adapter to run after upstream selection.
+#[cfg(feature = "openai-responses")]
+pub(crate) fn enforce_agentic_stream_guard(ctx: &mut HttpFilterContext<'_>) -> Option<Rejection> {
+    if ctx.get_metadata(AGENTIC_STREAM_GUARD_KEY) != Some("true") {
+        return None;
+    }
+
+    ctx.set_metadata(AGENTIC_STREAM_GUARD_KEY, "false");
+    let stream_events_armed = ctx.get_metadata("responses.logical_stream") == Some("true");
+    ctx.set_metadata("responses.logical_stream", "false");
+
+    (ctx.subrequest_response_mode() == SubRequestResponseMode::Streaming && !stream_events_armed).then(|| {
+        error::responses_error_rejection(
+            500,
+            "server_error",
+            "openai_agentic_loop with a streaming protocol adapter requires openai_stream_events in the same step so loop-terminal errors can reach the client",
+        )
+    })
+}
 
 /// Count compact JSON bytes without retaining the serialized representation.
 ///
@@ -145,6 +207,103 @@ pub(crate) fn bounded_json_size<T: serde::Serialize + ?Sized>(
     }
     result?;
     Ok(Some(counter.bytes))
+}
+
+/// Read newly produced local tool results as request-rail messages.
+///
+/// Local Responses dispatchers mark the canonical `messages` suffix they
+/// append during IRR re-entry. Each configured tool-result guardrail reads the
+/// same marked suffix, so layered policies all evaluate the result. The loop
+/// owner clears the marker after every request-body filter has run. This copies
+/// only the `function_call_output` values required by the asynchronous callout;
+/// earlier conversation history is neither copied nor rescanned.
+///
+/// # Errors
+///
+/// Returns an error before cloning any result payload when the marked suffix
+/// exceeds `max_bytes` or cannot be measured as JSON.
+#[cfg(feature = "openai-responses")]
+pub fn local_tool_guardrail_messages(
+    extensions: &RequestExtensions,
+    max_bytes: usize,
+) -> Result<Vec<serde_json::Value>, FilterError> {
+    let Some(state) = extensions.get::<state::ResponsesState>() else {
+        return Ok(Vec::new());
+    };
+    let Some(start) = state.pending_local_tool_guardrail_start else {
+        return Ok(Vec::new());
+    };
+
+    let outputs: Vec<&serde_json::Value> = state
+        .messages
+        .get(start..)
+        .unwrap_or_default()
+        .iter()
+        .filter(|message| message.get("type").and_then(serde_json::Value::as_str) == Some("function_call_output"))
+        .filter_map(|message| message.get("output"))
+        .collect();
+    ensure_local_tool_guardrail_outputs_fit(&outputs, max_bytes)?;
+
+    Ok(outputs
+        .into_iter()
+        .map(|output| {
+            serde_json::json!({
+                "role": "user",
+                "content": output,
+            })
+        })
+        .collect())
+}
+
+/// Bound the owned async-callout copy before allocating it.
+///
+/// # Errors
+///
+/// Returns an error when the outputs exceed `max_bytes` or cannot be measured
+/// as JSON.
+#[cfg(feature = "openai-responses")]
+fn ensure_local_tool_guardrail_outputs_fit(
+    outputs: &[&serde_json::Value],
+    max_bytes: usize,
+) -> Result<(), FilterError> {
+    let mut used = 0_usize;
+    for output in outputs {
+        // Conservatively include the fixed JSON envelope around each output.
+        // This bound is checked before cloning any payload into the async
+        // callout's owned message vector.
+        used = used.saturating_add(32);
+        let Some(size) = bounded_json_size(*output, max_bytes.saturating_sub(used))
+            .map_err(|error| -> FilterError { format!("failed to size local tool result: {error}").into() })?
+        else {
+            return Err(format!("local tool results exceed the guardrail evaluation limit ({max_bytes} bytes)").into());
+        };
+        used = used.saturating_add(size);
+        if used > max_bytes {
+            return Err(format!("local tool results exceed the guardrail evaluation limit ({max_bytes} bytes)").into());
+        }
+    }
+    Ok(())
+}
+
+/// Record a terminal tool-result guardrail failure for the agentic loop owner.
+///
+/// The guardrail runs after request-side dispatchers, but it must not become a
+/// second response-commit authority. The loop owner consumes this failure later
+/// in the same request phase and selects a buffered JSON rejection or an SSE
+/// error according to the already-established Responses lifecycle.
+#[must_use]
+#[cfg(feature = "openai-responses")]
+pub fn record_local_tool_guardrail_failure(
+    extensions: &mut RequestExtensions,
+    status: u16,
+    code: &'static str,
+    message: String,
+) -> bool {
+    let Some(state) = extensions.get_mut::<state::ResponsesState>() else {
+        return false;
+    };
+    state.dispatch_failure = Some(state::DispatchFailure { status, code, message });
+    true
 }
 
 /// JSON writer that counts bytes and stops at a fixed ceiling.
@@ -185,7 +344,7 @@ impl io::Write for BoundedJsonCounter {
 /// Default store name used when registering the response store in the
 /// per-request registry.
 #[cfg(feature = "store")]
-pub(crate) const DEFAULT_STORE_NAME: &str = "default";
+pub const DEFAULT_STORE_NAME: &str = "default";
 
 /// Legacy test tenant value retained for fixture compatibility.
 #[cfg(test)]
@@ -265,7 +424,7 @@ impl ResponsesFormatFilter {
     /// [`FilterError`]: praxis_filter::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: ResponsesFormatConfig = parse_filter_config("openai_responses_format", config)?;
-        let validated = build_config(cfg)?;
+        let validated = build_config("openai_responses_format", cfg)?;
         Ok(Box::new(Self { config: validated }))
     }
 }
@@ -319,10 +478,6 @@ impl HttpFilter for ResponsesFormatFilter {
             return Ok(action);
         }
 
-        if let Some(action) = handle_unsupported_background(&classified) {
-            return Ok(action);
-        }
-
         let mode = if websocket_handshake {
             None
         } else {
@@ -333,7 +488,7 @@ impl HttpFilter for ResponsesFormatFilter {
 
         write_metadata(ctx, &classified, mode);
         promote_headers(ctx, &classified, &self.config, mode);
-        promote_filter_results(ctx, &classified, mode)?;
+        promote_filter_results(ctx, "openai_responses_format", &classified, mode)?;
 
         Ok(FilterAction::Release)
     }
@@ -418,9 +573,10 @@ fn handle_invalid_format(format: AiRequestFormat, config: &ResponsesFormatConfig
 
 /// Reject Responses create requests that request background execution.
 ///
-/// Praxis does not implement the asynchronous Responses lifecycle
-/// (schedule, poll, cancel), so `background=true` is rejected uniformly
-/// before routing or upstream contact with an OpenAI-shaped 400.
+/// The consolidated gateway-owned request processor uses this check. The
+/// standalone classifier deliberately does not, so provider-owned traffic can
+/// retain the field until routing decides whether the gateway owns validation.
+#[cfg(feature = "openai-responses")]
 fn handle_unsupported_background(classified: &ClassifiedRequest) -> Option<FilterAction> {
     if classified.format == AiRequestFormat::Responses && classified.background == Some(true) {
         return Some(FilterAction::Reject(error::responses_error_rejection(
@@ -430,6 +586,21 @@ fn handle_unsupported_background(classified: &ClassifiedRequest) -> Option<Filte
         )));
     }
     None
+}
+
+/// Reject a non-null provider-owned prompt template on a gateway-managed path.
+///
+/// Callers own provider routing: direct OpenAI traffic must bypass the
+/// gateway-managed request processor or validator before reaching this check.
+#[cfg(feature = "openai-responses")]
+fn reject_prompt_template(body: &serde_json::Value) -> Option<FilterAction> {
+    body.get("prompt").is_some_and(|prompt| !prompt.is_null()).then(|| {
+        FilterAction::Reject(error::responses_error_rejection(
+            400,
+            "invalid_request_error",
+            "prompt templates are supported only for OpenAI-owned upstreams",
+        ))
+    })
 }
 
 /// Determine the routing mode for a Responses API request.
@@ -549,10 +720,14 @@ fn promote_headers(
 /// Promote classification facts to filter results for branch conditions.
 fn promote_filter_results(
     ctx: &mut HttpFilterContext<'_>,
+    filter: &'static str,
     classified: &ClassifiedRequest,
     mode: Option<&'static str>,
 ) -> Result<(), FilterError> {
-    let results = ctx.filter_results.entry("openai_responses_format").or_default();
+    // Results are published under the publishing filter's own name. A branch
+    // condition must name the filter it is attached to, so publishing under a
+    // fixed name would leave every branch on this filter unmatched.
+    let results = ctx.filter_results.entry(filter).or_default();
 
     results.set("format", classified.format.as_str())?;
     promote_optional_results(results, classified)?;
@@ -733,9 +908,9 @@ pub(crate) fn append_stored_input_items(messages: &mut Vec<serde_json::Value>, i
 
 /// Check whether this is an explicit `POST /v1/responses/compact` request.
 ///
-/// Shared by the store filter (best-effort store init) and the compaction
-/// filter, so neither optional filter depends on the other.
-#[cfg(feature = "store")]
+/// Used by the compaction filter to detect an explicit compact request. The
+/// store filter no longer needs it since migrating to registry-only resolution.
+#[cfg(feature = "openai-compact")]
 pub(crate) fn is_explicit_compact_request(ctx: &HttpFilterContext<'_>) -> bool {
     ctx.request.method == http::Method::POST && ctx.request.uri.path().trim_end_matches('/') == "/v1/responses/compact"
 }
@@ -753,17 +928,23 @@ pub(crate) fn user_message_item(text: &str) -> serde_json::Value {
 #[cfg(feature = "store")]
 pub(crate) mod rehydrate;
 #[cfg(feature = "openai-responses")]
-pub(crate) mod validate;
+pub(crate) mod request;
+#[cfg(feature = "openai-responses")]
 #[cfg(feature = "openai-responses")]
 pub(crate) mod web_search;
 
-#[cfg(feature = "openai-responses")]
-pub use agentic_loop::AgenticLoopFilter;
+#[cfg(feature = "openai-responses-openapi")]
+pub(crate) mod contracts;
+#[cfg(feature = "openai-responses-openapi")]
+pub(crate) mod openapi;
 #[cfg(feature = "openai-compact")]
 pub use compact::CompactFilter;
+#[cfg(feature = "openai-responses-openapi")]
+pub use openapi::implementation_openapi_json;
 #[cfg(feature = "store")]
 pub use rehydrate::RehydrateFilter;
 #[cfg(feature = "openai-responses")]
-pub use validate::OpenaiResponsesValidateFilter;
+pub use request::OpenaiResponsesRequestFilter;
+#[cfg(feature = "openai-responses")]
 #[cfg(feature = "openai-responses")]
 pub use web_search::WebSearchFilter;

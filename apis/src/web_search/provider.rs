@@ -85,7 +85,7 @@ pub(crate) enum SearchOutcome {
 ///   request extensions), so the executor stamps the callout at `depth + 1` and a recursive target remains accountable
 ///   to the IRR depth ceiling instead of resetting the count.
 ///
-/// [`FilteredSubrequestExecutor`]: praxis_filter::FilteredSubrequestExecutor
+/// [`FilteredSubrequestExecutor`]: `praxis_filter::FilteredSubrequestExecutor`
 pub(crate) struct CalloutContext {
     /// Downstream attributes forwarded to the outbound chain.
     runtime: SubrequestRuntime,
@@ -235,6 +235,18 @@ fn credential_authority(url: &str) -> Result<String, FilterError> {
     Ok(authority)
 }
 
+/// Whether `country` is a well-formed ISO 3166-1 alpha-2 code: exactly two ASCII
+/// letters. This is the format OpenAI's `user_location.country` and the providers
+/// that honor it (You.com's JSON enum) document; it is a syntactic check, not a
+/// lookup against any provider's accepted subset.
+///
+/// Only the OpenAI Responses preflight (via [`SearchClient::country_is_representable`])
+/// consumes this, so it is compiled out of the lean build where that module is absent.
+#[cfg(feature = "openai-responses")]
+fn is_iso_3166_alpha2(country: &str) -> bool {
+    country.len() == 2 && country.bytes().all(|byte| byte.is_ascii_alphabetic())
+}
+
 impl SearchClient {
     /// Build a search client from validated filter config.
     ///
@@ -289,6 +301,7 @@ impl SearchClient {
         callout: CalloutContext,
         query: &str,
         context_size: Option<SearchContextSize>,
+        country: Option<&str>,
         identity: &CalloutIdentity,
     ) -> SearchOutcome {
         let size = context_size.unwrap_or(self.default_context_size);
@@ -297,14 +310,92 @@ impl SearchClient {
             provider = self.provider.as_str(),
             query_bytes = query.len(),
             count,
+            has_country = country.is_some(),
             "executing web search"
         );
+        // Only `country` is threaded to the provider: it is an ISO 3166-1 alpha-2
+        // code that Brave and You.com accept verbatim. Tavily's `country` is a
+        // full-name enum the ISO code cannot be faithfully mapped to, and no
+        // provider exposes city/region/timezone parameters; those unsupported
+        // location fields are rejected up front by the dispatcher rather than
+        // silently dropped (issue #1548), so they never reach a request builder.
         let (url, request) = match self.provider {
-            SearchProvider::Brave => self.build_brave_request(query, count),
+            SearchProvider::Brave => self.build_brave_request(query, count, country),
             SearchProvider::Tavily => self.build_tavily_request(query, size),
-            SearchProvider::You => self.build_you_request(query, count),
+            SearchProvider::You => self.build_you_request(query, count, country),
         };
         self.execute_search(outbound, callout, &url, request, identity).await
+    }
+
+    /// Provider name for diagnostics and client-facing rejection messages.
+    ///
+    /// Only the OpenAI Responses preflight consumes this, so it is compiled out of
+    /// the lean build where that module is absent.
+    #[cfg(feature = "openai-responses")]
+    pub(crate) fn provider_name(&self) -> &'static str {
+        self.provider.as_str()
+    }
+
+    /// Canonical `user_location` fields the configured provider cannot faithfully
+    /// honor, in a stable order; empty when every present field is representable.
+    ///
+    /// Only `country` — an ISO 3166-1 alpha-2 code — maps cleanly, and only to the
+    /// providers that accept that exact format (Brave, You.com). Tavily's `country`
+    /// parameter is a full country-name enum that the canonical ISO code cannot be
+    /// faithfully converted to, so Tavily honors no location field. No integrated
+    /// provider exposes a city, region, or timezone parameter, so those are
+    /// unsupported for every provider. The dispatcher rejects the request when this
+    /// is non-empty rather than silently dropping the fields (issue #1548). A
+    /// `null` or empty-string member is a canonical "unset" and is never reported.
+    ///
+    /// Only the OpenAI Responses preflight consumes this, so it is compiled out of
+    /// the lean build where that module is absent.
+    #[cfg(feature = "openai-responses")]
+    pub(crate) fn unsupported_location_fields(&self, user_location: &Value) -> Vec<&'static str> {
+        let Some(location) = user_location.as_object() else {
+            return Vec::new();
+        };
+        let present = |field: &str| {
+            location
+                .get(field)
+                .is_some_and(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+        };
+        let country_supported = matches!(self.provider, SearchProvider::Brave | SearchProvider::You);
+        let mut unsupported = Vec::new();
+        if present("country") && !country_supported {
+            unsupported.push("country");
+        }
+        for field in ["city", "region", "timezone"] {
+            if present(field) {
+                unsupported.push(field);
+            }
+        }
+        unsupported
+    }
+
+    /// Whether the configured provider can faithfully forward the given `country`.
+    ///
+    /// Both Brave and You.com type `country` as an ISO 3166-1 alpha-2 enum — Brave
+    /// in its `X-Loc-Country` request header, You.com in a JSON body — so a value
+    /// that is not a well-formed alpha-2 code (two ASCII letters) cannot be a valid
+    /// member and is rejected here. A well-formed alpha-2 code is always
+    /// header-encodable, so this is strictly tighter than [`build_brave_request`]'s
+    /// `HeaderValue::from_str` and the builder never sees a value it cannot send.
+    /// Neither provider's accepted subset is publicly enumerated, so a
+    /// well-formed-but-unsupported code is still forwarded and surfaces as a
+    /// provider error rather than being validated away against a guessed list.
+    /// Either way the preflight rejects an unrepresentable value rather than letting
+    /// dispatch silently drop it and search without the caller's location (issue
+    /// #1548). Tavily reports `country` unsupported before this is consulted, so it
+    /// never constrains the value.
+    ///
+    /// [`build_brave_request`]: SearchClient::build_brave_request
+    #[cfg(feature = "openai-responses")]
+    pub(crate) fn country_is_representable(&self, country: &str) -> bool {
+        match self.provider {
+            SearchProvider::Brave | SearchProvider::You => is_iso_3166_alpha2(country),
+            SearchProvider::Tavily => true,
+        }
     }
 
     /// Execute a search request through the outbound chain and map the response
@@ -334,7 +425,11 @@ impl SearchClient {
         request: SubRequest,
         identity: &CalloutIdentity,
     ) -> SearchOutcome {
-        let deadline = Instant::now() + self.timeout;
+        // A callout receives at most its configured timeout and never a fresh
+        // budget beyond the enclosing IRR's absolute request deadline. This is
+        // recomputed for every round, so later calls inherit only the time that
+        // remains after prior inference and tool work.
+        let deadline = identity.deadline(Instant::now(), self.timeout);
         let Some((prepared, extensions)) = self.prepare_staged_request(url, request, deadline, identity).await else {
             return SearchOutcome::Failed;
         };
@@ -428,16 +523,8 @@ impl SearchClient {
         if let Some(pending) = pending {
             extensions.insert(pending);
         }
-        identity.project_owner_into(&mut extensions);
+        identity.project_context_into(&mut extensions);
         Some(extensions)
-    }
-
-    /// The request header a header-authenticated provider carries its API key in,
-    /// or `None` for a body-authenticated provider (Tavily, whose key travels in
-    /// the request body and is protected instead by the executor re-pinning the
-    /// staged upstream against mid-chain retargeting).
-    fn auth_header(&self) -> Option<http::HeaderName> {
-        provider_auth_header(self.provider)
     }
 
     /// Stage a header-authenticated provider's API key as an exact-authority-bound
@@ -462,7 +549,7 @@ impl SearchClient {
         url: &str,
         identity: &CalloutIdentity,
     ) -> Result<Option<PendingCredentials>, FilterError> {
-        let Some(header) = self.auth_header() else {
+        let Some(header) = provider_auth_header(self.provider) else {
             return Ok(None);
         };
         // Bind to the exact `host:port` authority the executor resolves from this
@@ -474,8 +561,7 @@ impl SearchClient {
         // the shared provider key. Both are deferred (never placed on the in-chain
         // request) and injected by the executor only at the resolved, pinned host.
         let secret = identity
-            .user_credential
-            .as_ref()
+            .user_credential()
             .map_or_else(|| self.api_key.expose_secret(), |user| user.expose_secret());
         let credential = DeferredCredential::new(&authority, header, secret)?;
         let mut pending = PendingCredentials::new();
@@ -579,7 +665,15 @@ impl SearchClient {
     }
 
     /// Build a Brave Search API request.
-    fn build_brave_request(&self, query: &str, count: u32) -> (String, SubRequest) {
+    ///
+    /// `country` is the caller's ISO 3166-1 alpha-2 location code, conveyed as the
+    /// `X-Loc-Country` request header when present. Brave's query `country`
+    /// parameter selects the result *market* (where results come from), not the
+    /// client's location; the `X-Loc-*` request headers are Brave's dedicated
+    /// client-geography channel, so a user's `user_location.country` belongs there
+    /// (issue #1548). We never carry coordinates, so this text header is the active
+    /// location signal rather than a lat/long fallback.
+    fn build_brave_request(&self, query: &str, count: u32, country: Option<&str>) -> (String, SubRequest) {
         let encoded_query = percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC);
         let base = self.effective_base_url();
         let url = format!("{base}/res/v1/web/search?q={encoded_query}&count={count}");
@@ -591,6 +685,22 @@ impl SearchClient {
         // only reach the provider host it was prepared for.
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, http::HeaderValue::from_static("application/json"));
+        // Convey the caller's country through Brave's client-location header. A
+        // canonical ISO 3166-1 alpha-2 code is always a valid header value; the
+        // error arm only guards pathological input (control characters), which is
+        // dropped with a warning rather than failing the whole search.
+        if let Some(country) = country {
+            match http::HeaderValue::from_str(country) {
+                Ok(value) => {
+                    headers.insert(http::HeaderName::from_static("x-loc-country"), value);
+                },
+                Err(error) => warn!(
+                    provider = self.provider.as_str(),
+                    %error,
+                    "dropping unrepresentable user_location country header"
+                ),
+            }
+        }
 
         (
             url,
@@ -639,11 +749,20 @@ impl SearchClient {
     }
 
     /// Build a You.com Search API request.
-    fn build_you_request(&self, query: &str, count: u32) -> (String, SubRequest) {
-        let body = serde_json::json!({
+    ///
+    /// `country` is the caller's ISO 3166-1 alpha-2 location code, added to the
+    /// request body as the You.com `country` field when present; You.com accepts
+    /// the canonical code verbatim. Value ranges are left to the provider.
+    fn build_you_request(&self, query: &str, count: u32, country: Option<&str>) -> (String, SubRequest) {
+        let mut body = serde_json::json!({
             "query": query,
             "count": count,
         });
+        if let Some(country) = country
+            && let Some(object) = body.as_object_mut()
+        {
+            object.insert("country".to_owned(), Value::String(country.to_owned()));
+        }
 
         // The API key is NOT set here: it is staged as an authority-bound
         // `DeferredCredential` (`x-api-key`) in `prepare_staged_request` and
@@ -911,11 +1030,10 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: None,
             user_credential: None,
-            terminal_streaming: false,
         };
         let client = SearchClient::from_config("test", &config, test_subrequest_client()).unwrap();
 
-        let (url, request) = client.build_you_request("Praxis proxy", 5);
+        let (url, request) = client.build_you_request("Praxis proxy", 5, None);
 
         assert_eq!(url, "https://api.you.com/v1/search");
         assert_eq!(request.method, http::Method::POST);
@@ -949,17 +1067,13 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: None,
             user_credential: None,
-            terminal_streaming: false,
         };
         SearchClient::from_config("test", &config, test_subrequest_client()).unwrap()
     }
 
     /// A callout identity with no owner and no per-user credential (shared-key path).
     fn shared_key_identity() -> CalloutIdentity {
-        CalloutIdentity {
-            owner: None,
-            user_credential: None,
-        }
+        CalloutIdentity::for_test(None, None)
     }
 
     /// A minimal GET `SubRequest` for the `execute_search` callout tests.
@@ -981,14 +1095,13 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: None,
             user_credential: None,
-            terminal_streaming: false,
         }
     }
 
     #[test]
     fn brave_defers_credential_off_the_in_chain_request() {
         let brave = test_client_for(SearchProvider::Brave);
-        let (url, request) = brave.build_brave_request("test", 5);
+        let (url, request) = brave.build_brave_request("test", 5, None);
         assert!(
             request.headers.get("x-subscription-token").is_none(),
             "Brave API key must be deferred, not set on the in-chain request"
@@ -1056,7 +1169,6 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: None,
             user_credential: None,
-            terminal_streaming: false,
         };
         let client = SearchClient::from_config("test", &config, test_subrequest_client());
         assert!(client.is_ok(), "a valid search configuration should build a client");
@@ -1072,7 +1184,6 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: None,
             user_credential: None,
-            terminal_streaming: false,
         };
 
         let error = SearchClient::from_config("anthropic_web_search", &config, test_subrequest_client()).unwrap_err();
@@ -1095,10 +1206,9 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: Some("http://localhost:9999".into()),
             user_credential: None,
-            terminal_streaming: false,
         };
         let client = SearchClient::from_config("test", &config, test_subrequest_client()).unwrap();
-        let (url, _) = client.build_brave_request("test query", 5);
+        let (url, _) = client.build_brave_request("test query", 5, None);
         assert!(
             url.starts_with("http://localhost:9999/"),
             "base_url should override the default Brave URL; got: {url}"
@@ -1115,7 +1225,6 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: Some("http://localhost:9999".into()),
             user_credential: None,
-            terminal_streaming: false,
         };
         let client = SearchClient::from_config("test", &config, test_subrequest_client()).unwrap();
         let (url, _) = client.build_tavily_request("test query", SearchContextSize::Medium);
@@ -1135,14 +1244,175 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: Some("http://localhost:9999".into()),
             user_credential: None,
-            terminal_streaming: false,
         };
         let client = SearchClient::from_config("test", &config, test_subrequest_client()).unwrap();
-        let (url, _) = client.build_you_request("test query", 5);
+        let (url, _) = client.build_you_request("test query", 5, None);
         assert!(
             url.starts_with("http://localhost:9999/"),
             "base_url should override the default You.com URL; got: {url}"
         );
+    }
+
+    #[test]
+    fn brave_request_forwards_country_as_client_location_header() {
+        let brave = test_client_for(SearchProvider::Brave);
+        let (url, request) = brave.build_brave_request("rust", 5, Some("FR"));
+        // The country belongs in Brave's client-location header, NOT the query
+        // `country` param (which selects the result market, not the user).
+        assert_eq!(
+            request
+                .headers
+                .get("x-loc-country")
+                .and_then(|value| value.to_str().ok()),
+            Some("FR"),
+            "Brave must forward the ISO country code as the X-Loc-Country header"
+        );
+        assert!(
+            !url.contains("country="),
+            "Brave must not forward the country as a query param: {url}"
+        );
+        let (_, bare) = brave.build_brave_request("rust", 5, None);
+        assert!(
+            !bare.headers.contains_key("x-loc-country"),
+            "Brave must omit the client-location header when no location is set"
+        );
+    }
+
+    #[test]
+    fn you_request_forwards_country_body_field() {
+        let you = test_client_for(SearchProvider::You);
+        let (_, request) = you.build_you_request("rust", 5, Some("FR"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&request.body).unwrap(),
+            json!({"query": "rust", "count": 5, "country": "FR"}),
+            "You.com must forward the ISO country code in the request body"
+        );
+        let (_, bare) = you.build_you_request("rust", 5, None);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bare.body).unwrap(),
+            json!({"query": "rust", "count": 5}),
+            "You.com must omit country when no location is set"
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn country_supporting_providers_report_no_unsupported_country() {
+        let location = json!({"type": "approximate", "country": "FR"});
+        for provider in [SearchProvider::Brave, SearchProvider::You] {
+            assert!(
+                test_client_for(provider)
+                    .unsupported_location_fields(&location)
+                    .is_empty(),
+                "{} accepts an ISO country code directly",
+                provider.as_str()
+            );
+        }
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn tavily_reports_country_as_unsupported() {
+        // Tavily's `country` is a full-name enum the canonical ISO code cannot map
+        // to, so it honors no location field and the code must be reported.
+        let location = json!({"type": "approximate", "country": "FR"});
+        assert_eq!(
+            test_client_for(SearchProvider::Tavily).unsupported_location_fields(&location),
+            vec!["country"],
+            "Tavily cannot honor an ISO country code"
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn city_region_timezone_are_unsupported_for_every_provider() {
+        let location = json!({
+            "type": "approximate",
+            "country": "FR",
+            "city": "Paris",
+            "region": "Ile-de-France",
+            "timezone": "Europe/Paris",
+        });
+        for provider in [SearchProvider::Brave, SearchProvider::You] {
+            assert_eq!(
+                test_client_for(provider).unsupported_location_fields(&location),
+                vec!["city", "region", "timezone"],
+                "{} supports only country, never city/region/timezone",
+                provider.as_str()
+            );
+        }
+        assert_eq!(
+            test_client_for(SearchProvider::Tavily).unsupported_location_fields(&location),
+            vec!["country", "city", "region", "timezone"],
+            "Tavily supports no location field"
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn null_and_empty_location_members_are_treated_as_unset() {
+        // A null or empty-string member is a canonical "unset" and must never be
+        // reported as an unsupported field.
+        let location = json!({
+            "type": "approximate",
+            "country": "FR",
+            "city": null,
+            "region": "",
+        });
+        assert!(
+            test_client_for(SearchProvider::Brave)
+                .unsupported_location_fields(&location)
+                .is_empty(),
+            "null/empty members must be ignored, leaving only a supported country"
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn brave_represents_only_well_formed_alpha2_countries() {
+        // Brave carries the country in the `X-Loc-Country` header, typed as an ISO
+        // 3166-1 alpha-2 enum. A well-formed two-letter code is representable; any
+        // other value (control character, wrong length, non-letters) is rejected at
+        // preflight rather than forwarded as an out-of-contract header value that
+        // Brave may reject or ignore (issue #1548).
+        let brave = test_client_for(SearchProvider::Brave);
+        assert!(
+            brave.country_is_representable("FR"),
+            "a plain alpha-2 code is representable"
+        );
+        assert!(
+            !brave.country_is_representable("FR\n"),
+            "a control character is not alpha-2"
+        );
+        assert!(
+            !brave.country_is_representable("not-a-country"),
+            "a non-code string is not alpha-2"
+        );
+        assert!(
+            !brave.country_is_representable("USA"),
+            "a three-letter code is not alpha-2"
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn you_represents_only_well_formed_alpha2_countries() {
+        // You.com carries the country in a JSON body typed as an ISO 3166-1 alpha-2
+        // enum, so a well-formed two-letter code is representable but a malformed
+        // value (control character, wrong length, non-letters) is rejected at
+        // preflight rather than forwarded for the provider to 400 on (issue #1548).
+        let you = test_client_for(SearchProvider::You);
+        assert!(
+            you.country_is_representable("FR"),
+            "a plain alpha-2 code is representable"
+        );
+        assert!(
+            !you.country_is_representable("FR\n"),
+            "a control character is not alpha-2"
+        );
+        assert!(!you.country_is_representable("France"), "a full name is not alpha-2");
+        assert!(!you.country_is_representable("fr-FR"), "a locale tag is not alpha-2");
+        assert!(!you.country_is_representable("1"), "a single digit is not alpha-2");
     }
 
     #[test]
@@ -1155,7 +1425,6 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: None,
             user_credential: None,
-            terminal_streaming: false,
         };
         let client = SearchClient::from_config("test", &config, test_subrequest_client()).unwrap();
         let outcome = client.parse_response(b"not json");
@@ -1175,7 +1444,6 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: None,
             user_credential: None,
-            terminal_streaming: false,
         };
         let client = SearchClient::from_config("test", &config, test_subrequest_client()).unwrap();
         let outcome = client.parse_response(br#"{"web":{"results":[]}}"#);
@@ -1194,9 +1462,42 @@ mod tests {
             max_body_bytes: 64 * 1024 * 1024,
             base_url: None,
             user_credential: None,
-            terminal_streaming: false,
         };
         SearchClient::from_config("test", &config, test_subrequest_client()).unwrap()
+    }
+
+    #[test]
+    fn callout_deadline_uses_provider_timeout_without_a_parent() {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(5);
+        assert_eq!(
+            shared_key_identity().deadline(now, timeout),
+            now + timeout,
+            "a top-level callout receives its configured timeout"
+        );
+    }
+
+    #[test]
+    fn callout_deadline_preserves_a_shorter_provider_timeout() {
+        let now = Instant::now();
+        let provider_deadline = now + Duration::from_secs(2);
+        let parent_deadline = now + Duration::from_secs(5);
+        assert_eq!(
+            CalloutIdentity::for_test_with_deadline(parent_deadline).deadline(now, Duration::from_secs(2)),
+            provider_deadline,
+            "the parent must not widen a tighter provider timeout"
+        );
+    }
+
+    #[test]
+    fn callout_deadline_is_capped_by_the_remaining_parent_deadline() {
+        let now = Instant::now();
+        let parent_deadline = now + Duration::from_millis(25);
+        assert_eq!(
+            CalloutIdentity::for_test_with_deadline(parent_deadline).deadline(now, Duration::from_secs(5)),
+            parent_deadline,
+            "an IRR callout cannot receive time beyond the router's absolute deadline"
+        );
     }
 
     /// Build a minimal bound outbound chain for callout tests.
@@ -1209,6 +1510,21 @@ mod tests {
     /// `insecure_options.allow_private_upstreams`.
     fn test_outbound() -> Arc<FilterPipeline> {
         Arc::new(crate::web_search::test_outbound_pipeline().unwrap())
+    }
+
+    fn owner_projecting_outbound() -> Arc<FilterPipeline> {
+        let mut registry = praxis_filter::FilterRegistry::with_builtins();
+        praxis_filter::register_filters!(
+            @register registry,
+            http "project_state_owner_headers" => crate::ProjectStateOwnerHeadersFilter::from_config
+        );
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
+            "- filter: project_state_owner_headers\n  tenant_header: x-tenant-id\n  subject_header: x-user-id\n",
+        )
+        .expect("state-owner projection entry parses");
+        let mut pipeline = FilterPipeline::build(&mut entries, &registry).expect("owner projection pipeline builds");
+        pipeline.set_allow_private_upstreams(true);
+        Arc::new(pipeline)
     }
 
     fn spawn_http_server(listener: TcpListener, status: u16, body: &str) {
@@ -1336,6 +1652,39 @@ mod tests {
         assert!(
             matches!(outcome, SearchOutcome::Failed),
             "a timeout should map to Failed: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_timeout_is_capped_by_the_parent_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let mut client = test_search_client();
+        client.timeout = Duration::from_secs(2);
+        let parent_deadline = Instant::now() + Duration::from_millis(100);
+        let started = Instant::now();
+        let outcome = client
+            .execute_search(
+                &test_outbound(),
+                CalloutContext::for_test(),
+                &format!("http://{addr}/search"),
+                test_get_request(),
+                &CalloutIdentity::for_test_with_deadline(parent_deadline),
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, SearchOutcome::Failed),
+            "an exhausted parent deadline should map to Failed: {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the callout must use the 100ms parent remainder, not its fresh 2s timeout"
         );
     }
 
@@ -1605,10 +1954,7 @@ mod tests {
         // Brave client whose SHARED key is "shared-secret".
         let config = brave_config_with_shared_key("shared-secret");
         let client = SearchClient::from_config("test", &config, test_subrequest_client()).unwrap();
-        let identity = CalloutIdentity {
-            owner: None,
-            user_credential: Some(SecretString::from("per-user-secret".to_owned())),
-        };
+        let identity = CalloutIdentity::for_test(None, Some(SecretString::from("per-user-secret".to_owned())));
         let url = format!("http://{addr}/res/v1/web/search?q=test&count=5");
         let request = test_get_request();
         let _unused = client
@@ -1629,16 +1975,84 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test performs and compares two complete user-scoped wire exchanges"
+    )]
+    async fn two_user_web_search_contexts_are_isolated() {
+        let outbound = owner_projecting_outbound();
+        let response = json!({
+            "web": {"results": [{"title": "T", "url": "https://e.example", "description": "d"}]}
+        })
+        .to_string();
+        let mut received = Vec::new();
+
+        for suffix in ["a", "b"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let rx = spawn_recording_server(listener, 200, &response);
+            let client = SearchClient::from_config(
+                "test",
+                &brave_config_with_shared_key("shared-secret"),
+                test_subrequest_client(),
+            )
+            .unwrap();
+            let identity = CalloutIdentity::for_test(
+                Some(
+                    crate::StateOwner::from_trusted_parts(
+                        format!("tenant-{suffix}"),
+                        "urn:integration:test",
+                        format!("user-{suffix}"),
+                    )
+                    .unwrap(),
+                ),
+                Some(SecretString::from(format!("credential-{suffix}"))),
+            );
+            let outcome = client
+                .execute_search(
+                    &outbound,
+                    CalloutContext::for_test(),
+                    &format!("http://{addr}/res/v1/web/search?q=test&count=5"),
+                    test_get_request(),
+                    &identity,
+                )
+                .await;
+            assert!(matches!(outcome, SearchOutcome::Results(_)));
+            received.push(String::from_utf8(rx.recv_timeout(Duration::from_secs(1)).unwrap()).unwrap());
+        }
+
+        for (request, suffix) in received.iter().zip(["a", "b"]) {
+            for expected in [
+                format!("x-subscription-token: credential-{suffix}"),
+                format!("x-tenant-id: tenant-{suffix}"),
+                format!("x-user-id: user-{suffix}"),
+            ] {
+                assert!(
+                    request.lines().any(|line| line.eq_ignore_ascii_case(&expected)),
+                    "user {suffix} callout must carry only its scoped context: {request}"
+                );
+            }
+            let other = if suffix == "a" { "b" } else { "a" };
+            assert!(
+                !request.contains(&format!("credential-{other}"))
+                    && !request.contains(&format!("tenant-{other}"))
+                    && !request.contains(&format!("user-{other}")),
+                "user {suffix} callout leaked user {other} context: {request}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn stage_extensions_projects_owner_into_child_extensions() {
         let client = test_client_for(SearchProvider::Brave);
         let url = "http://127.0.0.1:9/res/v1/web/search";
         let target = prepare_url_target(url, Instant::now() + Duration::from_secs(5), |_addrs| Ok(()))
             .await
             .unwrap();
-        let identity = CalloutIdentity {
-            owner: Some(crate::StateOwner::from_trusted_parts("tenant-a", "issuer-a", "subject-a").unwrap()),
-            user_credential: None,
-        };
+        let identity = CalloutIdentity::for_test(
+            Some(crate::StateOwner::from_trusted_parts("tenant-a", "issuer-a", "subject-a").unwrap()),
+            None,
+        );
         let ext = client
             .stage_extensions(&target, url, &identity)
             .expect("staging succeeds");
@@ -1659,7 +2073,7 @@ mod tests {
     #[test]
     fn staged_credentials_fall_back_to_shared_key_without_a_per_user_secret() {
         let brave = test_client_for(SearchProvider::Brave);
-        let (url, _) = brave.build_brave_request("test", 5);
+        let (url, _) = brave.build_brave_request("test", 5, None);
         assert!(
             brave
                 .staged_credentials(&url, &shared_key_identity())

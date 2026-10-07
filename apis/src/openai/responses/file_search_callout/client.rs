@@ -12,7 +12,7 @@ use std::{
 
 use bytes::Bytes;
 use http::HeaderMap;
-use praxis_core::connectivity::{PreparedSubrequest, PreparedTarget, is_private_ip, prepare_url_target};
+use praxis_core::connectivity::{PreparedSubrequest, PreparedTarget, prepare_url_target};
 use praxis_filter::{
     CalloutOutcome, CalloutResponse, FilterPipeline, FilteredSubrequestExecutor, RequestExtensions, StagedUpstream,
     StagedUpstreamFallback, SubRequest, SubrequestRuntime,
@@ -26,6 +26,7 @@ use serde_json::{Value, value::RawValue};
 use crate::{
     callout_identity::CalloutIdentity,
     callout_policy::OnFailure,
+    callout_target::AddressPolicy,
     http_hop::{connection_nominates_header, is_hop_by_hop},
     openai::api_client::resource_url,
     subrequest::SubRequestClient,
@@ -505,6 +506,10 @@ impl FileSearchClient {
         let mut deadline_recorded = false;
         let mut next_spec = 0_usize;
         let execution_started = Instant::now();
+        let execution_timeout = transport
+            .identity
+            .deadline(execution_started, self.timeout)
+            .saturating_duration_since(execution_started);
         // Read the SSRF policy once from the bound outbound pipeline. The
         // executor's transport pins the resolved literal address and so never
         // re-runs the private-IP check (literal targets bypass it), making the
@@ -519,10 +524,13 @@ impl FileSearchClient {
             transport.downstream.clone(),
             0,
             self.max_response_bytes,
-            self.timeout,
+            execution_timeout,
         );
         let outbound_headers = self.build_outbound_headers(request_headers);
-        let admission = match self.acquire_execution_admission(specs.len(), execution_started).await {
+        let admission = match self
+            .acquire_execution_admission(specs.len(), execution_started, execution_timeout)
+            .await
+        {
             Ok(admission) => admission,
             Err(message) => {
                 append_admission_failures(&mut batch.failures, specs, message);
@@ -532,7 +540,7 @@ impl FileSearchClient {
         batch.response_admission = Some(Arc::clone(&admission));
 
         while next_spec < specs.len() {
-            if execution_started.elapsed() >= self.timeout {
+            if execution_started.elapsed() >= execution_timeout {
                 append_unprocessed_deadline_failures(&mut batch.failures, specs, next_spec);
                 deadline_recorded = true;
                 break;
@@ -553,6 +561,7 @@ impl FileSearchClient {
                 self.search_one(
                     spec,
                     execution_started,
+                    execution_timeout,
                     Arc::clone(&admission),
                     &executor,
                     transport.outbound,
@@ -571,7 +580,7 @@ impl FileSearchClient {
             );
 
             next_spec = next_spec.saturating_add(chunk_len);
-            if execution_started.elapsed() >= self.timeout {
+            if execution_started.elapsed() >= execution_timeout {
                 append_unprocessed_deadline_failures(&mut batch.failures, specs, next_spec);
                 deadline_recorded = true;
                 break;
@@ -585,7 +594,7 @@ impl FileSearchClient {
         }
 
         batch.sort_results();
-        if !deadline_recorded && execution_started.elapsed() >= self.timeout {
+        if !deadline_recorded && execution_started.elapsed() >= execution_timeout {
             append_unprocessed_deadline_failures(&mut batch.failures, specs, next_spec);
         }
         batch
@@ -600,6 +609,7 @@ impl FileSearchClient {
         &self,
         spec: &SearchSpec<'_>,
         execution_started: Instant,
+        execution_timeout: Duration,
         response_admission: Arc<ResponseAdmission>,
         executor: &FilteredSubrequestExecutor,
         outbound: &Arc<FilterPipeline>,
@@ -607,14 +617,15 @@ impl FileSearchClient {
         outbound_headers: &HeaderMap,
         allow_private: bool,
     ) -> Result<SearchResponse, FileSearchError> {
-        deadline_remaining(self.timeout, execution_started, spec.store_id)?;
-        let request = self.build_request(spec, execution_started)?;
-        deadline_remaining(self.timeout, execution_started, spec.store_id)?;
+        deadline_remaining(execution_timeout, execution_started, spec.store_id)?;
+        let request = self.build_request(spec, execution_started, execution_timeout)?;
+        deadline_remaining(execution_timeout, execution_started, spec.store_id)?;
         let body = self
             .execute_request(
                 request,
                 spec.store_id,
                 execution_started,
+                execution_timeout,
                 executor,
                 outbound,
                 identity,
@@ -627,7 +638,7 @@ impl FileSearchClient {
             spec.store_id,
             result_limit(spec.max_num_results),
             execution_started,
-            self.timeout,
+            execution_timeout,
             response_admission,
         )
         .await
@@ -638,11 +649,11 @@ impl FileSearchClient {
         &self,
         spec_count: usize,
         execution_started: Instant,
+        execution_timeout: Duration,
     ) -> Result<Arc<ResponseAdmission>, &'static str> {
         let aggregate_units =
             response_admission_units(self.max_response_bytes, self.max_total_response_bytes, spec_count)?;
-        let remaining = self
-            .timeout
+        let remaining = execution_timeout
             .checked_sub(execution_started.elapsed())
             .filter(|remaining| !remaining.is_zero())
             .ok_or("file-search execution deadline exceeded while waiting for response admission")?;
@@ -663,6 +674,7 @@ impl FileSearchClient {
         &self,
         spec: &SearchSpec<'_>,
         execution_started: Instant,
+        execution_timeout: Duration,
     ) -> Result<PreparedSearchRequest, FileSearchError> {
         let url = self.search_url(spec.store_id)?;
         if spec.query.len() > MAX_QUERY_BYTES {
@@ -671,11 +683,11 @@ impl FileSearchClient {
                 format!("search query exceeds {MAX_QUERY_BYTES} byte limit"),
             ));
         }
-        deadline_remaining(self.timeout, execution_started, spec.store_id)?;
+        deadline_remaining(execution_timeout, execution_started, spec.store_id)?;
         let request_body =
             VectorStoreSearchRequest::new(spec.filters, spec.max_num_results, spec.query, spec.ranking_options)
                 .map_err(|message| request_error(spec.store_id, message))?;
-        let body = serialize_bounded_request(&request_body, spec.store_id, execution_started, self.timeout)?;
+        let body = serialize_bounded_request(&request_body, spec.store_id, execution_started, execution_timeout)?;
 
         Ok(PreparedSearchRequest { body, url })
     }
@@ -702,16 +714,18 @@ impl FileSearchClient {
         url: &str,
         store_id: &str,
         execution_started: Instant,
+        execution_timeout: Duration,
         deadline: Instant,
         allow_private: bool,
     ) -> Result<PreparedTarget, FileSearchError> {
-        let remaining = deadline_remaining(self.timeout, execution_started, store_id)?;
+        let remaining = deadline_remaining(execution_timeout, execution_started, store_id)?;
+        let address_policy = AddressPolicy::from_allow_private(allow_private);
         tokio::time::timeout(
             remaining,
             Box::pin(prepare_url_target(url, deadline, |addresses: &[SocketAddr]| {
-                if !allow_private && addresses.iter().any(|address| is_private_ip(&address.ip())) {
+                if addresses.iter().any(|address| address_policy.blocks(&address.ip())) {
                     return Err::<(), Box<dyn std::error::Error + Send + Sync>>(
-                        "vector-store target resolved to a private or reserved address".into(),
+                        "vector-store target resolved to an address blocked by outbound policy".into(),
                     );
                 }
                 Ok(())
@@ -742,6 +756,7 @@ impl FileSearchClient {
         request: PreparedSearchRequest,
         store_id: &str,
         execution_started: Instant,
+        execution_timeout: Duration,
         executor: &FilteredSubrequestExecutor,
         outbound: &Arc<FilterPipeline>,
         identity: &CalloutIdentity,
@@ -749,10 +764,17 @@ impl FileSearchClient {
         allow_private: bool,
     ) -> Result<Bytes, FileSearchError> {
         let deadline = execution_started
-            .checked_add(self.timeout)
+            .checked_add(execution_timeout)
             .ok_or_else(|| execution_deadline_error(store_id))?;
         let target = self
-            .prepare_search_target(&request.url, store_id, execution_started, deadline, allow_private)
+            .prepare_search_target(
+                &request.url,
+                store_id,
+                execution_started,
+                execution_timeout,
+                deadline,
+                allow_private,
+            )
             .await?;
         let staged = StagedUpstream::from_prepared_target(&target)
             .map_err(|_error| request_error(store_id, "vector-store upstream preparation failed"))?;
@@ -782,6 +804,7 @@ impl FileSearchClient {
             extensions,
             store_id,
             execution_started,
+            execution_timeout,
             deadline,
         )
         .await
@@ -805,9 +828,10 @@ impl FileSearchClient {
         extensions: RequestExtensions,
         store_id: &str,
         execution_started: Instant,
+        execution_timeout: Duration,
         deadline: Instant,
     ) -> Result<Bytes, FileSearchError> {
-        let remaining = deadline_remaining(self.timeout, execution_started, store_id)?;
+        let remaining = deadline_remaining(execution_timeout, execution_started, store_id)?;
         let outcome = tokio::time::timeout(
             remaining,
             Box::pin(executor.run_classified(outbound, prepared.request(), extensions, deadline)),

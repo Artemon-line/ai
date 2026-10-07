@@ -34,16 +34,21 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use praxis_filter::{
-    EmptyFilterConfig, FilterAction, FilterError, HttpFilter, HttpFilterContext,
+    BoundUpstreamBodyOutcome, FilterAction, FilterError, HttpFilter, HttpFilterContext,
     body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
     parse_filter_config,
 };
+use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, trace, warn};
 
+#[cfg(feature = "openai-mcp-tools")]
+use super::mcp_dispatch::{OWNER_FINGERPRINT, owner_fingerprint};
 use super::{
-    DEFAULT_STORE_NAME, append_stored_input_items, canonical_openresponses_replay_item,
-    error::responses_error_rejection, extract_conversation_id, state::ResponsesState,
+    DEFAULT_STORE_NAME, append_stored_input_items, bound_body_outcome, canonical_openresponses_replay_item,
+    error::responses_error_rejection,
+    extract_conversation_id,
+    state::{ResponsesState, strip_local_compaction_marker},
 };
 use crate::{
     is_event_stream_content_type,
@@ -81,7 +86,17 @@ const PREV_USAGE_TOTAL_KEY: &str = "responses.previous_usage_total_tokens";
 /// ```yaml
 /// filter: openai_responses_rehydrate
 /// ```
+#[derive(Default)]
 pub struct RehydrateFilter;
+
+/// Configuration for `openai_responses_rehydrate`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "an empty mapping accepts omitted config while deny_unknown_fields rejects stale options"
+)]
+struct RehydrateConfig {}
 
 impl RehydrateFilter {
     /// Create a filter from YAML config.
@@ -91,10 +106,7 @@ impl RehydrateFilter {
     /// Returns [`FilterError`] if the YAML config contains unknown
     /// fields.
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
-        // The filter has no tunable options. Parsing still runs so that
-        // `deny_unknown_fields` rejects any config keys, including the removed
-        // `max_history_bytes` / `max_history_items` limits.
-        let _: EmptyFilterConfig = parse_filter_config("openai_responses_rehydrate", config)?;
+        let _: RehydrateConfig = parse_filter_config("openai_responses_rehydrate", config)?;
         Ok(Box::new(Self))
     }
 
@@ -102,7 +114,7 @@ impl RehydrateFilter {
     /// `conversation`), and populate [`ResponsesState`] with the full
     /// conversation history.
     ///
-    /// The upstream `openai_responses_validate` filter rejects requests that
+    /// The upstream `openai_responses_request` filter rejects requests that
     /// supply both selectors; the resolution order here is a silent fallback.
     async fn rehydrate(
         &self,
@@ -135,6 +147,10 @@ impl RehydrateFilter {
             Err(action) => return Ok(action),
         };
         let previous_tools = collect_mcp_tool_listings(&record);
+        #[cfg(feature = "openai-mcp-tools")]
+        let mut previous_tools = previous_tools;
+        #[cfg(feature = "openai-mcp-tools")]
+        bind_previous_tools_to_owner(&mut previous_tools, &owner);
         let previous_usage = record.response_object.get("usage").filter(|u| !u.is_null()).cloned();
         let stored = stored_messages_for_response(record);
         let state = build_state(parsed_body, stored, previous_tools, previous_usage);
@@ -178,6 +194,10 @@ impl HttpFilter for RehydrateFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn bound_upstream_request_body_access(&self) -> BodyAccess {
         BodyAccess::ReadOnly
     }
 
@@ -229,6 +249,15 @@ impl HttpFilter for RehydrateFilter {
         }
 
         self.rehydrate(ctx, body).await
+    }
+
+    async fn on_bound_upstream_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<BoundUpstreamBodyOutcome, FilterError> {
+        let action = self.on_request_body(ctx, body, true).await?;
+        bound_body_outcome(action)
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -1134,7 +1163,12 @@ async fn fetch_and_validate_previous(
 /// `Release` when no conversation field is present or a `Reject`
 /// when the field is malformed.
 fn resolve_conversation_id(body: &Value) -> Result<String, FilterAction> {
-    let has_field = body.get("conversation").is_some();
+    // An explicit null selects no conversation, the same as omitting the field.
+    // Treating it as present rejects a well-formed body — a token-count request
+    // carrying `"conversation": null` would be told its conversation value is
+    // malformed. The classifier and the request processor already read both
+    // history selectors this way.
+    let has_field = body.get("conversation").is_some_and(|value| !value.is_null());
     extract_conversation_id(body).ok_or_else(|| {
         if has_field {
             FilterAction::Reject(responses_error_rejection(
@@ -1186,6 +1220,9 @@ fn build_state(
     let mut state = ResponsesState::from_request_body(parsed_body);
     state.history_rehydrated = true;
     state.messages.splice(0..0, replay);
+    state
+        .provider_compaction_ids
+        .extend(ResponsesState::provider_compaction_ids_from_messages(&stored));
     state.persisted_messages.splice(0..0, stored);
     state.previous_tools = previous_tools;
     state.previous_usage = previous_usage;
@@ -1221,7 +1258,11 @@ fn append_stored_output_items(messages: &mut Vec<Value>, output: Value) {
 
 /// Return stored items that should be replayed as backend request input.
 fn replay_messages_from_stored(stored: &[Value]) -> Vec<Value> {
-    stored.iter().filter_map(canonical_openresponses_replay_item).collect()
+    stored
+        .iter()
+        .filter_map(canonical_openresponses_replay_item)
+        .map(strip_local_compaction_marker)
+        .collect()
 }
 
 /// Parse the request body and extract `previous_response_id`.
@@ -1311,14 +1352,31 @@ fn collect_mcp_tool_listings(record: &ResponseRecord) -> Vec<Value> {
     listings
 }
 
+/// Bind cache-only MCP listings to the trusted owner that scoped the read.
+///
+/// The annotation is added after extracting fresh objects from the persisted
+/// public response, so it exists only in [`ResponsesState::previous_tools`] and
+/// can never leak into the client-visible `mcp_list_tools` item.
+#[cfg(feature = "openai-mcp-tools")]
+fn bind_previous_tools_to_owner(listings: &mut [Value], owner: &StateOwner) {
+    let fingerprint = Value::String(owner_fingerprint(owner));
+    for listing in listings {
+        if let Some(object) = listing.as_object_mut() {
+            object.insert(OWNER_FINGERPRINT.to_owned(), fingerprint.clone());
+        }
+    }
+}
+
+/// Deduplicate only listings for the same target and tool-name set.
+type McpListingKey = (String, Option<String>, Vec<String>);
+
 /// Append MCP tool listings from a sequence of response items.
-fn collect_mcp_tool_listings_from_items(
-    items: &[Value],
-    seen: &mut HashSet<(String, Vec<String>)>,
-    listings: &mut Vec<Value>,
-) {
+fn collect_mcp_tool_listings_from_items(items: &[Value], seen: &mut HashSet<McpListingKey>, listings: &mut Vec<Value>) {
     listings.extend(items.iter().filter_map(|item| {
-        if item.get("type").and_then(Value::as_str) != Some("mcp_list_tools") {
+        if !matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("mcp_list_tools" | "praxis_mcp_cached_listing")
+        ) {
             return None;
         }
 
@@ -1328,14 +1386,15 @@ fn collect_mcp_tool_listings_from_items(
         names.sort();
         names.dedup();
 
-        if !seen.insert((label.to_owned(), names)) {
+        let url = item.get("server_url").and_then(Value::as_str);
+        if !seen.insert((label.to_owned(), url.map(str::to_owned), names)) {
             return None;
         }
 
         let mut map = serde_json::Map::new();
         map.insert("server_label".to_owned(), Value::String(label.to_owned()));
         map.insert("tools".to_owned(), Value::Array(tools.clone()));
-        if let Some(url) = item.get("server_url").and_then(Value::as_str) {
+        if let Some(url) = url {
             map.insert("server_url".to_owned(), Value::String(url.to_owned()));
         }
         Some(Value::Object(map))

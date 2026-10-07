@@ -12,12 +12,14 @@
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used, reason = "tests")]
 mod tests;
 
-use std::{fmt, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use http::header::HeaderName;
+pub use praxis_ai_store::StateOwner;
+use praxis_ai_store::validate_component;
 use praxis_filter::{
     BodyAccess, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, RequestExtensions,
     TrustedHeaderMutation, parse_filter_config,
@@ -26,9 +28,6 @@ use serde::Deserialize;
 
 /// Maximum encoded owner assertion accepted from the trusted boundary.
 const MAX_ASSERTION_BYTES: usize = 4_096;
-
-/// Maximum UTF-8 bytes accepted in one owner component.
-const MAX_COMPONENT_BYTES: usize = 1_024;
 
 /// Supported assertion envelope version.
 const ASSERTION_VERSION_PREFIX: &str = "v1.";
@@ -39,21 +38,6 @@ const SINGLE_TENANT_ISSUER: &str = "urn:praxis:single-tenant";
 /// Stable subject used by the explicit shared-owner compatibility mode.
 const SINGLE_TENANT_SUBJECT: &str = "shared";
 
-/// Immutable tenant-qualified owner of persisted private state.
-///
-/// Tenant, issuer, and subject together form the ownership identity. The
-/// reference-counted components make passing the owner through records and
-/// request-scoped store handles cheap without copying identity strings.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct StateOwner {
-    /// Stable tenant namespace.
-    tenant_id: Arc<str>,
-    /// Stable identity-provider or trust-domain identifier.
-    issuer: Arc<str>,
-    /// Stable principal identifier within the issuer.
-    subject: Arc<str>,
-}
-
 /// Ingress-only headers consumed while normalizing [`StateOwner`].
 ///
 /// Core carries this bounded transport metadata through agentic subrequests so
@@ -62,77 +46,12 @@ pub struct StateOwner {
 #[derive(Clone, Debug)]
 pub(crate) struct StateOwnerIngressHeaders(pub(crate) Arc<[HeaderName]>);
 
-impl StateOwner {
-    /// Construct an owner from trusted, normalized identity parts.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StateOwnerError`] when a component is empty, oversized, or
-    /// contains a control character.
-    pub fn from_trusted_parts(
-        tenant_id: impl Into<Arc<str>>,
-        issuer: impl Into<Arc<str>>,
-        subject: impl Into<Arc<str>>,
-    ) -> Result<Self, StateOwnerError> {
-        let owner = Self {
-            tenant_id: tenant_id.into(),
-            issuer: issuer.into(),
-            subject: subject.into(),
-        };
-        validate_component("tenant", &owner.tenant_id)?;
-        validate_component("issuer", &owner.issuer)?;
-        validate_component("subject", &owner.subject)?;
-        Ok(owner)
-    }
-
-    /// Stable tenant namespace.
-    #[must_use]
-    pub fn tenant_id(&self) -> &str {
-        &self.tenant_id
-    }
-
-    /// Stable identity-provider or trust-domain identifier.
-    #[must_use]
-    pub fn issuer(&self) -> &str {
-        &self.issuer
-    }
-
-    /// Stable subject identifier within [`Self::issuer`].
-    #[must_use]
-    pub fn subject(&self) -> &str {
-        &self.subject
-    }
-}
-
-/// Invalid stable owner component.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct StateOwnerError {
-    /// Stable name of the component that failed validation.
-    component: &'static str,
-}
-
-impl StateOwnerError {
-    /// Stable name of the invalid component.
-    #[must_use]
-    pub fn component(self) -> &'static str {
-        self.component
-    }
-}
-
-impl fmt::Display for StateOwnerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid state owner {}", self.component)
-    }
-}
-
-impl std::error::Error for StateOwnerError {}
-
 /// Explicitly copy the normalized owner into an isolated subrequest context.
 ///
 /// Filtered subrequests inherit no parent extensions by default. A callout
 /// whose configured destination is authorized to receive identity can use
 /// this helper while assembling the child [`RequestExtensions`], then place
-/// `state_owner_headers` in that outbound chain to choose the wire names.
+/// `project_state_owner_headers` in that outbound chain to choose the wire names.
 /// Raw credentials and inbound headers are intentionally not copied.
 ///
 /// Returns `true` when an owner was present and projected.
@@ -285,9 +204,13 @@ fn ensure_distinct_component_headers(sources: [&OwnerComponentSource; 3]) -> Res
 /// This filter validates and strips consumed headers; it does not authenticate
 /// their producer. In `trusted_headers` mode each component must select exactly
 /// one `header` or `static` source, and component header names must be distinct.
+/// `single_tenant` assigns the same tenant, issuer, and `shared` subject to every
+/// request. It is suitable only when the whole deployment is one trust domain;
+/// it cannot provide per-user attribution, cache separation, or state isolation.
+/// Shared multi-user deployments must use `trusted_owner` or `trusted_headers`.
 /// Agentic routers can snapshot request headers before the parent protocol
 /// commits body-phase removals, so each destination-owned IRR step must begin
-/// with `state_owner_headers`; it consumes the carried transport metadata,
+/// with `project_state_owner_headers`; it consumes the carried transport metadata,
 /// strips the raw ingress names in the child, and emits only configured outputs.
 ///
 /// # Versioned-assertion YAML configuration
@@ -768,14 +691,6 @@ fn decode_assertion(value: &str) -> Result<StateOwner, OwnerAssertionError> {
         serde_json::from_slice(&decoded).map_err(|_error| OwnerAssertionError::InvalidPayload)?;
     StateOwner::from_trusted_parts(tenant_id, issuer, subject)
         .map_err(|error| OwnerAssertionError::InvalidComponent(error.component()))
-}
-
-/// Validate one bounded, nonempty owner component.
-pub(crate) fn validate_component(component: &'static str, value: &str) -> Result<(), StateOwnerError> {
-    if value.is_empty() || value.len() > MAX_COMPONENT_BYTES || value.chars().any(char::is_control) {
-        return Err(StateOwnerError { component });
-    }
-    Ok(())
 }
 
 /// Build a bounded rejection compatible with OpenAI and Anthropic clients.

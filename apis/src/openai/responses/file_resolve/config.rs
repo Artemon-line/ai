@@ -51,7 +51,8 @@ pub(crate) struct FileResolveConfig {
     /// filters observe and can mutate the outbound callout before it is
     /// dialed. SSRF protection for `files_api_url` derives from the
     /// pipeline's `allow_private_upstreams`, enforced both when the
-    /// callout target is pinned and at connect time.
+    /// callout target is pinned and at connect time. Cloud metadata,
+    /// unspecified, and multicast addresses remain blocked.
     ///
     /// Client-controlled `file_url` downloads never traverse this
     /// chain; they stay on the credential-free hardened resolver.
@@ -136,7 +137,9 @@ pub(crate) struct FileResolveConfig {
     #[serde(default)]
     pub on_missing: OnMissing,
 
-    /// HTTP timeout in milliseconds for Files API callout requests.
+    /// HTTP timeout in milliseconds for Files API callout requests. Inside an
+    /// iterative request router, the effective timeout is capped by the
+    /// router's remaining deadline.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 

@@ -44,7 +44,7 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::{
-    error::responses_error_rejection,
+    error::{responses_error_rejection, responses_error_rejection_with_code},
     state::{
         DispatchFailure, ResponsesState, consumed_builtin_tool_calls_before_current_round,
         current_round_tool_call_admissions,
@@ -69,15 +69,15 @@ const MAX_CALLS_METADATA: &str = "responses.web_search_max_calls_per_round";
 /// Include value that gates `action.sources` in the output item.
 const INCLUDE_ACTION_SOURCES: &str = "web_search_call.action.sources";
 
-/// Server-side hard cap on web searches dispatched in one continuation.
+/// Server-side hard cap on search queries dispatched in one continuation.
 ///
 /// Bounds the number of (potentially paid) provider requests issued per
-/// re-entry even when the client omits `max_tool_calls`. Mirrors the
-/// file-search `MAX_PENDING_CALLS` ceiling so the two built-in tools share
-/// the same per-continuation fan-out limit. The enclosing
-/// `iterative_request_router` deadlines and iteration cap bound the total
-/// across continuations.
-const MAX_WEB_SEARCH_CALLS_PER_CONTINUATION: usize = 64;
+/// re-entry even when the client omits `max_tool_calls`. One
+/// `web_search_call` may carry several queries, so this caps the
+/// query fan-out rather than the number of tool calls. The tool-call allowance
+/// is bounded separately by the client's `max_tool_calls` and by the configured
+/// `max_calls_per_round`.
+const MAX_WEB_SEARCH_QUERIES_PER_CONTINUATION: usize = 64;
 
 /// Model-facing result for a malformed call without `action.query`.
 const MISSING_QUERY_OUTPUT: &str = "Web search could not run because the query was missing.";
@@ -85,17 +85,17 @@ const MISSING_QUERY_OUTPUT: &str = "Web search could not run because the query w
 /// Model-facing result when the response-wide tool budget is exhausted.
 const TOOL_LIMIT_OUTPUT: &str = "Web search was not executed because max_tool_calls was exhausted.";
 
-/// Borrowed inputs for one request-side web-search dispatch batch.
-struct PendingSearchBatch<'a> {
-    /// Calls retained from the current model round.
-    calls: &'a [Value],
-    /// Ordered response-wide budget decisions, when the client set a limit.
-    admissions: Option<&'a [bool]>,
-    /// Remaining provider requests allowed by the cumulative budget.
-    provider_budget: usize,
-    /// Search result size requested for this response.
-    context_size: SearchContextSize,
-}
+/// Model-facing result for a call a budget left undispatched.
+const NOT_PERFORMED_OUTPUT: &str = "Web search not performed.";
+
+/// Model-facing result when the search service returned no results.
+const NO_RESULTS_OUTPUT: &str = "No search results found.";
+
+/// Model-facing result when the search service became unavailable before the call was completed.
+const PARTIAL_UNAVAILABLE_OUTPUT: &str = "Web search was performed partially before search service became unavailable.";
+
+/// Model-facing result when the call was clipped by the maximum query cap.
+const PARTIAL_CLIPPED_OUTPUT: &str = "Web search was performed partially before reaching the maximum query cap.";
 
 // -----------------------------------------------------------------------------
 // WebSearchFilter
@@ -280,14 +280,11 @@ impl WebSearchFilter {
     /// pair — so the agentic loop can continue. Uses the batch-resolved caller
     /// identity for provider credential staging and owner attribution.
     ///
-    /// `index` is the call's position within the pending queue. It keeps the
-    /// synthetic bridge `call_id` unique even when the hosted source ids
-    /// collide or are absent (issue #808).
+    /// The call's identities carry its position within the pending queue, which
+    /// keeps the synthetic bridge `call_id` unique even when the hosted source
+    /// ids collide or are absent (issue #808).
     ///
-    /// Returns `true` when a provider request was dispatched — a `Results` or
-    /// `Failed` outcome, both charged against the call budget — and `false`
-    /// when the call was surfaced as incomplete without issuing a request
-    /// (a missing query).
+    /// Returns how many queries were dispatched.
     #[expect(
         clippy::too_many_arguments,
         reason = "threads the batch-resolved caller identity into the provider search"
@@ -295,43 +292,43 @@ impl WebSearchFilter {
     async fn execute_single_search(
         &self,
         ctx: &mut HttpFilterContext<'_>,
-        call: &Value,
-        index: usize,
+        prepared: PreparedCall<'_>,
         context_size: SearchContextSize,
+        country: Option<&str>,
         identity: &CalloutIdentity,
-    ) -> bool {
-        let call_id = call.get("id").and_then(Value::as_str).unwrap_or("ws_unknown");
-        let query = call.get("action").and_then(|a| a.get("query")).and_then(Value::as_str);
-
-        let Some(query) = query else {
-            warn!(call_id, "web_search_call missing action.query, skipping");
-            let bridge = bridge_call_id(call_id, "", index);
-            let ids = SearchCallIds::new(call_id, &bridge, index);
-            append_incomplete(ctx, &ids);
-            return false;
-        };
-
-        let bridge = bridge_call_id(call_id, query, index);
-        let ids = SearchCallIds::new(call_id, &bridge, index);
-        // Capture the originating client's attributes and current outbound depth
-        // so the callout's outbound chain sees the real caller and the executor
-        // continues this request's depth accounting instead of resetting to zero.
-        let callout = CalloutContext::from_filter_context(ctx);
-        match self
-            .search_client
-            .search(&self.outbound, callout, query, Some(context_size), identity)
-            .await
-        {
-            SearchOutcome::Results(results) => append_result(ctx, &ids, "completed", query, &results),
-            SearchOutcome::Failed => {
-                warn!(
-                    call_id,
-                    "web search provider failed; continuing with a failed tool result"
-                );
-                append_failed(ctx, &ids, query);
-            },
+        query_cap: usize,
+    ) -> usize {
+        let PreparedCall { ids, queries, action } = prepared;
+        let mut results = Vec::new();
+        let mut dispatched = 0_usize;
+        let mut successful = 0_usize;
+        for query in queries.iter().take(query_cap) {
+            dispatched = dispatched.saturating_add(1);
+            // Capture the originating client's attributes and current outbound depth
+            // so the callout's outbound chain sees the real caller and the executor
+            // continues this request's depth accounting instead of resetting to zero.
+            let callout = CalloutContext::from_filter_context(ctx);
+            match self
+                .search_client
+                .search(&self.outbound, callout, query, Some(context_size), country, identity)
+                .await
+            {
+                SearchOutcome::Results(mut query_results) => results.append(&mut query_results),
+                SearchOutcome::Failed => {
+                    warn!(
+                        call_id = ids.public,
+                        "web search provider failed; continuing with a failed tool result"
+                    );
+                    let (status, notice) = status_and_notice(successful, queries.len(), query_cap);
+                    append_search_turn(ctx, &ids, status, action, &results, notice);
+                    return dispatched;
+                },
+            }
+            successful = successful.saturating_add(1);
         }
-        true
+        let (status, notice) = status_and_notice(successful, queries.len(), query_cap);
+        append_search_turn(ctx, &ids, status, action, &results, notice);
+        dispatched
     }
 
     /// Fail closed with a 401 when the initial request declares an eligible hosted
@@ -353,6 +350,92 @@ impl WebSearchFilter {
                 &format!("web search requires the '{slot}' per-user credential, which was not provided"),
             )),
         }
+    }
+
+    /// Fail closed with a 400 when the initial request's web-search `user_location`
+    /// carries fields the configured provider cannot honor.
+    ///
+    /// The canonical web-search state preserves every `user_location` member, but
+    /// the dispatcher forwards only a supported ISO `country` to the provider
+    /// (issue #1548). Rather than silently drop `city`/`region`/`timezone` — or a
+    /// `country` a provider cannot map from an ISO code — this rejects the request
+    /// explicitly so a location-sensitive search never runs with location
+    /// semantics the caller did not actually get.
+    ///
+    /// A request may declare more than one web-search tool (e.g. `web_search`
+    /// alongside `web_search_preview`), so every declared tool's `user_location` is
+    /// inspected: an unsupported field on any of them is rejected. Because dispatch
+    /// forwards a single country, tools that declare *different* countries are also
+    /// rejected — honoring only the first would silently drop the others.
+    fn preflight_location_support(&self, state: &ResponsesState) -> Result<(), Rejection> {
+        let mut countries: Vec<&str> = Vec::new();
+        for user_location in web_search_user_locations_from_state(state) {
+            self.reject_unsupported_location_fields(user_location)?;
+            if let Some(country) = user_location
+                .get("country")
+                .and_then(Value::as_str)
+                .filter(|country| !country.is_empty())
+                && !countries.contains(&country)
+            {
+                countries.push(country);
+            }
+        }
+        if countries.len() > 1 {
+            return Err(responses_error_rejection_with_code(
+                400,
+                "invalid_request_error",
+                "invalid_value",
+                "web-search tools declare conflicting user_location.country values; \
+                 dispatch forwards a single country, so declare the same country on every tool.",
+            ));
+        }
+        if let Some(country) = countries.first() {
+            self.reject_unrepresentable_country(country)?;
+        }
+        Ok(())
+    }
+
+    /// Reject `user_location` fields the configured provider cannot honor at all
+    /// (e.g. `city`/`region`/`timezone`, or `country` for Tavily).
+    fn reject_unsupported_location_fields(&self, user_location: &Value) -> Result<(), Rejection> {
+        let unsupported = self.search_client.unsupported_location_fields(user_location);
+        if unsupported.is_empty() {
+            return Ok(());
+        }
+        let message = format!(
+            "web search provider '{provider}' cannot honor user_location field(s): {fields}. \
+             Remove them or omit user_location.",
+            provider = self.search_client.provider_name(),
+            fields = unsupported.join(", "),
+        );
+        Err(responses_error_rejection_with_code(
+            400,
+            "invalid_request_error",
+            "unsupported_parameter",
+            &message,
+        ))
+    }
+
+    /// Reject a supported `country` the provider cannot represent in its forwarding
+    /// channel (e.g. Brave's `X-Loc-Country` header rejects control characters, and
+    /// You.com's JSON enum requires a well-formed ISO alpha-2 code), rather than
+    /// letting the dispatcher silently drop it and search without the caller's
+    /// location (issue #1548).
+    fn reject_unrepresentable_country(&self, country: &str) -> Result<(), Rejection> {
+        if self.search_client.country_is_representable(country) {
+            return Ok(());
+        }
+        let message = format!(
+            "web search provider '{provider}' cannot represent the user_location.country value; \
+             it must be a plain ISO 3166-1 alpha-2 code with no control characters.",
+            provider = self.search_client.provider_name(),
+        );
+        Err(responses_error_rejection_with_code(
+            400,
+            "invalid_request_error",
+            "invalid_value",
+            &message,
+        ))
     }
 
     /// Resolve the caller's identity once for the whole batch, recording a fail-closed
@@ -385,16 +468,15 @@ impl WebSearchFilter {
         }
     }
 
-    /// Execute admitted web search `calls` up to the provider-request `budget`,
-    /// then update the cumulative execution count and clear the pending queue.
+    /// Execute admitted web search `calls` within the batch budgets, then
+    /// update the cumulative execution count and clear the pending queue.
     ///
-    /// Calls rejected by the response-wide ordered admission pass receive a
-    /// failed result and force local completion without another model round.
-    /// Calls beyond the provider-request `budget` are surfaced as incomplete
-    /// without issuing a potentially paid provider request. Only dispatched
-    /// calls (a `Results` or `Failed` outcome) are added to the cumulative
-    /// provider counter; a missing-query call consumes its model-call admission
-    /// but does not issue a provider request.
+    /// [`admit_call`] resolves every call the batch budgets exclude, so only
+    /// admitted calls reach the provider here. A call that gets only part of
+    /// its queries is dispatched and reported incomplete with the results it
+    /// obtained. Returns whether any call was rejected by the response-wide
+    /// ordered admission pass, which forces local completion without another
+    /// model round.
     async fn execute_pending_searches(&self, ctx: &mut HttpFilterContext<'_>, batch: PendingSearchBatch<'_>) -> bool {
         // A missing per-user credential recorded a write-once security failure in
         // `resolve_batch_identity`. The agentic loop consults `security_failure.take()`
@@ -403,31 +485,27 @@ impl WebSearchFilter {
         let Some(identity) = self.resolve_batch_identity(ctx) else {
             return false;
         };
-        let mut dispatched = 0_usize;
+        let mut calls_dispatched = 0_usize;
+        let mut queries_dispatched = 0_usize;
         let mut tool_limit_exceeded = false;
-        for (index, call) in batch.calls.iter().enumerate() {
-            if batch
-                .admissions
-                .and_then(|values| values.get(index))
-                .is_some_and(|admitted| !admitted)
-            {
-                append_tool_limit_exceeded(ctx, call, index);
-                tool_limit_exceeded = true;
+        for prepared in batch.calls {
+            let rejected = rejected(batch.admissions, prepared.ids.index);
+            tool_limit_exceeded |= rejected;
+            let query_cap = batch.query_budget.saturating_sub(queries_dispatched);
+            let over_budget = calls_dispatched >= batch.call_budget || query_cap == 0;
+            let Some(prepared) = admit_call(ctx, prepared, rejected, over_budget) else {
                 continue;
-            }
-            if dispatched >= batch.provider_budget {
-                append_excess_incomplete(ctx, call, index);
-                continue;
-            }
-            if self
-                .execute_single_search(ctx, call, index, batch.context_size, &identity)
-                .await
-            {
-                dispatched = dispatched.saturating_add(1);
+            };
+            let dispatched = self
+                .execute_single_search(ctx, prepared, batch.context_size, batch.country, &identity, query_cap)
+                .await;
+            if dispatched > 0 {
+                calls_dispatched = calls_dispatched.saturating_add(1);
+                queries_dispatched = queries_dispatched.saturating_add(dispatched);
             }
         }
 
-        Self::finalize_pending_searches(ctx, dispatched);
+        Self::finalize_pending_searches(ctx, calls_dispatched);
         tool_limit_exceeded
     }
 }
@@ -501,6 +579,18 @@ impl HttpFilter for WebSearchFilter {
             return Ok(FilterAction::Continue);
         };
 
+        // Round-0 location preflight. The canonical web-search state preserves the
+        // full `user_location`, but the dispatcher only forwards a supported ISO
+        // `country` to the provider. Reject unsupported location use explicitly
+        // rather than silently changing location-sensitive search semantics by
+        // dropping fields the provider cannot honor (issue #1548).
+        if is_initial_request(ctx)
+            && request_declares_eligible_web_search(state)
+            && let Err(rejection) = self.preflight_location_support(state)
+        {
+            return Ok(FilterAction::Reject(rejection));
+        }
+
         // Round-0 credential preflight. When the initial request declares a hosted
         // web-search tool that could run under the effective `tool_choice` and a
         // per-user credential slot is configured, resolve it now so a missing
@@ -526,20 +616,30 @@ impl HttpFilter for WebSearchFilter {
             .or_else(|| web_search_context_size_from_state(state))
             .map_or(self.default_context_size, SearchContextSize::from_str_or_default);
 
+        // Capture the supported ISO country code (owned) while the shared immutable
+        // borrow is still live; threading it through the batch after `mem::take`
+        // takes a mutable borrow of state would otherwise conflict. The code is a
+        // short alpha-2 string, so this owns the minimum needed across the boundary.
+        let country: Option<String> = web_search_country_from_state(state).map(str::to_owned);
+
         // Compute the remaining budget while the shared immutable borrow is
         // still live, then move the web search calls out instead of cloning
         // and then removing them from state.
-        let budget = remaining_web_search_budget(state);
+        let call_budget = remaining_web_search_budget(state);
         let calls: Vec<Value> = ctx
             .extensions
             .get_mut::<ResponsesState>()
             .map(|state| mem::take(&mut state.web_search_calls))
             .unwrap_or_default();
 
-        let execute_count = admissions.as_ref().map_or(calls.len(), |values| {
+        // Parse each pending action once here; every dispatch branch below
+        // reuses the same parse instead of re-reading the raw call.
+        let prepared = prepare_calls(&calls);
+
+        let execute_count = admissions.as_ref().map_or(prepared.len(), |values| {
             values.iter().filter(|admitted| **admitted).count()
         });
-        let rejected_count = calls.len().saturating_sub(execute_count);
+        let rejected_count = prepared.len().saturating_sub(execute_count);
         debug!(
             count = execute_count,
             rejected = rejected_count,
@@ -550,10 +650,12 @@ impl HttpFilter for WebSearchFilter {
             .execute_pending_searches(
                 ctx,
                 PendingSearchBatch {
-                    calls: &calls,
+                    calls: prepared,
                     admissions: admissions.as_deref(),
-                    provider_budget: budget,
+                    call_budget,
+                    query_budget: MAX_WEB_SEARCH_QUERIES_PER_CONTINUATION,
                     context_size,
+                    country: country.as_deref(),
                 },
             )
             .await;
@@ -580,33 +682,316 @@ fn is_initial_request(ctx: &HttpFilterContext<'_>) -> bool {
 }
 
 /// Whether the initial request declares a hosted web-search tool that could run
-/// under the effective `tool_choice`, so a per-user credential preflight applies.
+/// at any point this turn, so the round-0 location and credential preflights apply.
 fn request_declares_eligible_web_search(state: &ResponsesState) -> bool {
     let declares = state.tools.iter().any(|tool| {
         tool.get("type")
             .and_then(Value::as_str)
             .is_some_and(is_web_search_tool_type)
     });
-    declares && tool_choice_permits_web_search(&state.tool_choice)
+    declares && {
+        // Build the MCP-name test once per request; the predicates below reuse it
+        // to recognize a resolved MCP tool that was rewritten to a plain `function`.
+        let is_mcp_function = mcp_function_membership(&state.mcp_tool_map);
+        // A `tool_choice`/`allowed_tools` entry is a short *selector*; the `execution`
+        // mode that decides whether a `tool_search` drives a continuation lives on the
+        // matching *declaration* in `state.tools`, so resolve it there once (#1548).
+        let server_tool_search = declares_server_executed_tool_search(&state.tools);
+        tool_choice_permits_web_search(&state.tool_choice, &is_mcp_function, server_tool_search)
+    }
+}
+
+/// Whether `state.tools` declares a server-executed `tool_search`. Its hosted
+/// discovery drives an agentic continuation that reopens web search, whereas a
+/// client-executed one (the default) returns to the API client. A `tool_choice`
+/// selector only names the tool by type, so the authoritative `execution` mode must
+/// be read from the declaration here rather than from the selector (issue #1548).
+fn declares_server_executed_tool_search(tools: &[Value]) -> bool {
+    tools.iter().any(|tool| {
+        tool.get("type").and_then(Value::as_str) == Some("tool_search") && !tool_search_is_client_executed(tool)
+    })
+}
+
+/// Whether a hosted tool `type` string names a tool whose server-side dispatch
+/// drives an agentic continuation.
+///
+/// When one of these runs, `openai_agentic_loop::prepare_iteration` resets
+/// `tool_choice` to `"auto"` for the next model round while retaining the declared
+/// `tools`. So permitting any continuation-driving tool makes a declared
+/// web-search tool reachable on a later round regardless of the *initial*
+/// `tool_choice` — the round-0 preflight must treat it as eligible (issue #1548).
+///
+/// `tool_search` is deliberately absent here: it drives a continuation only when
+/// server-executed (hosted MCP connector discovery), and its `execution` mode lives
+/// on the *declaration* in `state.tools` — not on the `tool_choice` selector that
+/// names it — so [`declares_server_executed_tool_search`] resolves it, threaded into
+/// [`tool_entry_drives_web_search_continuation`]. A client `function` never drives a
+/// server continuation (its result returns to the client), so permitting only client
+/// functions leaves web search unreachable.
+fn tool_type_drives_web_search_continuation(tool_type: &str) -> bool {
+    is_web_search_tool_type(tool_type) || matches!(tool_type, "file_search" | "mcp")
+}
+
+/// Whether one tool or forced-`tool_choice` selector keeps a declared web-search
+/// tool reachable this turn.
+///
+/// Recognizes the continuation-driving hosted tool *types* directly (see
+/// [`tool_type_drives_web_search_continuation`]); a `tool_search` only when the
+/// request declares a server-executed one (`server_tool_search`, resolved from
+/// `state.tools` because the selector carries no `execution`); and, additionally, a
+/// `function` entry that is actually a resolved MCP tool. `openai_mcp_tool_resolve`
+/// rewrites every MCP selector to a plain `{"type":"function","name":"<label>__<tool>"}`
+/// and overwrites `ResponsesState.tools`/`tool_choice`, erasing the `"mcp"` type;
+/// `mcp_tool_map` is the only surviving provenance. Such a function still drives an
+/// MCP continuation that re-opens `tool_choice`, so web search stays reachable
+/// (issue #1548). A malformed entry with no `type` is conservatively eligible.
+fn tool_entry_drives_web_search_continuation(
+    tool: &Value,
+    is_mcp_function: &impl Fn(&str) -> bool,
+    server_tool_search: bool,
+) -> bool {
+    let Some(tool_type) = tool.get("type").and_then(Value::as_str) else {
+        return true;
+    };
+    // A `tool_search` selector names the tool by type only; whether it drives a
+    // continuation depends on the declaration's `execution` mode, pre-resolved into
+    // `server_tool_search`. A client-executed tool search (the default) returns its
+    // call to the API client without an IRR round (issue #1548).
+    if tool_type == "tool_search" {
+        return server_tool_search;
+    }
+    if tool_type_drives_web_search_continuation(tool_type) {
+        return true;
+    }
+    // A resolved MCP tool reads as a plain `function`; recover its provenance by name.
+    match tool.get("name").and_then(Value::as_str) {
+        Some(name) if tool_type == "function" => is_mcp_function(name),
+        _ => false,
+    }
+}
+
+/// Whether a `tool_search` *declaration* is client-executed — the default. A client
+/// tool search returns its call to the API client without driving a server-side
+/// discovery round, so it cannot make a declared web-search tool reachable this
+/// response (issue #1548). Mirrors `openai_client_tool_compat::tool_search_is_client`:
+/// `execution` absent or `"client"` is client; `"server"` (or any other value) is
+/// server-executed and conservatively treated as continuation-driving.
+fn tool_search_is_client_executed(tool: &Value) -> bool {
+    matches!(tool.get("execution").and_then(Value::as_str), None | Some("client"))
+}
+
+/// A reusable test for whether an outbound `function` name belongs to a resolved
+/// MCP tool, built once per request from `mcp_tool_map` (issue #1548).
+#[cfg(feature = "openai-mcp-tools")]
+fn mcp_function_membership(
+    mcp_tool_map: &std::collections::HashMap<(String, String), Value>,
+) -> impl Fn(&str) -> bool + '_ {
+    let index = super::openai_mcp_tool_resolve::McpToolIndex::new(mcp_tool_map);
+    move |name: &str| index.contains(name)
+}
+
+/// Without MCP tool support no `function` can be MCP-owned, so none is ever treated
+/// as continuation-driving.
+#[cfg(not(feature = "openai-mcp-tools"))]
+fn mcp_function_membership(
+    _mcp_tool_map: &std::collections::HashMap<(String, String), Value>,
+) -> impl Fn(&str) -> bool {
+    |_name: &str| false
 }
 
 /// Whether `tool_choice` leaves a hosted web-search tool eligible to run this turn.
 ///
-/// `"none"` forbids all tools; an object forcing a single non-web-search tool
-/// (e.g. `{"type": "function", ...}`) also excludes it. Every other shape —
-/// `"auto"`, `"required"`, an object forcing a web-search tool, `allowed_tools`,
-/// or an absent/unknown choice — keeps web search eligible. Being conservatively
-/// eligible is safe: the re-entry check still fails closed if the callout runs.
-fn tool_choice_permits_web_search(tool_choice: &Value) -> bool {
+/// `"none"` forbids all tools; an object forcing a single client `function` also
+/// excludes it. An object forcing a web-search tool — or any other hosted tool, or
+/// a resolved MCP `function`, whose continuation re-opens `tool_choice` (see
+/// [`tool_entry_drives_web_search_continuation`]) — keeps it eligible. An
+/// `allowed_tools` object constrains the callable set, so web search is eligible
+/// only when its `tools` list names web search or another continuation-driving
+/// tool (a list that allows only a client function excludes it). Every other
+/// shape — `"auto"`, `"required"`, or an absent/unknown choice — keeps web search
+/// eligible. Being conservatively eligible is safe: the re-entry check still fails
+/// closed if the callout runs.
+fn tool_choice_permits_web_search(
+    tool_choice: &Value,
+    is_mcp_function: &impl Fn(&str) -> bool,
+    server_tool_search: bool,
+) -> bool {
     match tool_choice {
         Value::String(keyword) => keyword != "none",
         Value::Object(choice) => match choice.get("type").and_then(Value::as_str) {
-            Some(kind) if is_web_search_tool_type(kind) => true,
-            Some("allowed_tools") | None => true,
-            Some(_) => false,
+            Some("allowed_tools") => allowed_tools_permit_web_search(choice, is_mcp_function, server_tool_search),
+            None => true,
+            Some(_) => tool_entry_drives_web_search_continuation(tool_choice, is_mcp_function, server_tool_search),
         },
         _ => true,
     }
+}
+
+/// Whether an `allowed_tools` choice leaves web search reachable via its list.
+///
+/// The `tools` array constrains which tools the model may call. Web search is
+/// reachable when the list names web search directly or any other
+/// continuation-driving tool (`file_search`, `mcp`, a server-executed `tool_search`,
+/// or a resolved MCP `function`), because that tool's continuation resets
+/// `tool_choice` to `"auto"` and re-admits the retained web-search tool (issue
+/// #1548). A list naming only client functions, or only a client-executed
+/// `tool_search`, leaves it unreachable. A missing or malformed `tools` field is
+/// treated as conservatively reachable — the re-entry check still fails closed if a
+/// callout actually runs.
+fn allowed_tools_permit_web_search(
+    choice: &serde_json::Map<String, Value>,
+    is_mcp_function: &impl Fn(&str) -> bool,
+    server_tool_search: bool,
+) -> bool {
+    match choice.get("tools").and_then(Value::as_array) {
+        Some(tools) => tools
+            .iter()
+            .any(|tool| tool_entry_drives_web_search_continuation(tool, is_mcp_function, server_tool_search)),
+        None => true,
+    }
+}
+
+/// Borrowed inputs for one request-side web-search dispatch batch.
+struct PendingSearchBatch<'a> {
+    /// Calls retained from the current model round, parsed once.
+    calls: Vec<PreparedCall<'a>>,
+    /// Ordered response-wide budget decisions, when the client set a limit.
+    admissions: Option<&'a [bool]>,
+    /// Remaining built-in tool calls allowed by the client's `max_tool_calls`.
+    call_budget: usize,
+    /// Remaining provider requests (queries) allowed by the server-side fan-out cap.
+    query_budget: usize,
+    /// Search result size requested for this response.
+    context_size: SearchContextSize,
+    /// Supported ISO country code forwarded to the provider, when the request's
+    /// `user_location` set one (issue #1548). `None` leaves location unset.
+    country: Option<&'a str>,
+}
+
+/// Public and bridge identifiers for one appended web-search result.
+///
+/// `public` is the hosted, client-facing `web_search_call.id` retained on the
+/// public output item. `bridge` is the bounded, deterministic id used for the
+/// backend-valid `function_call`/`function_call_output` pair, since the raw
+/// hosted id can exceed the `OpenResponses` 64-character `call_id` limit (issue
+/// #808).
+///
+/// Owned by the [`PreparedCall`] it identifies, so both derive from one parse.
+struct SearchCallIds<'a> {
+    /// Client-facing `web_search_call.id` for the public output item.
+    public: &'a str,
+    /// Bounded, backend-valid id for the synthetic bridge pair.
+    bridge: String,
+    /// Position within the current model round.
+    index: usize,
+}
+
+impl<'a> SearchCallIds<'a> {
+    /// Derive the bounded bridge ID for one provider-facing ID and round position.
+    fn new(public: &'a str, queries: &[&str], index: usize) -> Self {
+        Self {
+            public,
+            bridge: bridge_call_id(public, queries, index),
+            index,
+        }
+    }
+}
+
+/// One pending call, with its hosted action parsed once for the whole batch.
+struct PreparedCall<'a> {
+    /// Identities derived from this call's id, queries, and round position.
+    ids: SearchCallIds<'a>,
+    /// Queries in provider-supplied order; empty when the call is malformed.
+    queries: Vec<&'a str>,
+    /// Canonical client-visible search action; `Null` when the call is malformed.
+    action: Value,
+}
+
+impl<'a> PreparedCall<'a> {
+    /// Pair a parsed action with the identities its queries and position derive.
+    fn new(call_id: &'a str, index: usize, queries: Vec<&'a str>, action: Value) -> Self {
+        Self {
+            ids: SearchCallIds::new(call_id, &queries, index),
+            queries,
+            action,
+        }
+    }
+
+    /// Placeholder for a call carrying no usable `action.queries` or `action.query`.
+    fn malformed(call_id: &'a str, index: usize) -> Self {
+        Self::new(call_id, index, Vec::new(), Value::Null)
+    }
+}
+
+/// Parse each pending call once, preserving pending-queue order.
+fn prepare_calls(calls: &[Value]) -> Vec<PreparedCall<'_>> {
+    calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            let call_id = call.get("id").and_then(Value::as_str).unwrap_or("ws_unknown");
+            parse_search_request(call, call_id, index).unwrap_or_else(|| PreparedCall::malformed(call_id, index))
+        })
+        .collect()
+}
+
+/// Whether the response-wide ordered admission pass refused the call at
+/// `index`. Absent admissions mean the client set no `max_tool_calls`.
+fn rejected(admissions: Option<&[bool]>, index: usize) -> bool {
+    admissions
+        .and_then(|values| values.get(index))
+        .is_some_and(|admitted| !admitted)
+}
+
+/// Decide whether one pending call may reach the provider, appending its
+/// terminal turn when it may not.
+///
+/// A call without a usable query is surfaced as incomplete on every path, since
+/// neither rejection nor a budget has anything to dispatch. A call `rejected` by
+/// the response-wide ordered admission pass fails locally and forces completion
+/// without another model round. An `over_budget` call — one that can spend
+/// neither a tool-call unit nor a single provider request — is surfaced as
+/// incomplete without reaching the provider.
+fn admit_call<'a>(
+    ctx: &mut HttpFilterContext<'_>,
+    prepared: PreparedCall<'a>,
+    rejected: bool,
+    over_budget: bool,
+) -> Option<PreparedCall<'a>> {
+    if prepared.queries.is_empty() {
+        warn!(
+            call_id = prepared.ids.public,
+            "web_search_call missing valid action.queries or action.query, skipping"
+        );
+        append_incomplete(ctx, &prepared.ids);
+        return None;
+    }
+    let (status, notice) = if rejected {
+        ("failed", TOOL_LIMIT_OUTPUT)
+    } else if over_budget {
+        ("incomplete", NOT_PERFORMED_OUTPUT)
+    } else {
+        return Some(prepared);
+    };
+    append_search_turn(ctx, &prepared.ids, status, prepared.action, &[], Some(notice));
+    None
+}
+
+/// Resolve one dispatched call's terminal status and its model-facing notice.
+fn status_and_notice(successful: usize, n_queries: usize, query_cap: usize) -> (&'static str, Option<&'static str>) {
+    if successful == 0 {
+        return ("failed", Some(SEARCH_UNAVAILABLE));
+    }
+
+    if successful < n_queries && successful < query_cap {
+        return ("incomplete", Some(PARTIAL_UNAVAILABLE_OUTPUT));
+    }
+
+    if successful == query_cap && successful < n_queries {
+        return ("incomplete", Some(PARTIAL_CLIPPED_OUTPUT));
+    }
+
+    ("completed", None)
 }
 
 /// Recover per-request search context after IRR resets step-local metadata.
@@ -621,34 +1006,82 @@ fn web_search_context_size_from_state(state: &ResponsesState) -> Option<&str> {
     })
 }
 
-/// Public and bridge identifiers for one appended web-search result.
+/// Recover the first web-search tool's `user_location` object from request state.
 ///
-/// `public` is the hosted, client-facing `web_search_call.id` retained on the
-/// public output item. `bridge` is the bounded, deterministic id used for the
-/// backend-valid `function_call`/`function_call_output` pair, since the raw
-/// hosted id can exceed the `OpenResponses` 64-character `call_id` limit (issue
-/// #808).
-struct SearchCallIds<'a> {
-    /// Client-facing `web_search_call.id` for the public output item.
-    public: &'a str,
-    /// Bounded, backend-valid id for the synthetic bridge pair.
-    bridge: &'a str,
-    /// Position within the current model round.
-    index: usize,
+/// The canonical state preserves the full `user_location` the client sent; the
+/// dispatcher and preflight read it from here after IRR resets step-local
+/// metadata.
+fn web_search_user_location_from_state(state: &ResponsesState) -> Option<&Value> {
+    state.tools.iter().find_map(|tool| {
+        let tool_type = tool.get("type").and_then(Value::as_str)?;
+        if is_web_search_tool_type(tool_type) {
+            tool.get("user_location")
+        } else {
+            None
+        }
+    })
 }
 
-impl<'a> SearchCallIds<'a> {
-    /// Pair one provider-facing ID with its bounded bridge ID and round position.
-    fn new(public: &'a str, bridge: &'a str, index: usize) -> Self {
-        Self { public, bridge, index }
+/// Every web-search tool's `user_location` object from request state, in
+/// declaration order.
+///
+/// A request may declare more than one web-search tool, so the round-0 preflight
+/// inspects them all rather than only the first — an unsupported field or a
+/// conflicting country on a later tool must not slip past
+/// [`web_search_user_location_from_state`]'s first-match lookup.
+fn web_search_user_locations_from_state(state: &ResponsesState) -> impl Iterator<Item = &Value> {
+    state.tools.iter().filter_map(|tool| {
+        let tool_type = tool.get("type").and_then(Value::as_str)?;
+        is_web_search_tool_type(tool_type)
+            .then(|| tool.get("user_location"))
+            .flatten()
+    })
+}
+
+/// Extract the supported ISO `country` code from the request's `user_location`.
+///
+/// Only `country` is forwarded to providers (issue #1548); the round-0 preflight
+/// already rejected any unsupported field, so a value returned here is known to
+/// be provider-supported. A null or empty `country` is a canonical "unset".
+fn web_search_country_from_state(state: &ResponsesState) -> Option<&str> {
+    web_search_user_location_from_state(state)?
+        .get("country")
+        .and_then(Value::as_str)
+        .filter(|country| !country.is_empty())
+}
+
+/// Parse a hosted search action while preserving legacy compatibility. A valid,
+/// non-empty `queries` array is authoritative, with (deprecated) `query` as a fallback.
+fn parse_search_request<'a>(call: &'a Value, call_id: &'a str, index: usize) -> Option<PreparedCall<'a>> {
+    let action = call.get("action")?;
+    let legacy_query = action.get("query").and_then(Value::as_str);
+    match action.get("queries") {
+        Some(Value::Array(values)) if !values.is_empty() => {
+            let queries = values.iter().map(Value::as_str).collect::<Option<Vec<_>>>()?;
+            if legacy_query.is_some() {
+                warn!(
+                    call_id,
+                    "web_search_call contains deprecated action.query and action.queries; using action.queries"
+                );
+            }
+            let action = serde_json::json!({"type": "search", "queries": queries});
+            Some(PreparedCall::new(call_id, index, queries, action))
+        },
+        Some(Value::Array(_)) | None => legacy_query.map(|query| {
+            let action = serde_json::json!({"type": "search", "query": query});
+            PreparedCall::new(call_id, index, vec![query], action)
+        }),
+        Some(_) => None,
     }
 }
 
 /// Remaining web searches this continuation may dispatch.
 ///
-/// Intersects the client's remaining `max_tool_calls` allowance with the
-/// server-side per-continuation hard cap. When the client omits
-/// `max_tool_calls`, only the server cap applies.
+/// This is only the tool-call dimension: it counts logical built-in tool calls,
+/// so a three-query `web_search_call` costs one unit. The (potentially paid)
+/// provider requests such a call issues are bounded separately by
+/// [`MAX_WEB_SEARCH_QUERIES_PER_CONTINUATION`]. When the client omits
+/// `max_tool_calls`, only that server cap constrains the dispatch.
 ///
 /// `max_tool_calls` is a single budget shared across *every* built-in tool
 /// type, so the allowance is the declared maximum minus all built-in calls
@@ -661,49 +1094,36 @@ impl<'a> SearchCallIds<'a> {
 /// the owner-side ordered admission applied to file-search assignments.
 fn remaining_web_search_budget(state: &ResponsesState) -> usize {
     let used = consumed_builtin_tool_calls_before_current_round(state);
-    let client_remaining = state.max_tool_calls.map_or(usize::MAX, |max| {
+    state.max_tool_calls.map_or(usize::MAX, |max| {
         usize::try_from(max).unwrap_or(usize::MAX).saturating_sub(used)
-    });
-    client_remaining.min(MAX_WEB_SEARCH_CALLS_PER_CONTINUATION)
-}
-
-/// Surface an over-budget web search call as incomplete without dispatching.
-///
-/// Preserves the requested query in the output item so the model can see which
-/// search was declined, matching the missing-query incomplete shape. No
-/// provider request is issued, so no budget is charged. `index` keeps the
-/// bridge `call_id` unique, mirroring [`WebSearchFilter::execute_single_search`].
-fn append_excess_incomplete(ctx: &mut HttpFilterContext<'_>, call: &Value, index: usize) {
-    let call_id = call.get("id").and_then(Value::as_str).unwrap_or("ws_unknown");
-    let query = call
-        .get("action")
-        .and_then(|a| a.get("query"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let bridge = bridge_call_id(call_id, query, index);
-    let ids = SearchCallIds::new(call_id, &bridge, index);
-    append_result(ctx, &ids, "incomplete", query, &[]);
+    })
 }
 
 /// Append a completed search turn to [`ResponsesState`].
 ///
 /// An empty `results` slice is a successful zero-result search: the model
 /// receives `No search results found.` and the public item stays `completed`.
-/// A non-`completed` status (an over-budget call that was never dispatched)
-/// threads through a truthful `Web search not performed.` bridge, so the
-/// model-facing history never contradicts the client-visible incomplete output
-/// item or pollutes durable rehydration history. A missing-query call uses the
-/// more specific [`append_incomplete`] instead.
-fn append_result(
+/// A non-`completed` status with no results (an over-budget call that was never
+/// dispatched, or one whose every provider request failed) threads through a
+/// truthful `failure_output` bridge, so the model-facing history never
+/// contradicts the client-visible output item or pollutes durable rehydration
+/// history. A partially dispatched call bridges the results it did gather. A
+/// missing-query call uses the more specific [`append_incomplete`] instead.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one search turn's identities, status, action, results, and failure text"
+)]
+fn append_search_turn(
     ctx: &mut HttpFilterContext<'_>,
     ids: &SearchCallIds<'_>,
     status: &str,
-    query: &str,
+    action: Value,
     results: &[SearchResult],
+    notice: Option<&'static str>,
 ) {
     let include_sources = include_action_sources(ctx);
-    let output_item = build_output_item(ids.public, status, query, results, include_sources);
-    let bridge = build_tool_result_messages(ids.bridge, status, query, results);
+    let bridge = build_tool_result_messages(&ids.bridge, &action, results, notice);
+    let output_item = build_output_item(ids.public, status, action, results, include_sources);
     push_search_turn(ctx, output_item, bridge, ids.index);
 }
 
@@ -715,38 +1135,15 @@ fn append_result(
 /// as a successful search with zero results.
 fn append_incomplete(ctx: &mut HttpFilterContext<'_>, ids: &SearchCallIds<'_>) {
     let include_sources = include_action_sources(ctx);
-    let output_item = build_output_item(ids.public, "incomplete", "", &[], include_sources);
-    let bridge = build_incomplete_tool_result_messages(ids.bridge);
+    let output_item = build_output_item(
+        ids.public,
+        "incomplete",
+        serde_json::json!({"type": "search", "query": ""}),
+        &[],
+        include_sources,
+    );
+    let bridge = build_incomplete_tool_result_messages(&ids.bridge);
     push_search_turn(ctx, output_item, bridge, ids.index);
-}
-
-/// Append a failed search turn to [`ResponsesState`].
-///
-/// The public output item is marked `status: "failed"` and the model receives
-/// the bounded [`SEARCH_UNAVAILABLE`] message through a backend-valid
-/// `function_call`/`function_call_output` bridge — never a hosted
-/// `web_search_call`, which is not a valid `OpenResponses` input (issue #808) —
-/// so the agentic loop continues without exposing provider details to the client.
-fn append_failed(ctx: &mut HttpFilterContext<'_>, ids: &SearchCallIds<'_>, query: &str) {
-    let include_sources = include_action_sources(ctx);
-    let output_item = build_output_item(ids.public, "failed", query, &[], include_sources);
-    let bridge = build_failed_tool_result_messages(ids.bridge, query);
-    push_search_turn(ctx, output_item, bridge, ids.index);
-}
-
-/// Append a bounded failure for a call rejected by `max_tool_calls`.
-fn append_tool_limit_exceeded(ctx: &mut HttpFilterContext<'_>, call: &Value, index: usize) {
-    let call_id = call.get("id").and_then(Value::as_str).unwrap_or("ws_unknown");
-    let query = call
-        .get("action")
-        .and_then(|action| action.get("query"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let bridge_id = bridge_call_id(call_id, query, index);
-    let include_sources = include_action_sources(ctx);
-    let output_item = build_output_item(call_id, "failed", query, &[], include_sources);
-    let bridge = build_failed_tool_result_messages_with_output(&bridge_id, query, TOOL_LIMIT_OUTPUT);
-    push_search_turn(ctx, output_item, bridge, index);
 }
 
 /// Whether `action.sources` should be included in output items, per the
@@ -767,8 +1164,10 @@ fn include_action_sources(ctx: &HttpFilterContext<'_>) -> bool {
 /// place, never duplicated.
 fn push_search_turn(ctx: &mut HttpFilterContext<'_>, output_item: Value, bridge: [Value; 2], index: usize) {
     if let Some(state) = ctx.extensions.get_mut::<ResponsesState>() {
+        let result_start = state.messages.len();
         state.messages.extend(bridge.iter().cloned());
         state.persisted_messages.extend(bridge);
+        state.mark_local_tool_results_from(result_start);
         // Record execution provenance keyed on the item id `stream_events` reads:
         // this replaces the model's placeholder with an executed result, so only
         // now may the search's lifecycle be synthesized. A placeholder copied into
@@ -823,15 +1222,10 @@ pub(crate) fn emit_status(ctx: &mut HttpFilterContext<'_>, call_id: &str, status
 pub(crate) fn build_output_item(
     call_id: &str,
     status: &str,
-    query: &str,
+    mut action: Value,
     results: &[SearchResult],
     include_sources: bool,
 ) -> Value {
-    let mut action = serde_json::json!({
-        "type": "search",
-        "query": query,
-    });
-
     if include_sources {
         let sources: Vec<Value> = results
             .iter()
@@ -864,30 +1258,31 @@ pub(crate) fn build_output_item(
 /// public `web_search_call` output item is emitted separately by
 /// [`build_output_item`] and only reaches `accumulated_output`.
 ///
-/// `status` is threaded through so a call that was never dispatched
-/// (over-budget or missing a query, `status != "completed"`) carries a
-/// truthful `Web search not performed.` output instead of a fabricated
-/// `No search results found.` result, keeping the model-facing bridge
-/// consistent with the client-visible incomplete output item.
-///
 /// `call_id` must be a bounded, backend-valid identifier from
 /// [`bridge_call_id`]: the raw hosted id can exceed the `OpenResponses`
 /// 64-character `call_id` limit.
 pub(crate) fn build_tool_result_messages(
     call_id: &str,
-    status: &str,
-    query: &str,
+    action: &Value,
     results: &[SearchResult],
+    notice: Option<&'static str>,
 ) -> [Value; 2] {
-    let content = if status != "completed" {
-        "Web search not performed.".to_owned()
-    } else if results.is_empty() {
-        "No search results found.".to_owned()
-    } else {
-        format_search_results(results)
+    let content = match (results.is_empty(), notice) {
+        // Completed with zero rows: a successful search that found nothing.
+        (true, None) => NO_RESULTS_OUTPUT.to_owned(),
+        // Never dispatched, every query failed, or no results: the notice is the only content.
+        (true, Some(notice)) => notice.to_owned(),
+        // Search successful without failure / partial: return the results.
+        (false, None) => format_search_results(results),
+        // Partial: keep the rows the call did gather and append the notice.
+        (false, Some(notice)) => {
+            let mut content = format_search_results(results);
+            content.push_str("\n\n");
+            content.push_str(notice);
+            content
+        },
     };
-    let arguments = serde_json::json!({ "query": query }).to_string();
-
+    let arguments = search_arguments(action).to_string();
     [
         serde_json::json!({
             "type": "function_call",
@@ -902,6 +1297,14 @@ pub(crate) fn build_tool_result_messages(
             "output": content,
         }),
     ]
+}
+
+/// Derive the private function arguments from the client-visible action.
+fn search_arguments(action: &Value) -> Value {
+    match action.get("queries") {
+        Some(queries) => serde_json::json!({"queries": queries}),
+        None => serde_json::json!({"query": action.get("query").and_then(Value::as_str).unwrap_or_default()}),
+    }
 }
 
 /// Build the backend-valid continuation for a call missing `action.query`.
@@ -941,51 +1344,15 @@ const FNV_OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
 /// ids even when `source_id` values collide or are absent — otherwise multiple
 /// bridges would share one `call_id` and their `function_call_output` pairing
 /// would be ambiguous. The `ws_{index}_{hash:016x}` form is at most 40 bytes.
-pub(crate) fn bridge_call_id(source_id: &str, query: &str, index: usize) -> String {
+pub(crate) fn bridge_call_id(source_id: &str, queries: &[&str], index: usize) -> String {
     const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
 
     let mut hash = FNV_OFFSET_BASIS;
-    for part in [source_id, query] {
+    for part in std::iter::once(source_id).chain(queries.iter().copied()) {
         for byte in part.as_bytes().iter().copied().chain(std::iter::once(0xFF)) {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(FNV_PRIME);
         }
     }
     format!("ws_{index}_{hash:016x}")
-}
-
-/// Build the backend-valid continuation for a failed search.
-///
-/// Mirrors [`build_tool_result_messages`] but carries the bounded
-/// [`SEARCH_UNAVAILABLE`] notice as the `function_call_output`, so the agentic
-/// loop continues with a truthful failure instead of a fabricated empty result.
-/// A hosted `web_search_call` is not a valid `OpenResponses` input item (issue
-/// #808), so a failure — like a success — must bridge through a synthetic
-/// `function_call` + `function_call_output` pair.
-///
-/// `call_id` must be a bounded, backend-valid identifier from
-/// [`bridge_call_id`]: the raw hosted id can exceed the `OpenResponses`
-/// 64-character `call_id` limit.
-pub(crate) fn build_failed_tool_result_messages(call_id: &str, query: &str) -> [Value; 2] {
-    build_failed_tool_result_messages_with_output(call_id, query, SEARCH_UNAVAILABLE)
-}
-
-/// Build a failed web-search bridge with a caller-selected bounded message.
-fn build_failed_tool_result_messages_with_output(call_id: &str, query: &str, output: &'static str) -> [Value; 2] {
-    let arguments = serde_json::json!({ "query": query }).to_string();
-
-    [
-        serde_json::json!({
-            "type": "function_call",
-            "call_id": call_id,
-            "name": "web_search",
-            "arguments": arguments,
-            "status": "completed",
-        }),
-        serde_json::json!({
-            "type": "function_call_output",
-            "call_id": call_id,
-            "output": output,
-        }),
-    ]
 }

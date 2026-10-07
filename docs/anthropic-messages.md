@@ -101,6 +101,8 @@ three-boundary credential isolation but adds the
 `path_rewrite` that maps `POST /v1/messages` to `/v1/chat/completions`. The
 client still speaks the Anthropic wire format; Praxis rewrites both the request
 and the response, so vLLM only ever sees OpenAI Chat Completions.
+Claude Code must disable thinking and prompt caching for this translated route;
+see the [Claude Code setup](developing/cli-vllm-through-praxis.md#4-connect-claude-code).
 
 `/v1/messages/count_tokens` has no Chat Completions equivalent, so the
 `path_rewrite` is anchored to `^/v1/messages$` and leaves it unrewritten. A
@@ -112,21 +114,28 @@ gracefully because it treats native token counting as best-effort.
 [`tests/integration/tests/suite/claude_code_vllm.rs`](../tests/integration/tests/suite/claude_code_vllm.rs)
 proves the full flow end to end on both paths: a pinned real Claude Code
 executable completes a deterministic multi-step coding task through Praxis
-against a real vLLM backend, once with the native passthrough config and once
-with the translation config.
+against a real vLLM backend with the native passthrough and translation configs.
+Each path runs under two permission scenarios, producing four independent GPU
+acceptance cases:
+
+- `acceptEdits`, with the task's Read, Edit, and Bash tools preapproved, is the
+  deterministic harness baseline.
+- `auto`, with no tools preapproved and `CLAUDE_CODE_AUTO_MODE_SERVER=0`, forces
+  Claude Code to initiate the classifier model requests through Praxis before
+  it can Edit the file or run Bash.
 
 ```text
 native      Claude Code ─► Praxis (messages-native-vllm.yaml)    ─► vLLM /v1/messages
 transformed Claude Code ─► Praxis (messages-to-openai-vllm.yaml) ─► vLLM /v1/chat/completions
 ```
 
-Each test asserts only what a live run uniquely proves: the client completes the
-task through Praxis against a real backend — a non-timed-out, successful exit,
-the exact uppercase-derived output file, a harness-owned verification marker
-written only when the task's `verify.sh` confirms the compare, and a non-empty
-final summary in the client's stream-json output. Wire fidelity is proven
-deterministically against controlled fake backends, not observed in the live
-run:
+Each scenario asserts only what a live run uniquely proves: the client completes
+the task through Praxis against a real backend — a non-timed-out, successful
+exit, the exact uppercase-derived output file, a harness-owned verification
+marker written only when the task's `verify.sh` confirms the compare, and a
+non-empty final summary in the client's stream-json output. Wire fidelity is
+proven deterministically against controlled fake backends, not observed in the
+live run:
 
 - Native passthrough (no `chat/completions` reshaping, the exact served model on
   every inference body), credential isolation, and native token counting in
@@ -160,16 +169,76 @@ host-side veth address, which Praxis then binds) to launch the client inside a
 restricted Linux network namespace that can reach only Praxis, proving it cannot
 bypass the proxy.
 
+**Auto-mode classifier limitation.** Praxis and vLLM do not implement
+Anthropic's server-side auto-mode classifier protocol (`safeguards` and
+`safeguard_results`). Do not enable that mode with
+`CLAUDE_CODE_AUTO_MODE_SERVER=1`, and do not rely on Claude Code's server-side
+default when using this backend. Set `CLAUDE_CODE_AUTO_MODE_SERVER=0` so Claude
+Code sends its additional classifier inference requests through Praxis. In
+Anthropic's terminology this is the "local" classifier path, but classification
+still uses model requests; it is not an on-device classifier. See
+[Auto mode classifier billing](https://code.claude.com/docs/en/auto-mode-classifier-billing)
+for the client behavior and billing distinction.
+
 **Pins and scheduled acceptance.** The pinned Claude Code version and launch
-flags, the vLLM image digest, served model, and startup request matrix live in
+setup, the vLLM image digest, served model, and startup request matrix live in
 [`tests/integration/fixtures/claude-code-cli/pin.toml`](../tests/integration/fixtures/claude-code-cli/pin.toml).
 The `vllm-gpu-claude-acceptance` job in
 [`.github/workflows/vllm-integration.yaml`](../.github/workflows/vllm-integration.yaml)
-runs both tests sequentially against one shared vLLM container, each exactly once
-(no retry), on every nightly GPU run. It can also run independently through the
-`run_claude_acceptance` workflow-dispatch input. Runtime pins must be complete;
-the job fails fast with an explanatory error if any required value is empty or
-still contains `TBD`.
+runs all four scenarios sequentially against one shared vLLM container, each
+exactly once (no retry), on every nightly GPU run. A fifth scenario on the same
+container drives a read-only planning turn over the native path and fails if the
+run exhausts its turn budget instead of answering, or if reasoning-channel text
+reaches the user-visible answer — the nightly regression guard for issue #1418,
+where a mismatched `--reasoning-parser` made Claude Code loop and render its
+reasoning as the plan. It can also run independently
+through the `run_claude_acceptance` workflow-dispatch input. Runtime pins must be
+complete; the job fails fast with an explanatory error if any required value is
+empty or still contains `TBD`.
+
+### Official Anthropic SDK against live vLLM
+
+[`tests/integration/sdk/anthropic/test_anthropic_messages_vllm.py`](../tests/integration/sdk/anthropic/test_anthropic_messages_vllm.py)
+uses the official Anthropic Python SDK against both committed vLLM examples.
+The text matrix checks non-streaming messages and usage, streamed event order
+and final text, `messages.count_tokens`, and automatic `tool_use` followed by a
+`tool_result` and final answer. The translated config can count tokens in this
+matrix because the shared vLLM server also exposes the native count-tokens
+endpoint; a Chat-Completions-only backend cannot. The live SDK step in
+[`vllm-integration.yaml`](../.github/workflows/vllm-integration.yaml) runs this
+matrix against the same Qwen3-8B instance as Claude Code acceptance.
+The first live run returned `end_turn` for a named tool-choice request on both
+routes. The SDK test records that stop-reason mismatch as an expected failure
+when a `tool_use` block is present; named tool-choice semantics remain
+unqualified.
+
+Positive image coverage uses Qwen3-VL-4B-Instruct in the separate
+[`anthropic-vllm-vision.yaml`](../.github/workflows/anthropic-vllm-vision.yaml)
+GPU workflow. It sends generated red and blue PNGs through the SDK and both
+Praxis routes, then checks that the vision model identifies each color. The
+Qwen3-8B text model cannot establish image support. Both workflows set
+`PRAXIS_TEST_REQUIRE_LIVE=1`, so missing infrastructure fails rather than
+silently skipping the tests. Label an upstream PR `vllm-full-suite` to run both
+GPU workflows before merge; the vision workflow also runs on its own schedule
+and after a manual dispatch once it exists on the default branch.
+
+To run either matrix against a local keyed vLLM server, build Praxis and set
+the exact served model name and backend key:
+
+```console
+cargo build -p praxis-ai-proxy
+PRAXIS_TEST_VLLM_BASE_URL=http://127.0.0.1:8000 \
+PRAXIS_TEST_VLLM_MODEL=<served-model-name> \
+VLLM_API_KEY=<backend-bearer-token> \
+PRAXIS_TEST_REQUIRE_LIVE=1 \
+  uv run tests/integration/sdk/anthropic/test_anthropic_messages_vllm.py -s -k "not image"
+# For a separately served vision model, replace the final -k expression with: -k image
+```
+
+This matrix qualifies those named workflows and models. It is not an
+Anthropic Messages conformance gate: other content blocks, request fields,
+server tools, caching, and model-dependent behaviors require separate contract
+and live-backend coverage before a broader support claim.
 
 ## Passthrough to Anthropic API
 
@@ -284,11 +353,12 @@ filter_chains:
 
 The `anthropic_messages_to_chat_completions` filter:
 - Hoists `system` to an OpenAI system message
-- Flattens content blocks (text, image, tool_use,
-  tool_result, document, search_result)
-- Marks `tool_result.is_error` in translated tool
-  message text because Chat Completions has no
-  equivalent tool-result error flag
+- Translates text, user image, assistant `tool_use`,
+  and text-only user `tool_result` blocks; rejects
+  `document`, `search_result`, and other blocks that
+  Chat Completions cannot represent
+- Rejects `tool_result.is_error: true` because Chat
+  Completions has no equivalent tool-result error flag
 - Maps `stop_sequences` to `stop`,
   `tool_choice` semantics, tool definitions
 - Reports a matched stop sequence as `stop_reason:
@@ -313,12 +383,12 @@ The `anthropic_messages_to_chat_completions` filter:
   `functions`, `function_call`, `web_search_options`,
   `moderation`); a `null` or the field's documented
   default (for example `n: 1`) is dropped instead
-- Drops `thinking` and `context_management` with a log
-  warning; Claude Code sends both on every request and
-  Chat Completions has no equivalent
+- Rejects non-null `thinking` and `context_management`
+  because Chat Completions has no equivalent
 - Forwards every other field untouched (for example
   `top_k`) and leaves its validation to the backend
-- Drops `thinking` content blocks with a log warning
+- Rejects `thinking` content blocks and content blocks
+  carrying non-empty citations or prompt-cache controls
 - Transforms the response back to Anthropic format
 - Normalizes pre-stream upstream 4xx/5xx responses into
   Anthropic error envelopes for both streaming and
@@ -328,6 +398,11 @@ The `anthropic_messages_to_chat_completions` filter:
   response bodies
 - Preserves original `finish_reason` in filter
   metadata as `openai.finish_reason`
+
+If an upstream success response cannot be translated, the filter rejects it.
+This can return an HTTP 500 before response headers are sent. Once the
+upstream success headers have been sent, the proxy aborts the response body;
+the client may observe a connection error or an incomplete HTTP 200 response.
 
 Add `anthropic_messages_to_chat_completions_stream` with a `text/event-stream`
 response condition when the backend may return streaming

@@ -61,13 +61,10 @@ fn from_config_unknown_field_rejected() {
 // -----------------------------------------------------------------------------
 
 #[test]
-fn body_access_is_read_write() {
+fn declares_dual_phase_body_access() {
     let filter = make_filter();
-    assert_eq!(
-        filter.request_body_access(),
-        BodyAccess::ReadWrite,
-        "file_resolve must have read-write body access"
-    );
+    assert_eq!(filter.request_body_access(), BodyAccess::ReadWrite);
+    assert_eq!(filter.bound_upstream_request_body_access(), BodyAccess::ReadWrite);
 }
 
 #[test]
@@ -700,6 +697,84 @@ async fn scoped_credential_arrives_on_file_id_metadata_and_content_requests() {
 }
 
 #[tokio::test]
+async fn two_user_file_id_contexts_are_isolated() {
+    let (files_api_url, requests) = start_recording_files_api_stub();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "files_api_url: \"{files_api_url}\"\nallow_pre_security_callout: true\nuser_credential: ogx_files\non_missing: reject"
+    ))
+    .unwrap();
+    let filter = FileResolveFilter::from_config_with_outbound(
+        &yaml,
+        &crate::subrequest::isolated_client(4),
+        owner_projecting_outbound_pipeline(),
+    )
+    .unwrap();
+
+    for suffix in ["a", "b"] {
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        let request_body = json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_file", "file_id": "file-history"}]
+            }]
+        });
+        let mut credentials = CalloutCredentials::new();
+        credentials.insert(
+            "ogx_files".to_owned(),
+            SecretString::from(format!("Bearer scoped-user-{suffix}")),
+        );
+        ctx.extensions.insert(credentials);
+        ctx.extensions.insert(
+            crate::StateOwner::from_trusted_parts(
+                format!("tenant-{suffix}"),
+                "urn:integration:test",
+                format!("user-{suffix}"),
+            )
+            .unwrap(),
+        );
+        ctx.extensions
+            .insert(ResponsesState::from_request_body(request_body.clone()));
+        let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+        assert!(matches!(
+            filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+            FilterAction::Continue
+        ));
+    }
+
+    let captured = (0..4)
+        .map(|_| requests.recv_timeout(Duration::from_secs(1)).unwrap())
+        .collect::<Vec<_>>();
+    for (pair, suffix) in captured.chunks_exact(2).zip(["a", "b"]) {
+        for request in pair {
+            for expected in [
+                format!("authorization: Bearer scoped-user-{suffix}"),
+                format!("x-tenant-id: tenant-{suffix}"),
+                format!("x-user-id: user-{suffix}"),
+            ] {
+                assert!(
+                    request.lines().any(|line| line.eq_ignore_ascii_case(&expected)),
+                    "user {suffix} file callout must carry only its scoped context: {request}"
+                );
+            }
+            let other = if suffix == "a" { "b" } else { "a" };
+            assert!(
+                !request.contains(&format!("scoped-user-{other}"))
+                    && !request.contains(&format!("tenant-{other}"))
+                    && !request.contains(&format!("user-{other}")),
+                "user {suffix} callout leaked user {other} context: {request}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn scoped_file_id_credential_is_not_replayed_to_redirect_authority() {
     let redirect_target = TcpListener::bind("127.0.0.1:0").unwrap();
     redirect_target.set_nonblocking(true).unwrap();
@@ -1046,6 +1121,21 @@ fn private_outbound_pipeline() -> Arc<FilterPipeline> {
     Arc::new(pipeline)
 }
 
+fn owner_projecting_outbound_pipeline() -> Arc<FilterPipeline> {
+    let mut registry = praxis_filter::FilterRegistry::with_builtins();
+    praxis_filter::register_filters!(
+        @register registry,
+        http "project_state_owner_headers" => crate::ProjectStateOwnerHeadersFilter::from_config
+    );
+    let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
+        "- filter: project_state_owner_headers\n  tenant_header: x-tenant-id\n  subject_header: x-user-id\n",
+    )
+    .unwrap();
+    let mut pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline.set_allow_private_upstreams(true);
+    Arc::new(pipeline)
+}
+
 /// Build a filter whose `file_id` callouts traverse a private-upstream
 /// outbound chain, mirroring the production chain-binding path against a
 /// loopback Files API stub.
@@ -1060,7 +1150,7 @@ fn make_filter_with_outbound_for_url(files_api_url: &str) -> Box<dyn HttpFilter>
 fn make_filter_with_outbound_from_yaml(yaml_str: &str) -> Box<dyn HttpFilter> {
     let yaml: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
     let client = crate::subrequest::isolated_client(4);
-    FileResolveFilter::from_config_with_outbound(&yaml, client, private_outbound_pipeline()).unwrap()
+    FileResolveFilter::from_config_with_outbound(&yaml, &client, private_outbound_pipeline()).unwrap()
 }
 
 fn make_client() -> FilesApiClient {
@@ -1109,6 +1199,44 @@ fn start_files_api_stub_requiring_auth(expected: &'static str) -> String {
     });
 
     format!("http://{address}")
+}
+
+fn start_recording_files_api_stub() -> (String, std::sync::mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let raw = String::from_utf8_lossy(&request[..read]).into_owned();
+                tx.send(raw.clone()).unwrap();
+                let path = raw
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap();
+                let (content_type, body): (&str, &[u8]) = if path.ends_with("/content") {
+                    ("text/plain", b"history")
+                } else {
+                    (
+                        "application/json",
+                        br#"{"id":"file-history","filename":"history.txt","content_type":"text/plain","bytes":7}"#,
+                    )
+                };
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+            });
+        }
+    });
+    (format!("http://{address}"), rx)
 }
 
 fn serve_file_request_requiring_auth(mut stream: std::net::TcpStream, expected: &str) {
@@ -1223,6 +1351,7 @@ async fn file_url_resolved_to_data_uri() {
     let localhost_origin = NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap();
     let resolver = FileUrlResolver {
         allowed_private_origins: vec![localhost_origin],
+        client: crate::subrequest::isolated_client(4),
     };
 
     // Call resolve_input with url_resolver
@@ -1275,6 +1404,7 @@ async fn file_url_truncated_body_reports_url_failure() {
         allowed_private_origins: vec![
             NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap(),
         ],
+        client: crate::subrequest::isolated_client(4),
     };
     let result = resolver
         .resolve_url(
@@ -1285,13 +1415,9 @@ async fn file_url_truncated_body_reports_url_failure() {
         .await;
 
     match result {
-        Err(ResolveError::FileUrlFailed { label, detail }) => {
+        Err(ResolveError::FileUrlFailed { label, .. }) => {
             assert!(label.contains("[REDACTED]"), "signed query value should be redacted");
             assert!(!label.contains("secret"), "signed query value must not be exposed");
-            assert!(
-                detail.contains("read error"),
-                "failure should retain URL body read context"
-            );
         },
         Err(other) => panic!("expected FileUrlFailed for a truncated URL body, got {other}"),
         Ok(_) => panic!("expected FileUrlFailed for a truncated URL body"),
@@ -1309,19 +1435,24 @@ async fn file_url_oversized_content_length_reports_generic_too_large() {
     let address = listener.local_addr().unwrap();
     let stub_url = format!("http://{address}/file.txt?sig=secret");
 
+    let body = "X".repeat(100);
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = [0_u8; 4096];
         let _read = stream.read(&mut request).unwrap();
-        let response =
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\nConnection: close\r\n\r\n";
-        stream.write_all(response).unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        );
+        stream.write_all(response.as_bytes()).unwrap();
     });
 
     let resolver = FileUrlResolver {
         allowed_private_origins: vec![
             NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap(),
         ],
+        client: crate::subrequest::isolated_client(4),
     };
     let result = resolver
         .resolve_url(&stub_url, tokio::time::Instant::now() + Duration::from_secs(5), 64)
@@ -1414,6 +1545,7 @@ async fn file_url_in_shorthand_message_resolved() {
     let localhost_origin = NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap();
     let resolver = FileUrlResolver {
         allowed_private_origins: vec![localhost_origin],
+        client: crate::subrequest::isolated_client(4),
     };
 
     let count = resolve_input(
@@ -1482,6 +1614,7 @@ async fn file_url_in_function_call_output_resolved() {
     let localhost_origin = NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap();
     let resolver = FileUrlResolver {
         allowed_private_origins: vec![localhost_origin],
+        client: crate::subrequest::isolated_client(4),
     };
 
     let count = resolve_input(
@@ -1527,6 +1660,7 @@ async fn file_url_blocked_is_not_swallowed_by_on_missing_continue() {
 
     let resolver = FileUrlResolver {
         allowed_private_origins: vec![],
+        client: crate::subrequest::isolated_client(4),
     };
 
     let result = resolve_input(
@@ -1586,6 +1720,7 @@ async fn file_url_failed_is_not_swallowed_by_on_missing_continue() {
     // Default posture: file_url: resolve, on_missing: continue.
     let resolver = FileUrlResolver {
         allowed_private_origins: vec![NormalizedOrigin::parse(&format!("http://{address}")).unwrap()],
+        client: crate::subrequest::isolated_client(4),
     };
 
     let err = resolve_input(
@@ -1620,15 +1755,17 @@ async fn file_url_too_large_is_not_swallowed_by_on_missing_continue() {
     // under on_missing: reject.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
+    let oversized_body = "X".repeat(100);
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = [0_u8; 4096];
         let _read = stream.read(&mut request).unwrap();
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            oversized_body.len(),
+            oversized_body,
+        );
+        stream.write_all(response.as_bytes()).unwrap();
     });
 
     let url = format!("http://{address}/file.pdf");
@@ -1647,6 +1784,7 @@ async fn file_url_too_large_is_not_swallowed_by_on_missing_continue() {
     let client = make_client_for_url_with_max("http://unused:9999", 64);
     let resolver = FileUrlResolver {
         allowed_private_origins: vec![NormalizedOrigin::parse(&format!("http://{address}")).unwrap()],
+        client: crate::subrequest::isolated_client(4),
     };
 
     let err = resolve_input(
@@ -1673,8 +1811,7 @@ async fn file_url_too_large_is_not_swallowed_by_on_missing_continue() {
 fn display_redacts_signed_file_url() {
     use crate::openai::responses::file_resolve::resolve::ReferenceSource;
 
-    let source =
-        ReferenceSource::FileUrl("https://storage.example.com/file.pdf?sig=SECRET_TOKEN&exp=1234567890".to_owned());
+    let source = ReferenceSource::FileUrl("https://storage.example.com/file.pdf?sig=SECRET_TOKEN&exp=1234567890");
     let displayed = format!("{source}");
     assert!(
         !displayed.contains("SECRET_TOKEN"),

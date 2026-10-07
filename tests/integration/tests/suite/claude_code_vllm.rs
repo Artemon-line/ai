@@ -18,8 +18,15 @@
 //! translation. The transformed path rewrites the Anthropic request into OpenAI
 //! Chat Completions (and the response back) via
 //! `anthropic_messages_to_chat_completions[_stream]`, so a Chat-Completions-only
-//! vLLM can serve the same client. One vLLM container serves both surfaces, so a
-//! single gated CI job runs both tests.
+//! vLLM can serve the same client. Each path runs once with deterministic
+//! `acceptEdits` permissions and once with client-initiated auto-mode
+//! classification, for four independent scenarios against one shared vLLM
+//! container.
+//!
+//! A fifth scenario covers issue #1418: a read-only PLANNING turn over the
+//! native path, asserting the run converges and that no reasoning-channel text
+//! reaches the user-visible answer. See [`PLANNING_PROMPT`] for what that
+//! scenario does and does not prove.
 //!
 //! These tests assert only what a live end-to-end run uniquely proves: the real
 //! client completes the task through Praxis against a real backend. Wire
@@ -29,8 +36,8 @@
 //! `tests/integration/tests/suite/examples/anthropic_messages_native_vllm.rs`
 //! and `.../anthropic_messages_to_openai_vllm.rs`, not observed here.
 //!
-//! Both tests are gated on live infrastructure and skip unless every required
-//! variable is set. Run them locally with, e.g.:
+//! All five tests are gated on live infrastructure and skip unless every
+//! required variable is set. Run them locally with, e.g.:
 //!
 //! ```console
 //! PRAXIS_TEST_CLAUDE_CODE_BIN=/absolute/path/to/claude \
@@ -43,11 +50,11 @@
 //! #   claude_code_vllm::pinned_claude_code_drives_transformed_vllm_through_full_flow
 //! ```
 //!
-//! Pin discipline: [`CLAUDE_CODE_VERSION`] and [`LAUNCH_FLAGS`] are part of the
-//! committed pin manifest (`tests/integration/fixtures/claude-code-cli/`). They
-//! MUST be re-validated against the pinned executable during the qualification
-//! run described in that manifest before CI executes this test once. The served
-//! model, vLLM image digest, and startup request matrix are pinned there too.
+//! Pin discipline: [`CLAUDE_CODE_VERSION`], [`PermissionScenario`], and
+//! [`LAUNCH_FLAGS`] are part of the committed pin manifest
+//! (`tests/integration/fixtures/claude-code-cli/`). They MUST be re-validated
+//! against the pinned executable when its version changes. The served model,
+//! vLLM image digest, and startup request matrix are pinned there too.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -59,7 +66,7 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    CapturedChildOutput, basic_auth_header, capture_child_output, configure_isolated_process_group,
+    CapturedChildOutput, ProxyGuard, basic_auth_header, capture_child_output, configure_isolated_process_group,
     example_config_path, free_port, start_proxy,
 };
 use serde_json::Value;
@@ -108,19 +115,164 @@ const LISTEN_ADDRESS_ENV: &str = "PRAXIS_TEST_LISTEN_ADDRESS";
 /// qualification run and update this constant and the manifest together.
 const CLAUDE_CODE_VERSION: &str = "2.1.278";
 
-/// Output-token ceiling passed to the pinned client for the 16K vLLM context.
+/// Output-token ceiling passed to the pinned client for the 32K vLLM context.
 ///
 /// Claude Code otherwise requests 32K output tokens, which vLLM correctly
-/// rejects before inference when the pinned model server has a 16K total
+/// rejects before inference when the pinned model server has a 32K total
 /// context. The coding task needs only short tool calls and a summary.
 const CLAUDE_CODE_MAX_OUTPUT_TOKENS: &str = "2048";
 
 /// Context window advertised to the pinned client for its compaction policy.
 ///
-/// The client otherwise compacts after each small tool result when this is set
-/// to the backend's 16K generation window. Actual requests remain bounded by
-/// vLLM's 16K limit and the separate 2K output cap.
+/// Keep this equal to the backend's 32K generation window. Auto-mode classifier
+/// calls reserve 2,112 output tokens independently of the main-request cap and
+/// include a large client-owned safety prompt, so a smaller backend window can
+/// reject them before inference.
 const CLAUDE_CODE_MAX_CONTEXT_TOKENS: &str = "32768";
+
+/// Claude Code switch between its server-side and client-initiated auto-mode
+/// classifier paths.
+const AUTO_MODE_SERVER_ENV: &str = "CLAUDE_CODE_AUTO_MODE_SERVER";
+
+/// Selects how the pinned client authorizes tool calls in one acceptance run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PermissionScenario {
+    /// Stable baseline: Claude Code applies its built-in `acceptEdits` mode and
+    /// receives an explicit allowlist for the deterministic workspace tools.
+    AcceptEdits,
+    /// Exercise Claude Code's auto-mode classifier through Praxis. Setting the
+    /// server toggle to `0` makes the client initiate classifier model requests;
+    /// Praxis and vLLM do not implement Anthropic's server-side classifier.
+    AutoClientClassifier,
+    /// Read-only planning: `acceptEdits` with ONLY `Read` preapproved, so the
+    /// planning scenario cannot mutate its workspace even if the model ignores
+    /// the instruction not to. Paired with [`PLANNING_LAUNCH_FLAGS`], which also
+    /// withholds every mutating tool from the request in the first place.
+    ReadOnlyPlanning,
+}
+
+impl PermissionScenario {
+    /// The value accepted by Claude Code's `--permission-mode` flag.
+    const fn cli_value(self) -> &'static str {
+        match self {
+            Self::AcceptEdits | Self::ReadOnlyPlanning => "acceptEdits",
+            Self::AutoClientClassifier => "auto",
+        }
+    }
+
+    /// Adds the permission arguments for this scenario without changing the
+    /// common tool exposure configured by the scenario's launch flags.
+    fn configure_arguments(self, command: &mut tokio::process::Command) {
+        command.arg("--permission-mode").arg(self.cli_value());
+        match self {
+            // Qwen may render the required verification as `./verify.sh`, invoke
+            // it through a shell, or compose it with an inspection command.
+            // Bash is the only shell tool exposed to this temporary,
+            // egress-isolated baseline workspace, so approve it without
+            // coupling the test to one command spelling.
+            Self::AcceptEdits => {
+                command.arg("--allowedTools").arg("Read").arg("Edit").arg("Bash");
+            },
+            Self::ReadOnlyPlanning => {
+                command.arg("--allowedTools").arg("Read");
+            },
+            // Auto mode deliberately preapproves nothing; see
+            // [`Self::configure_environment`].
+            Self::AutoClientClassifier => {},
+        }
+    }
+
+    /// Applies scenario-specific environment after the command environment has
+    /// been cleared. Auto mode deliberately omits `--allowedTools`, so the Edit
+    /// and Bash calls cannot bypass classification through preapproval.
+    fn configure_environment(self, command: &mut tokio::process::Command) {
+        if self == Self::AutoClientClassifier {
+            command.env(AUTO_MODE_SERVER_ENV, "0");
+        }
+    }
+}
+
+#[test]
+fn permission_scenarios_keep_auto_mode_unapproved_and_client_classified() {
+    fn configured_command(scenario: PermissionScenario) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("claude");
+        command.env_clear();
+        scenario.configure_arguments(&mut command);
+        scenario.configure_environment(&mut command);
+        command
+    }
+
+    for flags in [LAUNCH_FLAGS, PLANNING_LAUNCH_FLAGS] {
+        assert!(!flags.contains(&"--permission-mode"));
+        assert!(!flags.contains(&"--allowedTools"));
+    }
+
+    let baseline = configured_command(PermissionScenario::AcceptEdits);
+    let baseline_args = baseline
+        .as_std()
+        .get_args()
+        .map(|value| value.to_str().expect("test arguments should be UTF-8"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        baseline_args,
+        [
+            "--permission-mode",
+            "acceptEdits",
+            "--allowedTools",
+            "Read",
+            "Edit",
+            "Bash",
+        ]
+    );
+    assert!(baseline.as_std().get_envs().next().is_none());
+
+    let auto = configured_command(PermissionScenario::AutoClientClassifier);
+    let auto_args = auto
+        .as_std()
+        .get_args()
+        .map(|value| value.to_str().expect("test arguments should be UTF-8"))
+        .collect::<Vec<_>>();
+    assert_eq!(auto_args, ["--permission-mode", "auto"]);
+    assert_eq!(
+        auto.as_std()
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new(AUTO_MODE_SERVER_ENV))
+            .and_then(|(_, value)| value),
+        Some(OsStr::new("0"))
+    );
+
+    // The planning scenario preapproves only Read, so even a model that ignores
+    // the prompt cannot mutate the workspace through a preapproved tool.
+    let planning = configured_command(PermissionScenario::ReadOnlyPlanning);
+    let planning_args = planning
+        .as_std()
+        .get_args()
+        .map(|value| value.to_str().expect("test arguments should be UTF-8"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        planning_args,
+        ["--permission-mode", "acceptEdits", "--allowedTools", "Read"]
+    );
+    assert!(planning.as_std().get_envs().next().is_none());
+}
+
+#[test]
+fn planning_launch_flags_withhold_every_mutating_tool() {
+    let exposed = PLANNING_LAUNCH_FLAGS
+        .windows(2)
+        .find(|pair| pair[0] == "--tools")
+        .map(|pair| pair[1])
+        .expect("the planning launch flags should name the exposed built-in tools");
+
+    assert_eq!(
+        exposed, "Read",
+        "the planning scenario must expose only Read: a mutating tool in the request would let \
+         the run change its own workspace, and the read-only assertion would then be vacuous"
+    );
+    for tool in MUTATING_TOOLS {
+        assert!(!exposed.split(',').any(|name| name == *tool));
+    }
+}
 
 /// The native-vLLM passthrough example config under test (no body translation).
 const CONFIG_NATIVE: &str = "anthropic/messages-native-vllm.yaml";
@@ -164,13 +316,11 @@ const CHILD_TIMEOUT: Duration = Duration::from_secs(180);
 ///
 /// PIN: these are the real print-mode headless flags accepted by the pinned
 /// executable. Restricting the available built-ins to the three tools the task
-/// exercises keeps unrelated tool schemas out of the prompt and makes the 16K
+/// exercises keeps unrelated tool schemas out of the prompt and makes the 32K
 /// context pin representative. Re-validate the full set below against the
 /// pinned executable during qualification and adjust here and in the manifest
 /// together.
 const LAUNCH_FLAGS: &[&str] = &[
-    "--permission-mode",
-    "acceptEdits",
     "--tools",
     "Read,Edit,Bash",
     "--strict-mcp-config",
@@ -180,6 +330,91 @@ const LAUNCH_FLAGS: &[&str] = &[
     "--max-turns",
     "8",
 ];
+
+/// The read-only planning prompt for the issue #1418 regression.
+///
+/// Issue #1418 reported Claude Code's interactive plan mode looping endlessly
+/// against Qwen3-8B served with `--reasoning-parser deepseek_r1` and thinking
+/// left on, rendering reasoning text into the plan instead of a finished one.
+///
+/// SCOPE: this is NOT the interactive plan mode of that report. The pinned
+/// executable exposes neither the plan-mode system prompt nor `ExitPlanMode`
+/// in any headless transport (`-p`, with or without `--input-format
+/// stream-json`), so plan mode cannot be driven from CI. What this scenario
+/// does reproduce is the shape of the turn that broke and both of its
+/// observable symptoms: a read-only, multi-file planning request whose answer
+/// is prose, asserted to converge rather than exhaust the turn budget and to
+/// carry no reasoning-channel text in the user-visible answer.
+///
+/// Deliberately NO `/no_think` suffix, unlike [`PROMPT`]. That marker suppresses
+/// Qwen3 thinking from the user turn, which would mask exactly the server-side
+/// misconfiguration this scenario exists to catch. Thinking must be off because
+/// the backend is served correctly, not because the prompt asked.
+const PLANNING_PROMPT: &str = "Read ./deploy.sh, ./backup.sh and ./README.md, then write me a \
+     plan to harden the scripts and documentation present in this directory. \
+     Do not modify, create, or delete any file: the plan itself is the deliverable. \
+     Give the plan as your final answer.";
+
+/// Pinned launch flags for the read-only planning scenario.
+///
+/// PIN: keep in sync with `[claude_code.launch.planning]` in the manifest.
+/// Exposing only `Read` keeps the run incapable of mutating its workspace at
+/// the request level, so the read-only assertion is about the client's
+/// behaviour and not merely about permissions.
+const PLANNING_LAUNCH_FLAGS: &[&str] = &[
+    "--tools",
+    "Read",
+    "--strict-mcp-config",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--max-turns",
+    "8",
+];
+
+/// Built-in tools that would mutate the planning workspace if ever called.
+const MUTATING_TOOLS: &[&str] = &["Edit", "Write", "NotebookEdit", "Bash"];
+
+/// Reasoning-channel delimiters that must never reach user-visible output.
+///
+/// vLLM's `--reasoning-parser` splits a model's thinking block out of the
+/// completion into `reasoning_content`. A parser that does not match the served
+/// family leaves the raw delimiters and their contents in the assistant text,
+/// which is how issue #1418 surfaced: reasoning rendered as the answer.
+const REASONING_LEAK_MARKERS: &[&str] = &["<think>", "</think>"];
+
+/// What one scenario asks the client to do, and with which capabilities.
+///
+/// The three travel together: a prompt is only meaningful alongside the tools
+/// the request exposes and the subset of those that are preapproved. Keeping
+/// them in one value means a scenario cannot be launched with another's tools.
+#[derive(Clone, Copy)]
+struct Turn {
+    /// The `-p` prompt text.
+    prompt: &'static str,
+    /// Pinned flags, including the exposed built-in tools.
+    launch_flags: &'static [&'static str],
+    /// Permission mode and the preapproved subset of the exposed tools.
+    permission_scenario: PermissionScenario,
+}
+
+impl Turn {
+    /// The read-only planning turn of the issue #1418 regression.
+    const PLANNING: Self = Self {
+        prompt: PLANNING_PROMPT,
+        launch_flags: PLANNING_LAUNCH_FLAGS,
+        permission_scenario: PermissionScenario::ReadOnlyPlanning,
+    };
+
+    /// The deterministic coding task under one of its permission scenarios.
+    const fn coding(permission_scenario: PermissionScenario) -> Self {
+        Self {
+            prompt: PROMPT,
+            launch_flags: LAUNCH_FLAGS,
+            permission_scenario,
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Test
@@ -192,7 +427,7 @@ async fn pinned_claude_code_drives_native_vllm_through_full_flow() {
     let Some(live) = LiveConfig::from_env() else {
         return;
     };
-    run_full_flow(&live, native_vllm_config).await;
+    run_full_flow(&live, native_vllm_config, PermissionScenario::AcceptEdits).await;
 }
 
 /// Prove the same client completes the same task through Praxis when Praxis
@@ -203,59 +438,71 @@ async fn pinned_claude_code_drives_transformed_vllm_through_full_flow() {
     let Some(live) = LiveConfig::from_env() else {
         return;
     };
-    run_full_flow(&live, transformed_vllm_config).await;
+    run_full_flow(&live, transformed_vllm_config, PermissionScenario::AcceptEdits).await;
+}
+
+/// Prove Claude Code's client-initiated auto-mode classifier can authorize the
+/// same task through the native Anthropic Messages path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pinned_claude_code_auto_mode_drives_native_vllm_through_full_flow() {
+    let Some(live) = LiveConfig::from_env() else {
+        return;
+    };
+    run_full_flow(&live, native_vllm_config, PermissionScenario::AutoClientClassifier).await;
+}
+
+/// Prove Claude Code's client-initiated auto-mode classifier can authorize the
+/// same task through the translated Chat Completions path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pinned_claude_code_auto_mode_drives_transformed_vllm_through_full_flow() {
+    let Some(live) = LiveConfig::from_env() else {
+        return;
+    };
+    run_full_flow(&live, transformed_vllm_config, PermissionScenario::AutoClientClassifier).await;
+}
+
+/// Prove a read-only planning turn over the native path converges and keeps
+/// reasoning out of the user-visible answer (issue #1418).
+///
+/// Runs on the native path because that is where the issue was reported
+/// (`Claude Code -> Praxis /v1/messages -> vLLM /v1/messages`). The defect is a
+/// property of how the shared container is served, not of a Praxis filter
+/// chain, so one path is enough to guard the serving pins; see
+/// [`PLANNING_PROMPT`] for what this does and does not reproduce.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pinned_claude_code_planning_turn_converges_without_reasoning_leakage_on_native_vllm() {
+    let Some(live) = LiveConfig::from_env() else {
+        return;
+    };
+    run_planning_flow(&live, native_vllm_config).await;
 }
 
 /// Drives the pinned client end to end through a Praxis config built by
 /// `build_config`, asserting the task completed against the real backend.
 ///
-/// Both acceptance paths (native passthrough and Chat Completions translation)
-/// share this flow; only the config filter chain differs. The client, task,
-/// egress-isolation enforcement, and outcome assertions are identical, so the
-/// two tests prove the same real-model behavior over the two wire bridges.
-async fn run_full_flow(live: &LiveConfig, build_config: fn(&LiveConfig, u16) -> Config) {
+/// Both acceptance paths and both permission scenarios share this flow; only
+/// the config filter chain and client permission setup differ.
+async fn run_full_flow(
+    live: &LiveConfig,
+    build_config: fn(&LiveConfig, u16) -> Config,
+    permission_scenario: PermissionScenario,
+) {
     assert_pinned_version(&live.claude_bin).await;
     live.require_egress_isolation_if_demanded();
 
-    // Praxis binds the configured address and forwards Anthropic Messages traffic
-    // to the real vLLM backend. Under network isolation Praxis binds the
-    // host-side veth address so the namespaced client can reach only Praxis,
-    // proving it cannot bypass the proxy.
-    let proxy_port = free_port();
-    let config = build_config(live, proxy_port);
-    let proxy = start_proxy(&config);
+    let proxy = start_isolated_proxy(live, build_config);
     let proxy_base_url = format!("http://{}", proxy.addr());
-
-    // Enforced egress isolation: when a namespace is configured, actively prove
-    // the isolated client can reach Praxis and CANNOT reach the public internet,
-    // so all Anthropic traffic is forced through the proxy. This is real
-    // enforcement, not an advisory `ANTHROPIC_BASE_URL` that a client is free to
-    // ignore.
-    if let Some(namespace) = &live.netns {
-        let bound = proxy
-            .addr()
-            .parse::<std::net::SocketAddr>()
-            .unwrap_or_else(|error| panic!("parse Praxis listen address {}: {error}", proxy.addr()));
-        verify_egress_isolation(namespace, bound.ip(), bound.port());
-    }
 
     let workspace = Workspace::create();
     let started = SystemTime::now();
-    let output = launch_claude_code(live, &proxy_base_url, &workspace).await;
-
-    assert!(
-        !output.timed_out,
-        "Claude Code exceeded the {CHILD_TIMEOUT:?} acceptance-test timeout\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(
-        output.status.success(),
-        "Claude Code exited with {status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-        status = output.status.code(),
-        stdout = String::from_utf8_lossy(&output.stdout),
-        stderr = String::from_utf8_lossy(&output.stderr),
-    );
+    let output = launch_claude_code(
+        live,
+        &proxy_base_url,
+        workspace.project.path(),
+        Turn::coding(permission_scenario),
+    )
+    .await;
+    assert_child_completed(&output, "coding task");
 
     // Task outcome, proven two independent ways:
     //  * end state — the exact derived file plus the harness-owned verification marker, written only when `verify.sh`
@@ -265,6 +512,77 @@ async fn run_full_flow(live: &LiveConfig, build_config: fn(&LiveConfig, u16) -> 
     //    summary.
     workspace.assert_task_trace(&String::from_utf8_lossy(&output.stdout));
     workspace.assert_task_completed(started);
+}
+
+/// Drives one read-only planning turn and asserts it converged cleanly.
+async fn run_planning_flow(live: &LiveConfig, build_config: fn(&LiveConfig, u16) -> Config) {
+    assert_pinned_version(&live.claude_bin).await;
+    live.require_egress_isolation_if_demanded();
+
+    let proxy = start_isolated_proxy(live, build_config);
+    let proxy_base_url = format!("http://{}", proxy.addr());
+
+    let workspace = PlanningWorkspace::create();
+    let output = launch_claude_code(live, &proxy_base_url, workspace.project.path(), Turn::PLANNING).await;
+    assert_not_timed_out(&output, "planning turn");
+
+    // Diagnose from the trace BEFORE asserting the exit status. Turn-budget
+    // exhaustion — the headless form of the issue #1418 loop — exits nonzero,
+    // so a plain status assertion would fail first and report only "exited
+    // with 1". The trace assertions name the symptom instead.
+    workspace.assert_plan_without_reasoning_leakage(&String::from_utf8_lossy(&output.stdout));
+    assert_child_completed(&output, "planning turn");
+}
+
+/// Starts Praxis for one live run, proving the client cannot bypass it.
+///
+/// Praxis binds the configured address and forwards Anthropic Messages traffic
+/// to the real vLLM backend. Under network isolation Praxis binds the host-side
+/// veth address, so the namespaced client can reach only Praxis.
+///
+/// When a namespace is configured this actively proves the isolated client can
+/// reach Praxis and CANNOT reach the public internet, so all Anthropic traffic
+/// is forced through the proxy. That is real enforcement, not an advisory
+/// `ANTHROPIC_BASE_URL` that a client is free to ignore.
+fn start_isolated_proxy(live: &LiveConfig, build_config: fn(&LiveConfig, u16) -> Config) -> ProxyGuard {
+    let proxy_port = free_port();
+    let config = build_config(live, proxy_port);
+    let proxy = start_proxy(&config);
+
+    if let Some(namespace) = &live.netns {
+        let bound = proxy
+            .addr()
+            .parse::<std::net::SocketAddr>()
+            .unwrap_or_else(|error| panic!("parse Praxis listen address {}: {error}", proxy.addr()));
+        verify_egress_isolation(namespace, bound.ip(), bound.port());
+    }
+
+    proxy
+}
+
+/// Asserts the pinned client exited on its own rather than being reaped.
+///
+/// A timeout leaves the captured stdout truncated mid-stream, so every other
+/// assertion about the trace would be reasoning about a partial transcript.
+fn assert_not_timed_out(output: &CapturedChildOutput, scenario: &str) {
+    assert!(
+        !output.timed_out,
+        "Claude Code exceeded the {CHILD_TIMEOUT:?} acceptance-test timeout on the {scenario}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Asserts the pinned client ran to completion inside the acceptance timeout.
+fn assert_child_completed(output: &CapturedChildOutput, scenario: &str) {
+    assert_not_timed_out(output, scenario);
+    assert!(
+        output.status.success(),
+        "Claude Code exited with {status:?} on the {scenario}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        status = output.status.code(),
+        stdout = String::from_utf8_lossy(&output.stdout),
+        stderr = String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -307,7 +625,7 @@ impl LiveConfig {
                  is required"
             );
             eprintln!(
-                "skipping native-vLLM Claude Code acceptance test; set {CLAUDE_CODE_BIN_ENV}, \
+                "skipping Claude Code vLLM acceptance test; set {CLAUDE_CODE_BIN_ENV}, \
                  {VLLM_BASE_URL_ENV}, {VLLM_MODEL_ENV}, and {BACKEND_TOKEN_ENV} to run it"
             );
             return None;
@@ -557,36 +875,176 @@ impl Workspace {
             edit_result.text,
         );
 
-        let bash = trace
-            .tool_uses
-            .iter()
-            .find(|tool_use| {
-                tool_use.name == "Bash"
-                    && tool_use
-                        .input
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .is_some_and(|command| command.contains("verify.sh"))
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "client must call Bash to run verify.sh; tool calls observed: {:?}\nstdout:\n{stdout}",
-                    trace.tool_use_names(),
-                )
-            });
-        let bash_result = trace
-            .result_for(&bash.id)
-            .unwrap_or_else(|| panic!("the verify.sh Bash call must produce a tool_result"));
-        assert!(
-            !bash_result.is_error && bash_result.text.contains("verify: OK"),
-            "the verify.sh Bash tool_result for command {:?} must report success: {}",
-            bash.input.get("command").and_then(Value::as_str),
-            bash_result.text,
-        );
+        trace.successful_verify_bash().unwrap_or_else(|| {
+            panic!(
+                "client must successfully run verify.sh; Bash commands observed: {:?}\nstdout:\n{stdout}",
+                trace.bash_commands(),
+            )
+        });
 
         assert!(
             trace.final_summary.is_some(),
             "Claude Code must emit a non-empty final summary in its stream-json output",
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Read-only planning workspace (issue #1418)
+// -----------------------------------------------------------------------------
+
+/// A small, deliberately unhardened directory for the planning scenario.
+///
+/// Two shell scripts and a README with obvious hardening gaps give the model
+/// something concrete to plan about, mirroring the "harden the scripts and
+/// documentation present in this directory" request from the report. Nothing
+/// here is ever expected to change: the plan is the only deliverable.
+struct PlanningWorkspace {
+    /// The temporary project directory the client runs inside.
+    project: tempfile::TempDir,
+    /// A random per-run token embedded in a script comment. It can only reach
+    /// the trace through a Read result, so it proves the client actually read
+    /// the files through Praxis rather than planning from the prompt alone.
+    source_token: String,
+}
+
+impl PlanningWorkspace {
+    /// Creates the three files named by [`PLANNING_PROMPT`].
+    fn create() -> Self {
+        let source_token = format!("praxis-plan-{}", unique_seed());
+        let project = tempfile::tempdir().expect("temporary planning directory should be created");
+        let root = project.path();
+
+        std::fs::write(
+            root.join("deploy.sh"),
+            format!("#!/bin/sh\n# {source_token}\nrm -rf $1\ncurl $2 | sh\n"),
+        )
+        .expect("deploy.sh should be written");
+        std::fs::write(root.join("backup.sh"), "#!/bin/sh\ntar czf /tmp/backup.tgz $HOME\n")
+            .expect("backup.sh should be written");
+        std::fs::write(
+            root.join("README.md"),
+            "# Ops scripts\n\nRun deploy.sh, then backup.sh.\n",
+        )
+        .expect("README.md should be written");
+
+        Self { project, source_token }
+    }
+
+    /// Assert the planning turn converged, stayed read-only, and kept the
+    /// model's reasoning channel out of the user-visible plan.
+    fn assert_plan_without_reasoning_leakage(&self, stdout: &str) {
+        let trace = ToolTrace::parse(stdout);
+
+        // Symptom 1 of issue #1418 — the client never converges. Headless, an
+        // endless loop ends as turn-budget exhaustion rather than an answer,
+        // which the client reports as `error_max_turns`.
+        assert_eq!(
+            trace.result_subtype.as_deref(),
+            Some("success"),
+            "the planning turn must converge on an answer; the client reported subtype {:?} \
+             after {:?} turns, which is how an endless planning loop ends headlessly\nstdout:\n{stdout}",
+            trace.result_subtype,
+            trace.num_turns,
+        );
+        assert!(
+            !trace.result_is_error,
+            "the planning turn must not end in a client-reported error\nstdout:\n{stdout}"
+        );
+
+        // Symptom 2 — reasoning rendered as the answer. With a reasoning parser
+        // matching the served family and thinking off, the delimiters never
+        // reach the assistant text; with a mismatched parser they do.
+        //
+        // Asserted BEFORE the tool-trace checks below: a backend leaking its
+        // reasoning channel also tends to skip the tool calls it was reasoning
+        // about, and that missing Read is a consequence, not the cause. Checking
+        // the leak first makes the failure name the defect.
+        let leaks = trace.reasoning_leaks();
+        assert!(
+            leaks.is_empty(),
+            "reasoning-channel text reached the user-visible answer: {leaks:?}\n\
+             the backend is serving thinking the client is not meant to see — check that vLLM runs \
+             with a --reasoning-parser matching the served model family and thinking disabled \
+             (see tests/integration/fixtures/claude-code-cli/pin.toml)\nstdout:\n{stdout}",
+        );
+
+        // The plan must be grounded in the files: a per-run token can only
+        // enter the trace through a Read result delivered back through Praxis.
+        let read = trace.find_tool_use("Read", "deploy.sh").unwrap_or_else(|| {
+            panic!(
+                "client must Read deploy.sh before planning; tool calls observed: {:?}\nstdout:\n{stdout}",
+                trace.tool_use_names(),
+            )
+        });
+        let read_result = trace
+            .result_for(&read.id)
+            .unwrap_or_else(|| panic!("the Read of deploy.sh must produce a tool_result"));
+        assert!(
+            !read_result.is_error,
+            "the Read tool_result must not be an error: {}",
+            read_result.text,
+        );
+        assert!(
+            read_result.text.contains(&self.source_token),
+            "the Read tool_result must carry the per-run token {} delivered back through Praxis; got: {}",
+            self.source_token,
+            read_result.text,
+        );
+
+        // Planning is read-only. `--tools Read` withholds the mutating tools
+        // from the request, so observing one here would mean the client
+        // obtained it some other way; the files are checked directly too.
+        let mutating = trace
+            .tool_use_names()
+            .into_iter()
+            .filter(|name| MUTATING_TOOLS.contains(name))
+            .collect::<Vec<_>>();
+        assert!(
+            mutating.is_empty(),
+            "the planning turn must not call a mutating tool; observed: {mutating:?}\nstdout:\n{stdout}",
+        );
+        self.assert_files_unchanged();
+
+        let plan = trace.final_summary.as_deref().unwrap_or_else(|| {
+            panic!("Claude Code must emit the plan as a final summary in its stream-json output\nstdout:\n{stdout}")
+        });
+        // A low floor on purpose: this guards against a degenerate one-word
+        // answer without asserting anything about an 8B model's prose, which
+        // would make the nightly flaky for no added signal.
+        assert!(
+            plan.trim().len() >= 40,
+            "the final answer must actually be a plan, not a stub; got: {plan:?}",
+        );
+    }
+
+    /// Assert the planning turn left every workspace file byte-identical.
+    fn assert_files_unchanged(&self) {
+        let root = self.project.path();
+        for (name, expected) in [
+            (
+                "deploy.sh",
+                format!("#!/bin/sh\n# {}\nrm -rf $1\ncurl $2 | sh\n", self.source_token),
+            ),
+            ("backup.sh", "#!/bin/sh\ntar czf /tmp/backup.tgz $HOME\n".to_owned()),
+            (
+                "README.md",
+                "# Ops scripts\n\nRun deploy.sh, then backup.sh.\n".to_owned(),
+            ),
+        ] {
+            let actual = std::fs::read_to_string(root.join(name))
+                .unwrap_or_else(|error| panic!("{name} should still be readable after a planning turn: {error}"));
+            assert_eq!(actual, expected, "the planning turn must not modify {name}");
+        }
+        let extra = std::fs::read_dir(root)
+            .expect("the planning directory should be readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !matches!(name.as_str(), "deploy.sh" | "backup.sh" | "README.md"))
+            .collect::<Vec<_>>();
+        assert!(
+            extra.is_empty(),
+            "the planning turn must not create files; found: {extra:?}",
         );
     }
 }
@@ -641,7 +1099,12 @@ fn random_token() -> String {
 // -----------------------------------------------------------------------------
 
 /// Runs the pinned Claude Code client with a cleared, pinned environment.
-async fn launch_claude_code(live: &LiveConfig, proxy_base_url: &str, workspace: &Workspace) -> CapturedChildOutput {
+async fn launch_claude_code(
+    live: &LiveConfig,
+    proxy_base_url: &str,
+    project_dir: &Path,
+    turn: Turn,
+) -> CapturedChildOutput {
     let config_dir = tempfile::tempdir().expect("temporary CLAUDE_CONFIG_DIR should be created");
     let home_dir = tempfile::tempdir().expect("temporary HOME should be created");
     let mcp_config = config_dir.path().join("empty-mcp.json");
@@ -650,23 +1113,15 @@ async fn launch_claude_code(live: &LiveConfig, proxy_base_url: &str, workspace: 
     let mut command = child_command(live);
     command
         .arg("-p")
-        .arg(PROMPT)
+        .arg(turn.prompt)
         .arg("--model")
         .arg(&live.model)
-        .arg("--allowedTools")
-        .arg("Read")
-        .arg("Edit")
-        // Qwen may render the required verification as `./verify.sh`, invoke it
-        // through a shell, or compose it with an inspection command. Claude
-        // Code's Bash permission rules are prefix matches, so enumerating exact
-        // spellings makes this real-model acceptance test nondeterministic. Bash
-        // is the only shell tool exposed by `--tools`, the project and HOME are
-        // temporary, and CI additionally runs the client without network egress.
-        .arg("Bash")
         .arg("--mcp-config")
         .arg(&mcp_config)
-        .args(LAUNCH_FLAGS)
-        .current_dir(workspace.project.path())
+        .args(turn.launch_flags);
+    turn.permission_scenario.configure_arguments(&mut command);
+    command
+        .current_dir(project_dir)
         .env_clear()
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("HOME", home_dir.path())
@@ -694,6 +1149,7 @@ async fn launch_claude_code(live: &LiveConfig, proxy_base_url: &str, workspace: 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    turn.permission_scenario.configure_environment(&mut command);
     configure_isolated_process_group(&mut command);
 
     let child = command.spawn().expect("pinned Claude Code should start");
@@ -845,21 +1301,37 @@ struct ToolResult {
     is_error: bool,
 }
 
-/// A parsed view of the tool calls, tool results, and final summary in Claude
-/// Code `--output-format stream-json` output (one JSON object per line).
+/// A parsed view of the tool calls, tool results, assistant text and terminal
+/// outcome in Claude Code `--output-format stream-json` output (one JSON object
+/// per line).
 struct ToolTrace {
     tool_uses: Vec<ToolUse>,
     tool_results: Vec<ToolResult>,
+    /// Every user-visible `text` block the assistant emitted. Reasoning the
+    /// backend failed to split into its own channel lands here.
+    assistant_texts: Vec<String>,
     final_summary: Option<String>,
+    /// The terminal `result` envelope's `subtype`, e.g. `success` or
+    /// `error_max_turns`.
+    result_subtype: Option<String>,
+    /// Whether the terminal `result` envelope reported an error.
+    result_is_error: bool,
+    /// Turns the client took, reported by the terminal `result` envelope.
+    num_turns: Option<u64>,
 }
 
 impl ToolTrace {
-    /// Parses every JSONL line, collecting `tool_use`/`tool_result` blocks and
-    /// the terminal `result` summary. Unparseable lines are ignored.
+    /// Parses every JSONL line, collecting `tool_use`/`tool_result` blocks,
+    /// assistant text, and the terminal `result` envelope. Unparseable lines
+    /// are ignored.
     fn parse(stdout: &str) -> Self {
         let mut tool_uses = Vec::new();
         let mut tool_results = Vec::new();
+        let mut assistant_texts = Vec::new();
         let mut final_summary = None;
+        let mut result_subtype = None;
+        let mut result_is_error = false;
+        let mut num_turns = None;
 
         for line in stdout.lines() {
             let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
@@ -868,17 +1340,25 @@ impl ToolTrace {
             match value.get("type").and_then(Value::as_str) {
                 Some("assistant") => {
                     for block in message_content(&value) {
-                        if block.get("type").and_then(Value::as_str) == Some("tool_use")
-                            && let (Some(id), Some(name)) = (
-                                block.get("id").and_then(Value::as_str),
-                                block.get("name").and_then(Value::as_str),
-                            )
-                        {
-                            tool_uses.push(ToolUse {
-                                id: id.to_owned(),
-                                name: name.to_owned(),
-                                input: block.get("input").cloned().unwrap_or(Value::Null),
-                            });
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("tool_use") => {
+                                if let (Some(id), Some(name)) = (
+                                    block.get("id").and_then(Value::as_str),
+                                    block.get("name").and_then(Value::as_str),
+                                ) {
+                                    tool_uses.push(ToolUse {
+                                        id: id.to_owned(),
+                                        name: name.to_owned(),
+                                        input: block.get("input").cloned().unwrap_or(Value::Null),
+                                    });
+                                }
+                            },
+                            Some("text") => {
+                                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                                    assistant_texts.push(text.to_owned());
+                                }
+                            },
+                            _ => {},
                         }
                     }
                 },
@@ -901,6 +1381,13 @@ impl ToolTrace {
                     {
                         final_summary = Some(result.to_owned());
                     }
+                    result_subtype = value
+                        .get("subtype")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .or(result_subtype);
+                    result_is_error |= value.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                    num_turns = value.get("num_turns").and_then(Value::as_u64).or(num_turns);
                 },
                 _ => {},
             }
@@ -909,8 +1396,32 @@ impl ToolTrace {
         Self {
             tool_uses,
             tool_results,
+            assistant_texts,
             final_summary,
+            result_subtype,
+            result_is_error,
+            num_turns,
         }
+    }
+
+    /// Every reasoning-channel delimiter that reached user-visible output,
+    /// paired with the offending text.
+    ///
+    /// Covers both the streamed assistant text blocks and the terminal summary:
+    /// a mismatched `--reasoning-parser` leaves the thinking block in the
+    /// assistant message, so it surfaces in both.
+    fn reasoning_leaks(&self) -> Vec<(&'static str, &str)> {
+        self.assistant_texts
+            .iter()
+            .map(String::as_str)
+            .chain(self.final_summary.as_deref())
+            .flat_map(|text| {
+                REASONING_LEAK_MARKERS
+                    .iter()
+                    .filter(move |marker| text.contains(**marker))
+                    .map(move |marker| (*marker, text))
+            })
+            .collect()
     }
 
     /// Finds the first `tool_use` for `name` whose `file_path` ends with `suffix`.
@@ -930,6 +1441,30 @@ impl ToolTrace {
         self.tool_results
             .iter()
             .find(|result| result.tool_use_id == tool_use_id)
+    }
+
+    /// Finds the Bash invocation whose correlated result proves verification
+    /// succeeded. The client may first inspect or chmod `verify.sh`; selecting
+    /// the first command that merely mentions the path would mistake that setup
+    /// call for the required execution.
+    fn successful_verify_bash(&self) -> Option<(&ToolUse, &ToolResult)> {
+        self.tool_uses.iter().find_map(|tool_use| {
+            let command = tool_use.input.get("command").and_then(Value::as_str)?;
+            if tool_use.name != "Bash" || !command.contains("verify.sh") {
+                return None;
+            }
+            let result = self.result_for(&tool_use.id)?;
+            (!result.is_error && result.text.contains("verify: OK")).then_some((tool_use, result))
+        })
+    }
+
+    /// The observed Bash command strings, for assertion failure messages.
+    fn bash_commands(&self) -> Vec<&str> {
+        self.tool_uses
+            .iter()
+            .filter(|tool_use| tool_use.name == "Bash")
+            .filter_map(|tool_use| tool_use.input.get("command").and_then(Value::as_str))
+            .collect()
     }
 
     /// The observed tool-use names, for assertion failure messages.
@@ -958,4 +1493,74 @@ fn flatten_content(content: Option<&Value>) -> String {
             .join("\n"),
         _ => String::new(),
     }
+}
+
+#[test]
+fn tool_trace_selects_successful_verify_call_after_setup_call() {
+    let stdout = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"setup","name":"Bash","input":{"command":"chmod +x ./verify.sh"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"setup","content":"Bash completed with no output"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"verify","name":"Bash","input":{"command":"./verify.sh"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"verify","content":"verify: OK"}]}}
+{"type":"result","result":"Task complete"}"#;
+
+    let trace = ToolTrace::parse(stdout);
+    let (tool_use, result) = trace
+        .successful_verify_bash()
+        .expect("the successful verify call should be selected");
+
+    assert_eq!(tool_use.id, "verify");
+    assert_eq!(result.text, "verify: OK");
+    assert_eq!(trace.bash_commands(), ["chmod +x ./verify.sh", "./verify.sh"]);
+}
+
+#[test]
+fn tool_trace_reports_reasoning_left_in_user_visible_text() {
+    // The leaked shape: a mismatched --reasoning-parser leaves the thinking
+    // block in the assistant message, so it reaches the text block and the
+    // summary the client renders from it.
+    let stdout = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"<think>which tool?</think>Here is the plan: step 1."}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"<think>which tool?</think>Here is the plan: step 1."}"#;
+
+    let trace = ToolTrace::parse(stdout);
+    let markers = trace
+        .reasoning_leaks()
+        .into_iter()
+        .map(|(marker, _)| marker)
+        .collect::<Vec<_>>();
+
+    // Both delimiters, in both the streamed text block and the summary.
+    assert_eq!(markers, ["<think>", "</think>", "<think>", "</think>"]);
+}
+
+#[test]
+fn tool_trace_accepts_a_clean_plan_and_records_convergence() {
+    let stdout = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Here is the plan: step 1."}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"Here is the plan: step 1."}"#;
+
+    let trace = ToolTrace::parse(stdout);
+
+    assert!(trace.reasoning_leaks().is_empty());
+    assert_eq!(trace.result_subtype.as_deref(), Some("success"));
+    assert!(!trace.result_is_error);
+    assert_eq!(trace.num_turns, Some(3));
+    assert_eq!(trace.assistant_texts, ["Here is the plan: step 1."]);
+}
+
+#[test]
+fn tool_trace_reports_turn_budget_exhaustion_as_the_headless_loop_symptom() {
+    // The terminal envelope a looping run produces headlessly: no answer, and
+    // the turn budget spent. Captured from the pinned executable against a
+    // backend that never stopped requesting tools.
+    let stdout = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"deploy.sh"}}]}}
+{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":4,"result":null}"#;
+
+    let trace = ToolTrace::parse(stdout);
+
+    assert_eq!(trace.result_subtype.as_deref(), Some("error_max_turns"));
+    assert!(trace.result_is_error);
+    assert_eq!(trace.num_turns, Some(4));
+    assert!(
+        trace.final_summary.is_none(),
+        "an exhausted run carries no answer to mistake for one"
+    );
 }

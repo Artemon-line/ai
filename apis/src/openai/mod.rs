@@ -15,7 +15,6 @@ pub(crate) mod error_response_formatter;
 #[cfg(feature = "store")]
 pub(crate) mod include;
 mod operation;
-pub(crate) mod operation_classifier;
 pub(crate) mod responses;
 pub(crate) mod sse;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on module")]
@@ -24,7 +23,6 @@ pub(crate) mod sse;
     reason = "Responses translation helpers are wired into the HTTP filter in a later stack entry"
 )]
 pub(crate) mod translation;
-pub(crate) mod url_security;
 
 pub use chat_completions::routes::{
     ChatCompletionsOperation, ChatCompletionsOperationSpec, operation_specs as chat_completions_operation_specs,
@@ -35,16 +33,18 @@ pub use conversations::{
 #[cfg(feature = "openai-conversations")]
 pub use conversations::{OpenaiConversationsFilter, implementation_openapi_json as conversations_openapi_json};
 pub use operation::OpenAiOperationSpec;
-pub use operation_classifier::{OpenAiOperationMatch, OpenaiOperationFilter};
 #[cfg(feature = "openai-compact")]
 pub use responses::CompactFilter;
 #[cfg(feature = "openai-file-resolve-filter")]
 pub use responses::FileResolveFilter;
+#[cfg(feature = "openai-responses-openapi")]
+pub use responses::implementation_openapi_json as responses_openapi_json;
 #[cfg(feature = "openai-responses")]
 pub use responses::{
-    AgenticLoopFilter, ClientToolCompatFilter, DocExtractFilter, FileSearchCalloutFilter,
-    OpenaiResponsesValidateFilter, WebSearchFilter, openai_responses_proxy::ResponsesProxyFilter,
-    responses_to_chat_completions::ResponsesToChatCompletionsFilter, stream_events::OpenaiStreamEventsFilter,
+    AgenticLoopFilter, ClientToolCompatFilter, DocExtractFilter, FileSearchCalloutFilter, OpenaiResponsesRequestFilter,
+    WebSearchFilter, local_tool_guardrail_messages, openai_responses_proxy::ResponsesProxyFilter,
+    record_local_tool_guardrail_failure, responses_to_chat_completions::ResponsesToChatCompletionsFilter,
+    stream_events::OpenaiStreamEventsFilter,
 };
 #[cfg(feature = "openai-mcp-tools")]
 pub use responses::{McpDispatchFilter, McpToolResolveFilter};

@@ -24,7 +24,7 @@ cover code style, testing requirements, file
 organization, and security practices. Submissions
 that do not follow these conventions will be rejected.
 
-[CONTRIBUTING.md]:../../CONTRIBUTING.md
+[CONTRIBUTING.md]:../../.github/CONTRIBUTING.md
 
 ## Build
 
@@ -44,21 +44,59 @@ make test
 make test-integration
 ```
 
+### OpenAI SDK Integration Tests (Dual 2.x / 3.x Lanes)
+
+Praxis AI maintains compatibility with both OpenAI Python SDK 2.x and 3.x releases. Local and CI test runs validate both SDK major versions independently.
+
+To run `test_openai_responses_vllm.py` in simulator mode locally, start the `inference-sim` container first:
+```console
+podman run --detach --name inference-sim --network host \
+  ghcr.io/llm-d/llm-d-inference-sim@sha256:32144df791330a0006b747edfdf2b114a0fe728e023a9d1b3463eeb48d32abb9 \
+  --model=praxis-test-model --served-model-name=praxis-test-model --mode=echo --max-model-len=8192 --skip-tool-validation --port=8000
+```
+
+To run tests against the OpenAI SDK 2.x lane (adding `-k "not file_search"` when running without local OGX vector search):
+```console
+uv run --with "openai<3" tests/integration/sdk/openai/test_openai_conversations.py -v
+VLLM_MODEL=praxis-test-model VLLM_TEST_BACKEND=simulator uv run --with "openai<3" tests/integration/sdk/openai/test_openai_responses_vllm.py -s -m "not real_inference and not vllm_compat" -k "not file_search"
+```
+
+To run tests against the OpenAI SDK 3.x lane:
+```console
+uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_conversations.py -v
+VLLM_MODEL=praxis-test-model VLLM_TEST_BACKEND=simulator uv run --with "openai>=3,<4" tests/integration/sdk/openai/test_openai_responses_vllm.py -s -m "not real_inference and not vllm_compat" -k "not file_search"
+```
+
+You can also pass `--sdk-version=2.x` or `--sdk-version=3.x` to enforce version verification during pytest startup.
+
 ### FIPS Build and Compliance Check
 
 Praxis AI targets FIPS 140-3 on Red Hat Enterprise Linux by performing all
 cryptography in the RHEL OpenSSL FIPS provider. The published build
 (`make release`, `make container`) enables every non-experimental filter.
 The FIPS build turns off what is known not to be compliant yet (the policy
-engine, AWS SigV4 signing, the response stores and the reqwest-based
-filters; the Makefile's FIPS section says why for each), so nobody has to
-know which features to pick. The feature set is defined once, as
+engine, the response stores and the reqwest-based filters; the Makefile's
+FIPS section says why for each), so nobody has to know which features to
+pick. The feature set is defined once, as
 `FIPS_FEATURES` in the `Makefile`:
 
 ```console
 make release-fips    # FIPS build, release profile, into target/fips
 make build-fips      # same, debug profile, without the crate manifest
 make container-fips  # FIPS runtime image on UBI 9, tagged praxis-ai:<version>-fips
+make lint-fips       # clippy and rustfmt for the FIPS feature set
+make test-fips       # unit tests for the FIPS feature set
+make test-integration-fips  # the integration suite as the FIPS build
+make test-schema-fips       # the schema suite as the FIPS build
+make test-fips-host  # the suites as the FIPS build, inside the UBI 9 toolchain image, on a FIPS host
+```
+
+On a RHEL 9 host in FIPS mode, two more targets give the runtime proof the
+hosted checks cannot ([FIPS 140-3](../fips.md#verifying-a-deployment)):
+
+```console
+make fips-host-check     # attest the host and the image's module build (target/fips/host-attestation.*)
+make fips-runtime-probe  # run the FIPS image under PRAXIS_REQUIRE_FIPS=1 and probe its listener
 ```
 
 Three targets check a build against the rules Red Hat's release scanner
@@ -104,7 +142,7 @@ The workspace is split across `apis`, `filters`, `server`,
 `tests`, and `xtask`; shared dependencies are managed from the
 root `Cargo.toml`.
 
-See [SECURITY.md](../../SECURITY.md) for supported versions and
+See [SECURITY.md](../../.github/SECURITY.md) for supported versions and
 vulnerability reporting.
 
 ## Security: Binding Low Ports

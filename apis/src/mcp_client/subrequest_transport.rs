@@ -21,7 +21,7 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -36,7 +36,7 @@ use praxis_core::{
 use praxis_filter::{
     BodyMode, CalloutOutcome, CalloutResponse, ChainBindingContext, FilterEntry, FilterError, FilterPipeline,
     FilterRegistry, FilteredSubrequestExecutor, HttpFilterContext, IterationState, RequestExtensions, StagedUpstream,
-    StagedUpstreamFallback, StreamingResponseBody, SubRequest, SubResponse, SubrequestRuntime,
+    StagedUpstreamFallback, StreamingResponseBody, SubRequest, SubResponse, SubrequestRuntime, TraceContext,
 };
 use rmcp::{
     model::{ClientJsonRpcMessage, ClientRequest, JsonRpcMessage, ServerJsonRpcMessage},
@@ -51,6 +51,7 @@ use rmcp::{
 use sse_stream::{Error as SseError, Sse};
 
 use super::{McpClientError, McpDisplayUrl};
+use crate::{StateOwner, callout_target::AddressPolicy};
 
 /// Wire byte ceiling for a control-plane MCP response.
 ///
@@ -197,6 +198,56 @@ pub(crate) enum TransportSignal {
     /// literal) — rejected before any dial. Distinct from [`Self::SsrfBlocked`]
     /// only in the surfaced error text; both are permanent, hard rejections.
     TargetRejected,
+}
+
+/// Replaceable transport-error slot for a reusable rmcp session.
+///
+/// Each exclusive `tools/call` installs a fresh `OnceLock` before sending. The
+/// transport clones read the current generation when starting a POST, while the
+/// standalone GET SSE stream uses a detached slot. An idle-stream failure can
+/// therefore never be mistaken for the later tool call's failure.
+pub(crate) struct TransportSignalState {
+    /// Signal generation assigned to the active initialization or tool call.
+    active: Mutex<Option<Arc<OnceLock<TransportSignal>>>>,
+}
+
+impl TransportSignalState {
+    /// Create state with a pristine initialization-generation signal.
+    fn new() -> Self {
+        Self {
+            active: Mutex::new(Some(Arc::new(OnceLock::new()))),
+        }
+    }
+
+    /// Return the active signal, or a detached slot for idle traffic.
+    pub(crate) fn current(&self) -> Arc<OnceLock<TransportSignal>> {
+        let guard = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.as_ref().map_or_else(|| Arc::new(OnceLock::new()), Arc::clone)
+    }
+
+    /// Install and return a pristine signal generation for one tool call.
+    pub(crate) fn begin_exchange(&self) -> Arc<OnceLock<TransportSignal>> {
+        let signal = Arc::new(OnceLock::new());
+        let mut guard = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(Arc::clone(&signal));
+        signal
+    }
+
+    /// Clear `signal` only if it still owns the active exchange generation.
+    pub(crate) fn finish_exchange(&self, signal: &Arc<OnceLock<TransportSignal>>) {
+        let mut guard = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.as_ref().is_some_and(|active| Arc::ptr_eq(active, signal)) {
+            *guard = None;
+        }
+    }
+
+    /// Record an SSE failure only while a tool call owns an active generation.
+    pub(crate) fn record_active(&self, classification: TransportSignal) {
+        let guard = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(signal) = guard.as_ref() {
+            signal.get_or_init(|| classification);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -360,6 +411,10 @@ pub(crate) struct McpCallout {
     pipeline: Arc<FilterPipeline>,
     /// Sub-request nesting depth for callouts issued from this context.
     depth: u8,
+    /// Approved request correlation projected into every MCP exchange.
+    trace_context: Option<TraceContext>,
+    /// Absolute enclosing IRR deadline shared by initialize/list/call exchanges.
+    parent_deadline: Option<Instant>,
     /// Whether private/loopback MCP destinations are permitted, taken from the
     /// bound pipeline's finalized posture (never a per-filter opt-in).
     allow_private: bool,
@@ -387,15 +442,17 @@ impl McpCallout {
             ctx.request_start,
         );
         let allow_private = pipeline.allow_private_upstreams();
-        let depth = resolve_callout_depth(
-            ctx.extensions.get::<IterationState>().map(IterationState::depth),
-            &ctx.request.headers,
-        );
+        let iteration_state = ctx.extensions.get::<IterationState>();
+        let depth = resolve_callout_depth(iteration_state.map(IterationState::depth), &ctx.request.headers);
+        let parent_deadline = iteration_state.map(IterationState::deadline);
+        let trace_context = ctx.extensions.get::<TraceContext>().cloned();
         Some(Self {
             client,
             downstream,
             pipeline,
             depth,
+            trace_context,
+            parent_deadline,
             allow_private,
         })
     }
@@ -403,6 +460,13 @@ impl McpCallout {
     /// Whether private/loopback MCP destinations are permitted for this callout.
     pub(crate) fn allow_private(&self) -> bool {
         self.allow_private
+    }
+
+    /// Bound one MCP transport exchange by the enclosing IRR deadline.
+    fn deadline(&self, now: Instant, step_timeout: Duration) -> Instant {
+        let step_deadline = now.checked_add(step_timeout).unwrap_or(now);
+        self.parent_deadline
+            .map_or(step_deadline, |parent| step_deadline.min(parent))
     }
 
     /// Build a callout backed by a fabricated connector and a bare, empty
@@ -420,8 +484,24 @@ impl McpCallout {
             downstream: SubrequestRuntime::new(None, false, None, Instant::now()),
             pipeline,
             depth: 0,
+            trace_context: None,
+            parent_deadline: None,
             allow_private,
         })
+    }
+
+    /// Attach an explicit parent deadline to a fabricated test callout.
+    #[cfg(test)]
+    pub(crate) fn with_parent_deadline_for_test(mut self, deadline: Instant) -> Self {
+        self.parent_deadline = Some(deadline);
+        self
+    }
+
+    /// Replace the bare test pipeline with an observable one.
+    #[cfg(test)]
+    pub(crate) fn with_pipeline_for_test(mut self, pipeline: Arc<FilterPipeline>) -> Self {
+        self.pipeline = pipeline;
+        self
     }
 }
 
@@ -479,7 +559,10 @@ pub(crate) struct McpSubrequestClient {
     stream_cumulative_cap: usize,
     /// Per-exchange duration ceiling.
     step_timeout: Duration,
-    /// Out-of-band record of a typed classification observed on a callout.
+    /// Trusted owner projected only for configured connector exchanges.
+    owner: Option<StateOwner>,
+    /// Replaceable out-of-band record of a typed classification observed on a
+    /// control or tool POST.
     ///
     /// `rmcp` discards the typed [`McpTransportError`] on failure, so a
     /// [`CalloutOutcome::ResponseTooLarge`] classification or an SSRF address
@@ -488,7 +571,7 @@ pub(crate) struct McpSubrequestClient {
     /// fails. Shared through the [`Clone`] the transport requires, so the handle
     /// taken before the client is moved into the rmcp transport observes writes
     /// made during the exchange.
-    signal: Arc<OnceLock<TransportSignal>>,
+    signal_state: Arc<TransportSignalState>,
 }
 
 impl McpSubrequestClient {
@@ -498,12 +581,13 @@ impl McpSubrequestClient {
     ///
     /// No `tools/call` result flows over this transport, so every response is
     /// bounded to [`MAX_CONTROL_RESPONSE_BYTES`] before deserialization.
-    pub(crate) fn control(callout: McpCallout, step_timeout: Duration) -> Self {
+    pub(crate) fn control(callout: McpCallout, step_timeout: Duration, owner: Option<StateOwner>) -> Self {
         Self::with_wire_cap(
             callout,
             step_timeout,
             MAX_CONTROL_RESPONSE_BYTES,
             crate::mcp_client::MAX_LISTING_RESPONSE_BYTES.saturating_add(MAX_CONTROL_RESPONSE_BYTES),
+            owner,
         )
     }
 
@@ -516,13 +600,19 @@ impl McpSubrequestClient {
     /// `step_timeout` bounds each individual HTTP exchange; the `callout` carries
     /// the parent transport and the bound outbound pipeline whose finalized
     /// posture decides whether loopback destinations are permitted.
-    pub(crate) fn for_tool(callout: McpCallout, step_timeout: Duration, max_result_bytes: usize) -> Self {
+    pub(crate) fn for_tool(
+        callout: McpCallout,
+        step_timeout: Duration,
+        max_result_bytes: usize,
+        owner: Option<StateOwner>,
+    ) -> Self {
         let wire = tool_result_wire_cap(max_result_bytes);
         Self::with_wire_cap(
             callout,
             step_timeout,
             wire,
             wire.saturating_add(MAX_CONTROL_RESPONSE_BYTES),
+            owner,
         )
     }
 
@@ -533,13 +623,15 @@ impl McpSubrequestClient {
         step_timeout: Duration,
         tool_result_bytes: usize,
         stream_cumulative_cap: usize,
+        owner: Option<StateOwner>,
     ) -> Self {
         Self {
             callout,
             tool_result_bytes,
             step_timeout,
             stream_cumulative_cap,
-            signal: Arc::new(OnceLock::new()),
+            owner,
+            signal_state: Arc::new(TransportSignalState::new()),
         }
     }
 
@@ -552,7 +644,13 @@ impl McpSubrequestClient {
     /// rejection after the rmcp `serve`/pagination call fails (see
     /// [`transport_signal_error`]).
     pub(crate) fn signal_handle(&self) -> Arc<OnceLock<TransportSignal>> {
-        Arc::clone(&self.signal)
+        self.signal_state.current()
+    }
+
+    /// Shared state used by a pooled session to install a fresh signal for each
+    /// exclusive tool call.
+    pub(crate) fn signal_state(&self) -> Arc<TransportSignalState> {
+        Arc::clone(&self.signal_state)
     }
 
     /// Per-event wire ceiling for a GET SSE stream (the tool-result wire cap).
@@ -598,24 +696,23 @@ impl McpSubrequestClient {
         body: Bytes,
         headers: HeaderMap,
         max_response_bytes: usize,
+        signal: &Arc<OnceLock<TransportSignal>>,
     ) -> Result<
         (FilteredSubrequestExecutor, SubRequest, RequestExtensions, Instant),
         StreamableHttpError<McpTransportError>,
     > {
-        let deadline = Instant::now()
-            .checked_add(self.step_timeout)
-            .ok_or(StreamableHttpError::Client(McpTransportError::Setup))?;
+        let deadline = self.callout.deadline(Instant::now(), self.step_timeout);
         let allow_private = self.callout.allow_private;
         let target = match prepare_url_target(uri, deadline, move |addrs| ssrf_validate(addrs, allow_private)).await {
             Ok(target) => target,
             Err(error) => {
-                if let Some(signal) = prepare_error_signal(&error) {
+                if let Some(classification) = prepare_error_signal(&error) {
                     // First signal wins; the free-standing caller reconstructs the
                     // typed hard rejection (SSRF or invalid target) after rmcp
                     // discards the transport error (see `transport_signal_error`).
                     // Transient failures (DNS, deadline) record nothing and fall
                     // back to the caller's generic connection error.
-                    self.signal.get_or_init(|| signal);
+                    signal.get_or_init(|| classification);
                 }
                 return Err(map_prepare_error(&error));
             },
@@ -637,6 +734,12 @@ impl McpSubrequestClient {
         let mut extensions = RequestExtensions::default();
         extensions.insert(staged);
         extensions.insert(fallback);
+        if let Some(owner) = self.owner.as_ref() {
+            extensions.insert(owner.clone());
+        }
+        if let Some(trace_context) = self.callout.trace_context.as_ref() {
+            extensions.insert(trace_context.clone());
+        }
 
         let executor = FilteredSubrequestExecutor::for_callout(
             self.callout.client.clone(),
@@ -664,9 +767,10 @@ impl McpSubrequestClient {
         body: Bytes,
         headers: HeaderMap,
         max_response_bytes: usize,
+        signal: &Arc<OnceLock<TransportSignal>>,
     ) -> Result<SubResponse, StreamableHttpError<McpTransportError>> {
         let (executor, request, extensions, deadline) = self
-            .prepare_staged_request(method, uri, body, headers, max_response_bytes)
+            .prepare_staged_request(method, uri, body, headers, max_response_bytes, signal)
             .await?;
         let outcome = Box::pin(executor.run_classified(&self.callout.pipeline, &request, extensions, deadline))
             .await
@@ -677,7 +781,7 @@ impl McpSubrequestClient {
                 tracing::debug!(actual = ?actual, limit, "mcp callout response exceeded size limit");
                 // First signal wins; the caller reads this back after rmcp
                 // discards the typed error (see `transport_signal_error`).
-                self.signal.get_or_init(|| TransportSignal::ResponseTooLarge { limit });
+                signal.get_or_init(|| TransportSignal::ResponseTooLarge { limit });
                 Err(StreamableHttpError::Client(McpTransportError::ResponseTooLarge))
             },
             // A single request/response MCP exchange never selects streaming, and
@@ -759,6 +863,7 @@ impl McpSubrequestClient {
         response: SubResponse,
         body: Option<Box<dyn StreamingResponseBody>>,
         max_sse_event_size: usize,
+        signal: crate::mcp_client::sse_adapter::SseSignalTarget,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<McpTransportError>> {
         let status = StatusCode::from_u16(response.status)
             .map_err(|_error| StreamableHttpError::Client(McpTransportError::InvalidStatus))?;
@@ -810,7 +915,7 @@ impl McpSubrequestClient {
             // which is only an outer sanity backstop. Raise it to the wire cap so it
             // can never clamp the authoritative per-event bound below `wire_cap()`.
             max_sse_event_size.max(self.wire_cap()),
-            self.signal_handle(),
+            signal,
         ))
     }
 
@@ -832,9 +937,10 @@ impl McpSubrequestClient {
         body: Bytes,
         headers: HeaderMap,
         max_response_bytes: usize,
+        signal: &Arc<OnceLock<TransportSignal>>,
     ) -> Result<(SubResponse, Option<Box<dyn StreamingResponseBody>>), StreamableHttpError<McpTransportError>> {
         let (executor, request, mut extensions, deadline) = self
-            .prepare_staged_request(method, uri, body, headers, max_response_bytes)
+            .prepare_staged_request(method, uri, body, headers, max_response_bytes, signal)
             .await?;
         extensions.insert(McpStreamingRequested);
         let outcome = Box::pin(executor.run_classified(&self.callout.pipeline, &request, extensions, deadline))
@@ -845,7 +951,7 @@ impl McpSubrequestClient {
             CalloutOutcome::Response(CalloutResponse::Buffered(response)) => Ok((response, None)),
             CalloutOutcome::ResponseTooLarge { actual, limit } => {
                 tracing::debug!(actual = ?actual, limit, "mcp streaming callout response exceeded size limit");
-                self.signal.get_or_init(|| TransportSignal::ResponseTooLarge { limit });
+                signal.get_or_init(|| TransportSignal::ResponseTooLarge { limit });
                 Err(StreamableHttpError::Client(McpTransportError::ResponseTooLarge))
             },
             _ => Err(StreamableHttpError::Client(McpTransportError::Transport)),
@@ -873,6 +979,7 @@ impl McpSubrequestClient {
         session_was_attached: bool,
         per_event_cap: usize,
         max_sse_event_size: usize,
+        signal: Arc<OnceLock<TransportSignal>>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<McpTransportError>> {
         let status = StatusCode::from_u16(response.status)
             .map_err(|_error| StreamableHttpError::Client(McpTransportError::InvalidStatus))?;
@@ -942,7 +1049,7 @@ impl McpSubrequestClient {
                     // rmcp's `config.max_sse_event_size` is an outer backstop only; raise it to
                     // the per-message cap so it never clamps the per-event bound below it.
                     max_sse_event_size.max(per_event_cap),
-                    self.signal_handle(),
+                    Arc::clone(&signal).into(),
                 );
                 Ok(StreamableHttpPostResponse::Sse(sse, session_id_out))
             },
@@ -952,7 +1059,7 @@ impl McpSubrequestClient {
                 // terminal message. A Request always needs a reply, so an
                 // unparseable body is a typed UnexpectedServerResponse, never an
                 // Accepted ack (which is reserved for one-way messages).
-                let buffered = collect_body(&mut body, per_event_cap, &self.signal_handle()).await?;
+                let buffered = collect_body(&mut body, per_event_cap, &signal).await?;
                 match serde_json::from_slice::<ServerJsonRpcMessage>(&buffered) {
                     Ok(message) => Ok(StreamableHttpPostResponse::Json(message, session_id_out)),
                     Err(_error) => Err(StreamableHttpError::UnexpectedServerResponse(
@@ -982,10 +1089,18 @@ impl StreamableHttpClient for McpSubrequestClient {
         let session_was_attached = session_id.is_some();
         let headers = self.build_post_headers(auth_header, custom_headers, session_id.as_ref())?;
         let max_response_bytes = self.response_limit(&message);
+        let signal = self.signal_handle();
         let body =
             serde_json::to_vec(&message).map_err(|_error| StreamableHttpError::Client(McpTransportError::Serialize))?;
-        let response =
-            Box::pin(self.execute(Method::POST, &uri, Bytes::from(body), headers, max_response_bytes)).await?;
+        let response = Box::pin(self.execute(
+            Method::POST,
+            &uri,
+            Bytes::from(body),
+            headers,
+            max_response_bytes,
+            &signal,
+        ))
+        .await?;
         classify_buffered_post_response(response, &message, session_was_attached)
     }
 
@@ -1001,8 +1116,16 @@ impl StreamableHttpClient for McpSubrequestClient {
             .map_err(|_error| StreamableHttpError::Client(McpTransportError::InvalidStatus))?;
         headers.insert(session_id_header(), value);
 
-        let response =
-            Box::pin(self.execute(Method::DELETE, &uri, Bytes::new(), headers, MAX_CONTROL_RESPONSE_BYTES)).await?;
+        let signal = Arc::new(OnceLock::new());
+        let response = Box::pin(self.execute(
+            Method::DELETE,
+            &uri,
+            Bytes::new(),
+            headers,
+            MAX_CONTROL_RESPONSE_BYTES,
+            &signal,
+        ))
+        .await?;
         let status = StatusCode::from_u16(response.status)
             .map_err(|_error| StreamableHttpError::Client(McpTransportError::InvalidStatus))?;
         // A server that does not support session deletion is not an error.
@@ -1052,6 +1175,10 @@ impl StreamableHttpClient for McpSubrequestClient {
             session_id.as_ref(),
             last_event_id.as_deref(),
         )?;
+        // Standalone GET failures belong to the idle stream, not the next tool
+        // POST. Keep their signal generation detached from the reusable call
+        // state so they cannot poison later error classification.
+        let signal = Arc::new(OnceLock::new());
         let (response, body) = self
             .execute_streaming(
                 Method::GET,
@@ -1059,10 +1186,16 @@ impl StreamableHttpClient for McpSubrequestClient {
                 Bytes::new(),
                 headers,
                 streaming_executor_backstop(self.stream_cumulative_cap()),
+                &signal,
             )
             .await?;
-        self.classify_get_stream_response(response, body, max_sse_event_size)
-            .await
+        self.classify_get_stream_response(
+            response,
+            body,
+            max_sse_event_size,
+            crate::mcp_client::sse_adapter::SseSignalTarget::Active(Arc::clone(&self.signal_state)),
+        )
+        .await
     }
 
     #[expect(
@@ -1091,6 +1224,7 @@ impl StreamableHttpClient for McpSubrequestClient {
         let session_was_attached = session_id.is_some();
         let headers = self.build_post_headers(auth_header, custom_headers, session_id.as_ref())?;
         let max_response_bytes = self.response_limit(&message);
+        let signal = self.signal_handle();
         let body =
             serde_json::to_vec(&message).map_err(|_error| StreamableHttpError::Client(McpTransportError::Serialize))?;
 
@@ -1101,6 +1235,7 @@ impl StreamableHttpClient for McpSubrequestClient {
                 Bytes::from(body),
                 headers,
                 streaming_executor_backstop(max_response_bytes),
+                &signal,
             )
             .await?;
         match maybe_body {
@@ -1113,6 +1248,7 @@ impl StreamableHttpClient for McpSubrequestClient {
                     session_was_attached,
                     max_response_bytes,
                     max_sse_event_size,
+                    signal,
                 )
                 .await
             },
@@ -1473,19 +1609,17 @@ fn prepare_error_signal(error: &UrlTargetError) -> Option<TransportSignal> {
 
 /// SSRF policy hook applied to the resolved MCP addresses.
 ///
-/// Delegates to [`super::is_ssrf_blocked_ip`] so this hook enforces exactly the
-/// policy the literal-IP and DNS-resolution paths do: link-local, unspecified,
-/// cloud-metadata, and IPv6 unique-local addresses are always rejected, while
-/// loopback and the RFC1918/CGNAT/`0.0.0.0/8` private ranges are rejected unless
-/// `allow_private` is set. Sharing the helper closes the gap where an RFC1918
-/// address slipped past this hook with private upstreams disabled.
+/// Uses the shared AI address policy for both literal-IP and DNS-resolution
+/// paths. Metadata, unspecified, and multicast destinations remain forbidden;
+/// other non-public destinations follow the explicit private-target opt-in.
 ///
 /// # Errors
 ///
 /// Returns an opaque, credential-free error when any address is SSRF-sensitive.
 fn ssrf_validate(addrs: &[SocketAddr], allow_private: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let policy = AddressPolicy::from_allow_private(allow_private);
     for addr in addrs {
-        if super::is_ssrf_blocked_ip(&addr.ip(), allow_private) {
+        if policy.blocks(&addr.ip()) {
             return Err(super::SSRF_BLOCK_REASON.into());
         }
     }
@@ -1583,7 +1717,46 @@ fn parse_buffered_sse_terminal(body: &[u8]) -> Option<ServerJsonRpcMessage> {
 mod tests {
     use std::net::SocketAddr;
 
+    use http::HeaderValue;
+    use praxis_filter::builtins::TraceContextFilter;
+
     use super::*;
+    use crate::test_utils::{make_filter_context, make_request};
+
+    fn test_signal() -> Arc<OnceLock<TransportSignal>> {
+        Arc::new(OnceLock::new())
+    }
+
+    #[test]
+    fn reusable_session_starts_each_exchange_with_a_pristine_signal() {
+        let state = TransportSignalState::new();
+        let prior = state.current();
+        assert!(prior.set(TransportSignal::ResponseTooLarge { limit: 7 }).is_ok());
+
+        let current = state.begin_exchange();
+        assert!(
+            current.get().is_none(),
+            "a later call must not inherit an idle-stream or prior-call error"
+        );
+        assert!(
+            matches!(prior.get(), Some(TransportSignal::ResponseTooLarge { limit: 7 })),
+            "replacing the current generation must not mutate in-flight readers"
+        );
+
+        state.finish_exchange(&current);
+        state.record_active(TransportSignal::SsrfBlocked);
+        assert!(
+            current.get().is_none(),
+            "idle GET failures must not poison the completed call"
+        );
+
+        let next = state.begin_exchange();
+        state.record_active(TransportSignal::TargetRejected);
+        assert!(
+            matches!(next.get(), Some(TransportSignal::TargetRejected)),
+            "GET failures during a call must reach that active generation"
+        );
+    }
 
     // -- Reserved-header hygiene (codex finding: reserved MCP session header) ---
 
@@ -1706,6 +1879,7 @@ mod tests {
             McpCallout::fabricated(false).expect("fabricated callout"),
             Duration::from_secs(5),
             2048,
+            None,
         );
         let call: ClientJsonRpcMessage = serde_json::from_str(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{}}}"#,
@@ -1724,12 +1898,76 @@ mod tests {
         let client = McpSubrequestClient::control(
             McpCallout::fabricated(false).expect("fabricated callout"),
             Duration::from_secs(5),
+            None,
         );
         let call: ClientJsonRpcMessage = serde_json::from_str(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{}}}"#,
         )
         .expect("deserialize tools/call");
         assert_eq!(client.response_limit(&call), MAX_CONTROL_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn mcp_exchange_deadline_is_capped_by_parent_loop_deadline() {
+        let now = Instant::now();
+        let parent_deadline = now + Duration::from_millis(25);
+        let callout = McpCallout::fabricated(false)
+            .expect("fabricated callout")
+            .with_parent_deadline_for_test(parent_deadline);
+
+        assert_eq!(
+            callout.deadline(now, Duration::from_secs(5)),
+            parent_deadline,
+            "initialize, list, and call exchanges must share the remaining IRR deadline"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test establishes trusted parent context and inspects one staged MCP exchange"
+    )]
+    async fn mcp_projects_trace_context_into_every_prepared_exchange() {
+        let mut request = make_request(Method::POST, "/v1/responses");
+        request
+            .headers
+            .insert("x-request-id", HeaderValue::from_static("request-parent"));
+        request.headers.insert(
+            "traceparent",
+            HeaderValue::from_static("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+        let mut context = make_filter_context(&request);
+        let filter = TraceContextFilter::from_config(&serde_yaml::from_str("{}").expect("valid config"))
+            .expect("trace_context filter");
+        let _action = filter
+            .on_request(&mut context)
+            .await
+            .expect("trace context established");
+        let parent = context
+            .extensions
+            .get::<TraceContext>()
+            .expect("typed trace context")
+            .clone();
+        let pipeline = build_bare_outbound_pipeline(true).expect("outbound pipeline");
+        let callout = McpCallout::from_context(&context, pipeline).expect("MCP callout context");
+        let client = McpSubrequestClient::control(callout, Duration::from_secs(5), None);
+        let signal = client.signal_handle();
+
+        let (_executor, _request, extensions, _deadline) = client
+            .prepare_staged_request(
+                Method::POST,
+                "http://127.0.0.1:8321/mcp",
+                Bytes::new(),
+                HeaderMap::new(),
+                MAX_CONTROL_RESPONSE_BYTES,
+                &signal,
+            )
+            .await
+            .expect("request prepares without dialing");
+        let projected = extensions.get::<TraceContext>().expect("trace context projected");
+        assert_eq!(projected.request_id(), parent.request_id());
+        assert_eq!(projected.trace_id(), parent.trace_id());
+        assert_eq!(projected.flags(), parent.flags());
     }
 
     // -- SSRF hook (codex finding: chain propagates real posture) --------------
@@ -1747,9 +1985,9 @@ mod tests {
     }
 
     #[test]
-    fn ssrf_validate_always_blocks_metadata_and_link_local_even_when_private_allowed() {
+    fn ssrf_validate_always_blocks_metadata_but_allows_other_link_local_with_private_opt_in() {
         assert!(ssrf_validate(&[addr("169.254.169.254:80")], true).is_err());
-        assert!(ssrf_validate(&[addr("169.254.1.1:80")], true).is_err());
+        assert!(ssrf_validate(&[addr("169.254.1.1:80")], true).is_ok());
     }
 
     #[test]
@@ -1784,7 +2022,7 @@ mod tests {
     #[test]
     fn ssrf_validate_gates_cgnat_and_zero_net_on_allow_private() {
         // CGNAT (100.64.0.0/10) and the 0.0.0.0/8 block are private ranges under
-        // praxis_core::connectivity::is_private_ip, so they follow the same gate.
+        // shared Praxis address classification, so they follow the same gate.
         for private in ["100.64.0.1:443", "0.1.2.3:443"] {
             assert!(
                 ssrf_validate(&[addr(private)], false).is_err(),
@@ -1919,6 +2157,7 @@ mod tests {
         let client = McpSubrequestClient::control(
             McpCallout::fabricated(false).expect("fabricated callout"),
             Duration::from_secs(1),
+            None,
         );
         // per-event GET cap == the client's tool-result wire cap, which for the
         // control client is the 1 MiB control ceiling.
@@ -1938,6 +2177,7 @@ mod tests {
             McpCallout::fabricated(false).expect("fabricated callout"),
             Duration::from_secs(1),
             max_result_bytes,
+            None,
         );
         let expected_wire = tool_result_wire_cap(max_result_bytes);
         assert_eq!(client.wire_cap(), expected_wire);
@@ -1966,6 +2206,7 @@ mod tests {
             McpCallout::fabricated(false).expect("fabricated callout"),
             Duration::from_secs(5),
             1024,
+            None,
         )
     }
 
@@ -1980,7 +2221,7 @@ mod tests {
         ));
         let response = sub_response(200, Some("text/event-stream"), b"");
         let out = client()
-            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024)
+            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024, test_signal())
             .await
             .unwrap();
         assert!(matches!(out, StreamableHttpPostResponse::Sse(_, _)));
@@ -1997,7 +2238,7 @@ mod tests {
         ));
         let response = sub_response(202, None, b"");
         let out = client()
-            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024)
+            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024, test_signal())
             .await
             .unwrap();
         assert!(matches!(out, StreamableHttpPostResponse::Accepted));
@@ -2020,7 +2261,7 @@ mod tests {
             Arc::clone(&cancelled),
         ));
         let err = client()
-            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024)
+            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024, test_signal())
             .await
             .unwrap_err();
         assert!(matches!(err, StreamableHttpError::AuthRequired(_)));
@@ -2036,7 +2277,7 @@ mod tests {
         ));
         let response = sub_response(200, Some("application/json"), b"");
         let out = client()
-            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024)
+            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024, test_signal())
             .await
             .unwrap();
         assert!(matches!(out, StreamableHttpPostResponse::Json(_, _)));
@@ -2147,7 +2388,7 @@ mod tests {
         let (body, _cancelled) = fake_body([Bytes::from_static(b"{not json")]);
         let response = sub_response(200, Some("application/json"), b"");
         let result = client()
-            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024)
+            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024, test_signal())
             .await;
         assert!(
             matches!(result, Err(StreamableHttpError::UnexpectedServerResponse(_))),
@@ -2252,7 +2493,7 @@ mod tests {
         )]);
         let response = sub_response(500, Some("application/json"), b"");
         let out = client()
-            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024)
+            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024, test_signal())
             .await
             .expect("a JSON-RPC error is a valid reply, surfaced as Json");
         assert!(matches!(
@@ -2267,7 +2508,7 @@ mod tests {
         let response = sub_response(500, Some("application/json"), b"");
         let client = client();
         let result = client
-            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024)
+            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024, test_signal())
             .await;
         let Err(StreamableHttpError::UnexpectedServerResponse(msg)) = result else {
             panic!("expected UnexpectedServerResponse for a non-JSON-RPC 500 body");
@@ -2284,7 +2525,7 @@ mod tests {
         let (body, cancelled) = fake_body([Bytes::from_static(b"boom")]);
         let response = sub_response(503, Some("text/plain"), b"");
         let result = client()
-            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024)
+            .classify_streaming_post_response(response, body, false, 1024, 16 * 1024 * 1024, test_signal())
             .await;
         assert!(matches!(result, Err(StreamableHttpError::UnexpectedServerResponse(_))));
         assert!(
@@ -2305,7 +2546,7 @@ mod tests {
             ));
         let response = sub_response(200, Some("text/event-stream"), b"");
         let stream = client()
-            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024)
+            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024, test_signal().into())
             .await
             .unwrap();
         let mut stream = stream;
@@ -2333,7 +2574,7 @@ mod tests {
             ));
         let response = sub_response(200, Some("text/event-stream"), b"");
         let mut stream = client()
-            .classify_get_stream_response(response, Some(body), 8)
+            .classify_get_stream_response(response, Some(body), 8, test_signal().into())
             .await
             .unwrap();
         let first = futures::StreamExt::next(&mut stream).await.expect("event").expect("ok");
@@ -2353,7 +2594,7 @@ mod tests {
         ));
         let response = sub_response(200, Some("text/event-stream"), b"");
         let out = client()
-            .classify_streaming_post_response(response, body, false, 1024, 8)
+            .classify_streaming_post_response(response, body, false, 1024, 8, test_signal())
             .await
             .unwrap();
         let StreamableHttpPostResponse::Sse(mut stream, _) = out else {
@@ -2374,7 +2615,7 @@ mod tests {
         );
         let response = sub_response(405, None, b"");
         let result = client()
-            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024)
+            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024, test_signal().into())
             .await;
         assert!(matches!(result, Err(StreamableHttpError::ServerDoesNotSupportSse)));
         assert!(
@@ -2387,7 +2628,7 @@ mod tests {
     async fn classify_get_stream_none_body_is_server_does_not_support_sse() {
         let response = sub_response(200, Some("text/event-stream"), b"");
         let result = client()
-            .classify_get_stream_response(response, None, 16 * 1024 * 1024)
+            .classify_get_stream_response(response, None, 16 * 1024 * 1024, test_signal().into())
             .await;
         assert!(
             matches!(result, Err(StreamableHttpError::ServerDoesNotSupportSse)),
@@ -2412,6 +2653,16 @@ mod tests {
         assert_eq!(headers.get(http::header::ACCEPT).unwrap(), "text/event-stream");
     }
 
+    #[test]
+    fn get_stream_headers_carry_session_id() {
+        let session: Arc<str> = Arc::from("mock-mcp-session-1");
+        let headers = client()
+            .build_get_stream_headers(None, HashMap::new(), Some(&session), None)
+            .unwrap();
+        assert_eq!(headers.get(session_id_header()).unwrap(), "mock-mcp-session-1");
+        assert_eq!(headers.get(http::header::ACCEPT).unwrap(), "text/event-stream");
+    }
+
     // -- GET stream auth handling (F3) --
 
     #[tokio::test]
@@ -2426,7 +2677,7 @@ mod tests {
             HeaderValue::from_static("Bearer realm=\"mcp\""),
         );
         let result = client()
-            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024)
+            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024, test_signal().into())
             .await;
         assert!(
             matches!(result, Err(StreamableHttpError::AuthRequired(_))),
@@ -2450,7 +2701,7 @@ mod tests {
             HeaderValue::from_static("Bearer scope=\"admin\""),
         );
         let result = client()
-            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024)
+            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024, test_signal().into())
             .await;
         assert!(
             matches!(result, Err(StreamableHttpError::InsufficientScope(_))),
@@ -2470,7 +2721,7 @@ mod tests {
         );
         let response = sub_response(401, None, b"");
         let result = client()
-            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024)
+            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024, test_signal().into())
             .await;
         assert!(
             matches!(result, Err(StreamableHttpError::ServerDoesNotSupportSse)),
@@ -2490,7 +2741,7 @@ mod tests {
         );
         let response = sub_response(405, None, b"");
         let result = client()
-            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024)
+            .classify_get_stream_response(response, Some(body), 16 * 1024 * 1024, test_signal().into())
             .await;
         assert!(
             matches!(result, Err(StreamableHttpError::ServerDoesNotSupportSse)),
