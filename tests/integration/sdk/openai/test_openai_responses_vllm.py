@@ -5212,7 +5212,14 @@ class TestClientToolCompatVLLM:
         call = shell_calls[0]
         assert call.call_id, call
         assert call.action is not None, call
-        assert all(command for command in call.action.commands), call.action
+        assert call.action.commands, (
+            "restored shell action must include commands: "
+            f"{call.action}"
+        )
+        assert all(command for command in call.action.commands), (
+            "every restored shell command must be non-empty: "
+            f"{call.action}"
+        )
         assert (
             call.action.timeout_ms is None or call.action.timeout_ms >= 0
         ), call.action
@@ -5220,7 +5227,14 @@ class TestClientToolCompatVLLM:
             call.action.max_output_length is None
             or call.action.max_output_length >= 0
         ), call.action
-        assert call.environment is not None and call.environment.type == "local", call
+        assert call.environment is not None, (
+            "restored shell call must include its environment: "
+            f"{call}"
+        )
+        assert call.environment.type == "local", (
+            "restored shell call must identify a local environment: "
+            f"{call.environment}"
+        )
         assert all(item.type != "function_call" for item in response.output), (
             f"lowered function must not leak: {[i.type for i in response.output]}"
         )
