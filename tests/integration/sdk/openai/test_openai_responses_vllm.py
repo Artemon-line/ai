@@ -1062,6 +1062,7 @@ class ResponsesWitnessHandler(BaseHTTPRequestHandler):
     def _send_conversation_response(self, request_body):
         """Serve native Responses without a model so append/hydration is deterministic."""
         request_input = json.dumps(request_body.get("input"))
+        leading_bom = "STREAM-LEADING-BOM-1546" in request_input
         local_tool_limit = "STREAM-LOCAL-DELETE-410" in request_input
         web_call_limit = "STREAM-WEB-LIMIT-410" in request_input
         tool_model = request_body["model"] == "sdk-conversation-tool-stream"
@@ -1128,11 +1129,20 @@ class ResponsesWitnessHandler(BaseHTTPRequestHandler):
                 {"type": "response.created", "sequence_number": 0, "response": created},
                 {"type": "response.completed", "sequence_number": 1, "response": response},
             ]
-            encoded_frames = [
-                f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
-                for event in frames
-            ]
-            payload = b"".join(encoded_frames) + b"data: [DONE]\n\n"
+            if leading_bom:
+                encoded_frames = [
+                    f"data: {json.dumps(event)}\n\n".encode() for event in frames
+                ]
+            else:
+                encoded_frames = [
+                    f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+                    for event in frames
+                ]
+            payload = (
+                (b"\xef\xbb\xbf" if leading_bom else b"")
+                + b"".join(encoded_frames)
+                + b"data: [DONE]\n\n"
+            )
             content_type = "text/event-stream"
         else:
             payload = json.dumps(response).encode()
@@ -2681,6 +2691,34 @@ class TestOpenAIResponsesVLLM:
             "the proxy must echo the caller's previous_response_id back to the "
             "client even though it strips the id from the rehydrated upstream "
             f"request; got: {second.previous_response_id!r}"
+        )
+
+    def test_leading_bom_preserves_first_data_only_stream_event(
+        self, witness_backend_client
+    ):
+        """A leading UTF-8 BOM must not hide the first data-only SSE event.
+
+        RFC 3629 Section 6 documents U+FEFF's UTF-8 BOM representation:
+        https://datatracker.ietf.org/doc/html/rfc3629#section-6
+        The requirement to strip one leading BOM while interpreting SSE comes
+        from the WHATWG HTML Standard Section 9.2.6:
+        https://html.spec.whatwg.org/multipage/server-sent-events.html#interpreting-an-event-stream
+        """
+        client, _ = witness_backend_client
+
+        events = list(
+            client.responses.create(
+                model="sdk-conversation-stream",
+                input="STREAM-LEADING-BOM-1546",
+                stream=True,
+                store=False,
+            )
+        )
+        event_types = [event.type for event in events]
+
+        assert event_types == ["response.created", "response.completed"], (
+            "the OpenAI client must receive the first data-only event after the "
+            f"proxy strips one leading UTF-8 BOM; got: {event_types}"
         )
 
     def test_streamed_conversation_append_and_follow_up(self, witness_backend_client):
