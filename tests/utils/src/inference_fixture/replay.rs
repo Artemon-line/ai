@@ -424,6 +424,7 @@ fn is_replay_contained_filter(filter_type: &str) -> bool {
             | "iterative_request_router"
             | "openai_responses_proxy"
             | "path_rewrite"
+            | "ai_operation"
             | "openai_responses_format"
             | "openai_responses_request"
             | "openai_client_tool_compat"
