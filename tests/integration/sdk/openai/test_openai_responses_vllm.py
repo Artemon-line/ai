@@ -49,7 +49,7 @@ from openai import (
     OpenAI,
     PermissionDeniedError,
 )
-from openai.types.responses import ResponseOutputItemAddedEvent
+from openai.types.responses import ResponseCustomToolCall
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -6093,7 +6093,8 @@ class TestClientToolCompatVLLM:
         for event in stream:
             event_types.append(event.type)
             if event.type == "response.output_item.added":
-                ResponseOutputItemAddedEvent.model_validate(event.model_dump())
+                if event.item.type == "custom_tool_call":
+                    ResponseCustomToolCall.model_validate(event.item.model_dump())
                 added_items.append(event.item)
             if event.type == "response.completed":
                 final_response = event.response
