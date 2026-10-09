@@ -43,6 +43,7 @@ import openai
 import pytest
 from openai import (
     APIConnectionError,
+    APIStatusError,
     BadRequestError,
     NotFoundError,
     OpenAI,
@@ -328,6 +329,16 @@ def _write_full_flow_config(
         config = config.replace(anchor, anchor + f"        max_event_bytes: {max_event_bytes}\n")
     if compression:
         config = _enable_response_store_compression(config)
+
+    # Widen the IRR inference deadlines for slow CPU-only vLLM, matching the
+    # file-search fixtures. The shipped example ships a 300s per-step budget
+    # tuned for a fast provider, but a full-context prefill (the
+    # over-context truncation case forwards the complete oversized history for
+    # vLLM to truncate natively) takes ~160s on a healthy CI runner and tips
+    # past 300s on a slow/co-located one, surfacing as a sub-request 504. Keep
+    # the production example untouched; only the test config gets the headroom.
+    config = config.replace("step_timeout_ms: 300000", "step_timeout_ms: 600000")
+    config = config.replace("timeout_ms: 360000", "timeout_ms: 660000")
 
     config = _patch_store_backend(config, db_path)
     return _persist_config(config)
@@ -981,7 +992,12 @@ class ResponsesWitnessHandler(BaseHTTPRequestHandler):
             if k.lower() not in ("host", "content-length")
         }
         url = f"{VLLM_BASE_URL.rstrip('/')}{self.path}"
-        with httpx.Client(timeout=300.0) as client:
+        # Match the widened IRR/SDK deadlines: the over-context truncation test
+        # forwards a full ~context-length prompt that vLLM prefills on CPU, which
+        # can run past 300s on a slow runner. A 300s cap here would drop the
+        # upstream connection mid-prefill and surface as a spurious 502 before
+        # the backend ever applies its context policy.
+        with httpx.Client(timeout=600.0) as client:
             with client.stream(
                 self.command, url, headers=headers, content=body
             ) as upstream:
@@ -3214,6 +3230,186 @@ class TestOpenAIResponsesVLLM:
         # into `input` instead.
         assert second_backend.get("previous_response_id") is None, second_backend
         assert isinstance(second_backend.get("input"), list), second_backend
+
+    def test_complete_conversation_history_replayed_after_delete_and_append(
+        self, witness_backend_client
+    ):
+        """#532: native replay includes every surviving item, not one API page."""
+        client, forwarded = witness_backend_client
+        conversation = client.conversations.create()
+        try:
+            # PostgreSQL SDK lanes share tables, and deleting a conversation
+            # deliberately retains its item rows. Scope IDs to this conversation.
+            expected = []
+            for batch in range(6):
+                items = [
+                    {
+                        "id": f"item_replay_{conversation.id}_{batch}_{index}",
+                        "type": "message",
+                        "role": "user",
+                        "content": f"HISTORY-{batch}-{index}",
+                    }
+                    for index in range(20)
+                ]
+                client.conversations.items.create(conversation.id, items=items)
+                expected.extend(items)
+            for item in [expected[0], expected[19], expected[-1]]:
+                client.conversations.items.delete(
+                    item["id"], conversation_id=conversation.id
+                )
+                expected.remove(item)
+            appended = {
+                "id": f"item_replay_{conversation.id}_appended",
+                "type": "message",
+                "role": "user",
+                "content": "HISTORY-APPENDED",
+            }
+            client.conversations.items.create(conversation.id, items=[appended])
+            expected.append(appended)
+
+            before = len(forwarded)
+            # The replayed prompt is ~1.2k tokens. The CI inference simulator
+            # runs in echo mode and rejects max_output_tokens below the prompt
+            # length, so a small budget fails before the replay is observable.
+            # A real backend stops at the end of the reply regardless.
+            current_input = 'Reply OK. café "quoted". /no_think'
+            response = client.responses.create(
+                model=VLLM_MODEL,
+                conversation=conversation.id,
+                input=current_input,
+                store=True,
+                max_output_tokens=2048,
+            )
+            assert response.status == "completed"
+            requests = forwarded[before:]
+            assert len(requests) == 1, requests
+            replay = requests[0]["input"]
+            texts = []
+            for item in replay:
+                content = item.get("content", [])
+                if isinstance(content, str):
+                    texts.append(content)
+                else:
+                    texts.extend(
+                        part["text"]
+                        for part in content
+                        if part.get("type") in {"input_text", "output_text"}
+                    )
+            assert texts == [item["content"] for item in expected] + [current_input], (
+                "replay must preserve history order and include current input exactly once"
+            )
+
+            before = len(forwarded)
+            next_input = "Reply OK again. /no_think"
+            continuation = client.responses.create(
+                model=VLLM_MODEL,
+                conversation=conversation.id,
+                input=next_input,
+                store=True,
+                # Echo mode also replays the first response on this turn.
+                max_output_tokens=4096 if VLLM_TEST_BACKEND == "simulator" else 2048,
+            )
+            assert continuation.status == "completed"
+            requests = forwarded[before:]
+            assert len(requests) == 1, requests
+            user_texts = []
+            for item in requests[0]["input"]:
+                if item.get("role") != "user":
+                    continue
+                content = item.get("content", [])
+                if isinstance(content, str):
+                    user_texts.append(content)
+                else:
+                    user_texts.extend(
+                        part["text"]
+                        for part in content
+                        if part.get("type") == "input_text"
+                    )
+            assert user_texts == [item["content"] for item in expected] + [
+                current_input, next_input
+            ], "selected-upstream replay must not duplicate history or current input"
+        finally:
+            client.conversations.delete(conversation.id)
+
+    @pytest.mark.critical_vllm
+    @requires_vllm_compat
+    @pytest.mark.parametrize("truncation", ["auto", "disabled"])
+    def test_over_context_conversation_history_truncation(
+        self, witness_backend_client, truncation
+    ):
+        """#532: native vLLM, not Praxis, applies the requested context policy."""
+        client, forwarded = witness_backend_client
+        # vLLM publishes the actual configured limit, which may differ from the
+        # model's advertised maximum or the GPU runner's launch defaults.
+        with httpx.Client(timeout=10) as backend:
+            models = backend.get(f"{VLLM_BASE_URL.rstrip('/')}/v1/models")
+            models.raise_for_status()
+        model = next(
+            item for item in models.json()["data"] if item["id"] == VLLM_MODEL
+        )
+        context_limit = model.get("max_model_len")
+        assert isinstance(context_limit, int) and context_limit > 0, model
+        oversized_history = "obsolete " * (context_limit * 2)
+        conversation = client.conversations.create(
+            items=[
+                {"type": "message", "role": "user", "content": oversized_history},
+                {"type": "message", "role": "user", "content": "Reply OK. /no_think"},
+            ]
+        )
+        try:
+            before = len(forwarded)
+            options = {
+                "model": VLLM_MODEL,
+                "conversation": conversation.id,
+                "input": "Reply OK. /no_think",
+                "truncation": truncation,
+                "max_output_tokens": 32,
+                "store": False,
+            }
+            if truncation == "disabled":
+                with pytest.raises(BadRequestError) as error:
+                    client.responses.create(**options)
+                assert error.value.status_code == 400
+                message = str(error.value).lower()
+                assert "context" in message or "token" in message, message
+            else:
+                # vLLM — not Praxis — owns the context policy here. With `auto`
+                # it truncates the forwarded over-context history to fit the
+                # window; the full ~context-length prefill runs on CPU and can
+                # take minutes on a slow runner. Give the client a timeout that
+                # outlasts every backend deadline (the witness shim's upstream
+                # read, and the IRR step/total budgets) so it always receives an
+                # HTTP verdict instead of raising an uncatchable client-side
+                # timeout. The small CPU model's native truncation lands right on
+                # the context boundary (it does not reserve room for
+                # max_output_tokens), so it nondeterministically either completes
+                # or rejects the already-forwarded prompt: a clean 400 when it
+                # validates up front, a bare 502 when it raises post-prefill and
+                # drops the connection, or a 504 when the prefill outruns an IRR
+                # deadline. All are legitimate backend outcomes; #532 only
+                # requires Praxis to forward the complete history, which the
+                # assertions below verify regardless of the backend's verdict.
+                try:
+                    response = client.with_options(timeout=720).responses.create(
+                        **options
+                    )
+                    assert response.status in {"completed", "incomplete"}
+                    assert response.output, response
+                except APIStatusError as exc:
+                    assert exc.status_code in {400, 502, 504}, exc
+
+            requests = forwarded[before:]
+            assert len(requests) == 1, requests
+            request = requests[0]
+            assert request["truncation"] == truncation
+            content = request["input"][0]["content"]
+            history_text = content if isinstance(content, str) else content[0]["text"]
+            assert history_text == oversized_history, (
+                "the gateway must forward complete history even beyond the backend context limit"
+            )
+            assert len(request["input"]) == 3
+        finally:
+            client.conversations.delete(conversation.id)
 
     @requires_real_inference
     def test_conversation_context_and_append_back(self, openai_client):
