@@ -79,10 +79,8 @@ filter_chains:
         # Establish typed correlation before IRR snapshots request extensions;
         # Praxis core creates a fresh span ID for each search callout hop.
 
-      - filter: anthropic_messages_format
+      - filter: anthropic_messages_request
         on_invalid: reject
-      - filter: anthropic_validate
-
       # Top-level binding router: classify the request and freeze ONE logical
       # cluster for it so the inference step resolves the same backend on every
       # re-entry. The classifier promotes the model to `x-praxis-ai-model`.
