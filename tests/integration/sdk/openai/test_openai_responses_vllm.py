@@ -446,13 +446,16 @@ def _write_reasoning_backend_config(
     db_path: str,
     backend_port: int,
     dialect: str = "vllm",
+    agentic: bool = False,
 ) -> str:
     """Patch the reasoning example to target a specific Chat backend port.
 
-    The ``127.0.0.1:3001`` backend is pointed at ``backend_port`` (a capturing
-    mock) so a test can observe the exact Chat Completions request body the
-    backend receives after the proxy replays reasoning in the assistant
-    reasoning field.
+    Identical to :func:`_write_reasoning_config` except the ``127.0.0.1:3001``
+    backend is pointed at ``backend_port`` (a capturing mock) so a test can
+    observe the exact Chat Completions request body the backend receives after
+    the proxy replays reasoning in the assistant reasoning field. When ``agentic``
+    is set, the ``openai_agentic_loop`` filter runs ahead of the translator so the
+    output collector records each round into the stored history.
     """
     config = _load_example_config(
         REASONING_CONFIG_PATH,
@@ -461,6 +464,13 @@ def _write_reasoning_backend_config(
         db_path=db_path,
     )
     config = config.replace("dialect: vllm", f"dialect: {dialect}")
+    if agentic:
+        config = config.replace(
+            "              - filter: responses_to_chat_completions",
+            "              - filter: openai_agentic_loop\n\n              - filter: responses_to_chat_completions",
+        )
+    config = _patch_store_backend(config, db_path)
+
     return _persist_config(config)
 
 
@@ -864,6 +874,7 @@ class ChatCaptureHandler(BaseHTTPRequestHandler):
     """
 
     captured_bodies: ClassVar[list[dict]] = []
+    stream_deltas: ClassVar[list[dict]] = []
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -873,6 +884,21 @@ class ChatCaptureHandler(BaseHTTPRequestHandler):
                 type(self).captured_bodies.append(json.loads(body))
             except json.JSONDecodeError:
                 pass
+        if body and json.loads(body).get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for delta in type(self).stream_deltas:
+                chunk = {
+                    "id": "chatcmpl_reasoning_capture", "object": "chat.completion.chunk",
+                    "model": VLLM_MODEL, "choices": [{"index": 0, "delta": delta}],
+                }
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                self.wfile.flush()
+            self.wfile.write(b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+            self.wfile.flush()
+            return
         payload = json.dumps(
             {
                 "id": "chatcmpl_reasoning_capture",
@@ -2086,6 +2112,7 @@ def _reasoning_capture_session(tmp_path_factory, request):
     model output: the test checks the assistant reasoning field forwarded upstream.
     """
     ChatCaptureHandler.captured_bodies = []
+    ChatCaptureHandler.stream_deltas = [{"reasoning": "I picked "}, {"reasoning_content": "42."}]
     captured = ChatCaptureHandler.captured_bodies
     backend_port = _free_port()
     server = HTTPServer(("127.0.0.1", backend_port), ChatCaptureHandler)
@@ -2095,8 +2122,13 @@ def _reasoning_capture_session(tmp_path_factory, request):
     port = _free_port()
     db_dir = tmp_path_factory.mktemp("responses-reasoning-capture")
     db_path = str(db_dir / "responses.db")
+    param = getattr(request, "param", "vllm")
     config_path = _write_reasoning_backend_config(
-        port, db_path, backend_port, getattr(request, "param", "vllm"),
+        port,
+        db_path,
+        backend_port,
+        "vllm" if param == "agentic" else param,
+        agentic=param == "agentic",
     )
     binary = _find_binary()
 
@@ -4021,13 +4053,134 @@ class TestOpenAIResponsesVLLM:
 class TestResponsesReasoningVLLM:
     """Reasoning-dialect translation exercised through the OpenAI SDK."""
 
-    def test_reasoning_summary_request_is_rejected(self, reasoning_client):
+    @pytest.mark.parametrize("preferred_field", [True, False], ids=["preferred", "legacy"])
+    def test_streaming_reasoning_sdk_events_and_stored_continuation(
+        self, reasoning_capture_client, preferred_field,
+    ):
+        """The SDK consumes raw reasoning events and persisted reasoning-only output."""
+        client, forwarded = reasoning_capture_client
+        ChatCaptureHandler.stream_deltas = [
+            {
+                "reasoning": "I picked " if preferred_field else "",
+                "reasoning_content": "ignored" if preferred_field else "I picked ",
+            },
+            {"reasoning_content": "42."},
+        ]
+        with client.responses.stream(model=VLLM_MODEL, input="Pick a number.", store=True) as stream:
+            events = list(stream)
+            final = stream.get_final_response()
+        deltas = [event for event in events if event.type == "response.reasoning_text.delta"]
+        assert "".join(event.delta for event in deltas) == "I picked 42."
+        assert all(event.content_index == 0 and event.output_index == 0 for event in deltas)
+        assert final.status == "completed"
+        assert len(final.output) == 1
+        item = final.output[0]
+        assert item.type == "reasoning" and item.summary == []
+        assert item.content[0].type == "reasoning_text"
+        assert item.content[0].text == "I picked 42."
+        assert all(event.item_id == item.id for event in deltas)
+        done = next(event for event in events if event.type == "response.reasoning_text.done")
+        assert done.text == item.content[0].text
+        stored = client.responses.retrieve(final.id)
+        assert stored.output[0].model_dump() == item.model_dump()
+        client.responses.create(model=VLLM_MODEL, previous_response_id=final.id, input="Which number?", store=False)
+        assert forwarded[-1]["messages"][1] == {
+            "role": "assistant", "content": None, "reasoning": "I picked 42.",
+        }
+
+    @pytest.mark.parametrize("with_tool_call", [False, True], ids=["answer", "answer-then-tool"])
+    def test_late_reasoning_stays_with_its_stored_assistant_turn(
+        self, reasoning_capture_client, with_tool_call,
+    ):
+        client, forwarded = reasoning_capture_client
+        ChatCaptureHandler.stream_deltas = [{"content": "Earlier answer."}]
+        with client.responses.stream(model=VLLM_MODEL, input="First turn.", store=True) as stream:
+            list(stream)
+            first = stream.get_final_response()
+        ChatCaptureHandler.stream_deltas = [{"content": "Done."}, {"reasoning": "I picked 42."}]
+        if with_tool_call:
+            ChatCaptureHandler.stream_deltas.append({"tool_calls": [{
+                "index": 0, "id": "call_lookup", "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }]})
+        with client.responses.stream(
+            model=VLLM_MODEL, previous_response_id=first.id, input="Pick a number.", store=True,
+        ) as stream:
+            list(stream)
+            second = stream.get_final_response()
+        expected_types = ["message", "reasoning"] + (["function_call"] if with_tool_call else [])
+        assert [item.type for item in second.output] == expected_types
+        stored = client.responses.retrieve(second.id)
+        # The stream helper adds SDK-only `parsed=None` to text content.
+        assert [item.model_dump(exclude_none=True) for item in stored.output] == [
+            item.model_dump(exclude_none=True) for item in second.output
+        ]
+        continuation = [{"role": "user", "content": "Which number?"}]
+        if with_tool_call:
+            continuation.insert(0, {"type": "function_call_output", "call_id": "call_lookup", "output": "42"})
+        client.responses.create(
+            model=VLLM_MODEL, previous_response_id=second.id, input=continuation, store=False,
+        )
+        messages = forwarded[-1]["messages"]
+        assert messages[1] == {"role": "assistant", "content": "Earlier answer."}
+        assert messages[3] == {"role": "assistant", "content": "Done.", "reasoning": "I picked 42."}
+        if with_tool_call:
+            assert messages[4]["tool_calls"][0]["id"] == "call_lookup"
+            assert "reasoning" not in messages[4]
+            assert messages[5]["role"] == "tool"
+        assert messages[-1] == {"role": "user", "content": "Which number?"}
+        # Rehydrating the reordered history must preserve the service's stored
+        # client-facing output, including its original streamed item order.
+        assert client.responses.retrieve(second.id).output == stored.output
+
+    @pytest.mark.parametrize("bad_delta", [
+        {"reasoning": {"invalid": "provider-private-data"}},
+        {"reasoning": "x" * 65536},
+    ], ids=["malformed", "over-budget"])
+    def test_streaming_reasoning_failure_has_no_completed_items(self, reasoning_capture_client, bad_delta):
+        client, _ = reasoning_capture_client
+        ChatCaptureHandler.stream_deltas = [{"reasoning": "valid prefix"}, bad_delta]
+        events = list(client.responses.create(
+            model=VLLM_MODEL, input="Think.", stream=True, store=False,
+        ))
+        assert events[-1].type == "response.failed"
+        assert events[-1].response.output == []
+        assert not any(event.type == "response.output_item.done" for event in events)
+        assert not any(event.type == "response.reasoning_text.done" for event in events)
+        assert "provider-private-data" not in events[-1].model_dump_json()
+        deltas = [event.delta for event in events if event.type == "response.reasoning_text.delta"]
+        assert deltas == ["valid prefix"]
+
+    @requires_real_inference
+    def test_live_streaming_reasoning_translation(self, reasoning_client):
+        """Exercise the dialect against the configured live vLLM endpoint."""
+        with reasoning_client.responses.stream(
+            model=VLLM_MODEL, input="What is 17 times 23? Think before answering.",
+            max_output_tokens=1024, store=True,
+        ) as stream:
+            events = list(stream)
+        terminal_event = events[-1]
+        assert terminal_event.type in {"response.completed", "response.incomplete"}, terminal_event.type
+        final = terminal_event.response
+        assert final.status in {"completed", "incomplete"}
+        deltas = [event for event in events if event.type == "response.reasoning_text.delta"]
+        assert deltas, "the configured reasoning model must emit raw reasoning"
+        item = next(item for item in final.output if item.type == "reasoning")
+        assert item.summary == []
+        assert item.content[0].text == "".join(event.delta for event in deltas)
+        assert all(event.item_id == item.id for event in deltas)
+        stored = reasoning_client.responses.retrieve(final.id)
+        assert stored.output[0].model_dump() == final.output[0].model_dump()
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    def test_reasoning_summary_request_is_rejected(self, reasoning_client, streaming):
         """vLLM has no safe-summary contract, so a summary request is a 400."""
         with pytest.raises(BadRequestError) as exc_info:
             reasoning_client.responses.create(
                 model=VLLM_MODEL,
                 input="What is 2+2?",
                 reasoning={"summary": "auto"},
+                stream=streaming,
                 store=False,
                 max_output_tokens=64,
             )
@@ -4156,6 +4309,29 @@ class TestResponsesReasoningVLLM:
             {"role": "assistant", "content": None, "reasoning": "I picked 42."},
             {"role": "user", "content": "Now answer."},
         ]
+
+    @pytest.mark.parametrize("reasoning_capture_client", ["agentic"], indirect=True)
+    @pytest.mark.parametrize("late", [False, True], ids=["reasoning-first", "reasoning-late"])
+    def test_agentic_stored_reasoning_is_replayed_once(self, reasoning_capture_client, late):
+        client, forwarded = reasoning_capture_client
+        thought = "x" * 40_000
+        deltas = [{"reasoning": thought}, {"content": "Answer"}]
+        ChatCaptureHandler.stream_deltas = list(reversed(deltas)) if late else deltas
+        with client.responses.stream(model=VLLM_MODEL, input="Question", store=True) as stream:
+            list(stream)
+            first = stream.get_final_response()
+        assert first.status == "completed"
+        # The client-facing output keeps its announced order.
+        stored = client.responses.retrieve(first.id)
+        assert [item.type for item in stored.output] == (
+            ["message", "reasoning"] if late else ["reasoning", "message"]
+        )
+        client.responses.create(
+            model=VLLM_MODEL, previous_response_id=first.id, input="Continue", store=False,
+        )
+        # The forwarded history carries the reasoning exactly once, attached to its answer.
+        assistants = [item for item in forwarded[-1]["messages"] if item["role"] == "assistant"]
+        assert assistants == [{"role": "assistant", "content": "Answer", "reasoning": thought}]
 
     @pytest.mark.parametrize("item", [
         {"type": "reasoning", "encrypted_content": "opaque", "summary": []},

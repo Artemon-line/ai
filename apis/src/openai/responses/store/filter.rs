@@ -70,7 +70,9 @@ use crate::{
     classifier::is_responses_create,
     is_event_stream_content_type,
     openai::include::{IncludeFields, decode_query_component_strict, parse_include},
-    service::responses::{InputItemPage, ListParams, MAX_PAGE_LIMIT, Order, build_record, list_input_items},
+    service::responses::{
+        InputItemPage, ListParams, MAX_PAGE_LIMIT, Order, StoredOutputPlan, build_record, list_input_items,
+    },
     state_owner::{StateOwner, require_state_owner},
     store::{
         EventLogStatus, OwnerScopedResponseStore, PendingApprovalRecord, ResponseEventRecord, ResponseRecord,
@@ -469,7 +471,17 @@ fn build_streaming_record(
     let state = ctx.extensions.get::<ResponsesState>()?;
     let response_object = state.response_object.clone();
     let state_messages = (!state.persisted_messages.is_empty()).then(|| state.persisted_messages.clone());
-    build_record(response_object, owner, request_input, state_messages)
+    build_record(
+        response_object,
+        owner,
+        request_input,
+        state_messages,
+        StoredOutputPlan {
+            reasoning_replay: &state.translated_reasoning_replay,
+            collected_rounds: &state.collected_rounds,
+            collected_provenance: &state.collected_output_provenance,
+        },
+    )
 }
 
 /// Build the buffered record from the decoded response body and the captured
@@ -480,12 +492,15 @@ fn build_buffered_record(
     owner: StateOwner,
     request_input: Option<Value>,
 ) -> Option<ResponseRecord> {
-    let state_messages = ctx
-        .extensions
-        .get::<ResponsesState>()
-        .map(|state| state.persisted_messages.clone());
     let json = decode_response_body(bytes)?;
-    build_record(json, owner, request_input, state_messages)
+    let state = ctx.extensions.get::<ResponsesState>();
+    let state_messages = state.map(|state| state.persisted_messages.clone());
+    let plan = state.map_or(StoredOutputPlan::EMPTY, |state| StoredOutputPlan {
+        reasoning_replay: &state.translated_reasoning_replay,
+        collected_rounds: &state.collected_rounds,
+        collected_provenance: &state.collected_output_provenance,
+    });
+    build_record(json, owner, request_input, state_messages, plan)
 }
 
 /// Decode a buffered response body, logging and skipping on invalid JSON.
