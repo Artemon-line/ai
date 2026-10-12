@@ -137,6 +137,64 @@ NOT also pass `run_live_vllm=true`, which would trigger the full suite): it
 provisions the GPU runner and runs only the Codex and Claude Code compaction
 steps, skipping the full Responses suite and every other acceptance step.
 
+### Known model limitation: server-side web search on Qwen3-8B
+
+The Claude Code server-side web-search acceptance test
+(`claude_code_vllm::pinned_claude_code_resolves_server_side_web_search_through_tavily`)
+drives the **real** `claude` binary, which puts `WebSearch` on the wire as a
+custom client tool with `tool_choice: null` — it never *forces* the tool. Qwen3-8B
+does not reliably drive that loop to a finished answer. Two failure shapes were
+observed on live Qwen3-8B, both model-capability limits rather than proxy bugs or
+flakes:
+
+- it never decides to call `WebSearch`, so the managed `anthropic_web_search` loop
+  dispatches no search and the turn returns an empty answer; or
+- it *does* call `WebSearch`, Praxis resolves a real Tavily search server-side (a
+  valid exchange, tool_use suppressed) and the turn exits `success`, but the 8B
+  model then synthesizes **no** final answer from the results (`result:"\n\n"`).
+
+> Root cause of the Oct 10–12 2026 red run — a test-infra bug, not either model
+> limit above. Issue #1389 moved the Tavily credential from a body `api_key`
+> field to an `Authorization: Bearer` header, but the loopback capture-relay
+> (`tests/utils/src/tavily_relay.rs`) still forwarded only the body, so real
+> Tavily answered **401** and the managed loop fell back to an `is_error` tool
+> result — surfacing as the empty-answer shape above. The relay now forwards the
+> `Authorization` header verbatim and records it, and the oracle validates the
+> resolved key travels there (a **proxy regression**, below, if it is missing or
+> wrong), so a dropped credential fails hard instead of masquerading as a model
+> limit.
+
+Praxis's server-side Tavily resolution is proven on every run by the
+**forced-tool-choice** SDK web-search tests, which set
+`tool_choice={type:tool,name:WebSearch}` to open the loop reliably on a small
+model:
+
+- `test_live_tavily_web_search_returns_real_sources` (OpenAI Responses and
+  Anthropic SDK), and
+- the `ANTHROPIC_STUBBED_WEB_SEARCH` / `ANTHROPIC_CREDENTIALED_WEB_SEARCH`
+  acceptance scenarios.
+
+So the Claude Code lane grades like the compaction lane: **hard-assert everything
+the proxy owns, XFAIL only the model-completion outcome.** The
+`check_server_side_web_search` oracle classifies each failure (`WebSearchFailure`):
+
+- **Proxy regression — hard on every model.** A leaked `WebSearch` tool_use (the
+  managed loop must suppress it), an `is_error` flag on an otherwise-successful
+  turn, or any Tavily exchange that *did* run being malformed or failed (non-200,
+  the resolved key missing from the forwarded `Authorization: Bearer` header per
+  issue #1389, empty query, empty/relative-URL results). These are checked
+  **first** and always, so a broken managed loop or relay can never hide behind the
+  limitation.
+- **Model incomplete — XFAIL on `WEB_SEARCH_XFAIL_MODEL` (`qwen3-8b`), hard on a
+  capable model.** The turn did not converge, the model never called `WebSearch`
+  (no Tavily exchange), or it got real results and produced no usable final
+  answer. On `qwen3-8b` these are **skipped** with an `XFAIL (...)` line logged,
+  and the child must still have run to completion cleanly through Praxis.
+
+Making the proxy inject/force `tool_choice` for the managed web-search tool (so
+small backends open the loop through the real client) would let this lane drop the
+XFAIL — tracked separately as a possible filter feature, not done here.
+
 ## Reusing published images
 
 Neither nightly rebuilds the model-baked image by default. Each calls
