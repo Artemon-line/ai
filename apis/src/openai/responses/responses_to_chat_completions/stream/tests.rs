@@ -1235,7 +1235,7 @@ fn fragmented_first_frame_waits_for_provider_metadata() {
     push(
         &mut conv,
         &body,
-        b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
+        b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"service_tier\":\"scale\",\"choices\":[{\"index\":0,",
         &mut raw,
     );
     assert!(
@@ -1247,6 +1247,56 @@ fn fragmented_first_frame_waits_for_provider_metadata() {
         types(&parse_events(&raw)),
         vec!["response.created", "response.in_progress"],
         "lifecycle must be emitted after the first complete provider frame",
+    );
+}
+
+#[test]
+fn late_provider_service_tier_updates_opening_snapshot() {
+    let body = json!({
+        "model": "gpt-4.1-mini",
+        "input": "hi",
+        "service_tier": "auto",
+        "stream": true,
+    });
+    let mut conv = converter(wide_limits());
+    let mut raw = Vec::new();
+    push(
+        &mut conv,
+        &body,
+        b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+        &mut raw,
+    );
+    assert!(
+        raw.is_empty(),
+        "a metadata-only chunk without service_tier must not lock in the request fallback"
+    );
+    push(
+        &mut conv,
+        &body,
+        b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"service_tier\":\"scale\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        &mut raw,
+    );
+    push(
+        &mut conv,
+        &body,
+        b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"service_tier\":\"scale\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        &mut raw,
+    );
+    push(&mut conv, &body, b"data: [DONE]\n\n", &mut raw);
+    finish(&mut conv, &body, &mut raw);
+
+    let events = parse_events(&raw);
+    let snapshots = events
+        .iter()
+        .filter(|(name, _)| name == "response.created" || name == "response.in_progress")
+        .map(|(_, payload)| payload["response"]["service_tier"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots, vec![json!("scale"), json!("scale")]);
+    assert_eq!(events.last().unwrap().1["response"]["service_tier"], "scale");
+    assert_eq!(
+        types(&events)[..3],
+        ["response.created", "response.in_progress", "response.output_item.added"],
+        "lifecycle must remain before output events"
     );
 }
 
@@ -2197,7 +2247,7 @@ fn lifecycle_frame_overflow_rolls_back_the_pair() {
         original_tool_choice: None,
         now: NOW,
     };
-    let first_frame = b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n";
+    let first_frame = b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"service_tier\":\"scale\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n";
     let mut probe = converter(wide_limits());
     let probe_raw = probe
         .push(first_frame, &inputs)

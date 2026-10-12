@@ -147,7 +147,7 @@
             "frames": [
               {
                 "event": null,
-                "data": "{\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}],\"created\":0,\"id\":\"chatcmpl-recorded-0003\",\"model\":\"synthetic-chat-model\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"scale\"}",
+                "data": "{\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}],\"created\":0,\"id\":\"chatcmpl-recorded-0003\",\"model\":\"synthetic-chat-model\",\"object\":\"chat.completion.chunk\"}",
                 "id": null,
                 "retry": null
               },

@@ -561,7 +561,9 @@ impl StreamConverter {
         Self::validate_chunk(&chunk)?;
         self.require_initial_metadata(&chunk)?;
         self.capture_metadata(&chunk)?;
-        self.ensure_lifecycle(inputs, out)?;
+        if self.service_tier.is_some() || Self::chunk_requires_lifecycle(&chunk) {
+            self.ensure_lifecycle(inputs, out)?;
+        }
         if let Some(usage) = &chunk.usage {
             self.usage = Some(usage.clone());
         }
@@ -650,6 +652,27 @@ impl StreamConverter {
             }
         }
         Ok(())
+    }
+
+    /// Whether a chunk must resolve the pending opening lifecycle.
+    ///
+    /// A provider may introduce `service_tier` after a metadata-only opening
+    /// chunk. Waiting across those chunks lets the lifecycle use the provider
+    /// tier without buffering output. The first output-bearing chunk resolves
+    /// the lifecycle with the captured tier or the existing request/default
+    /// fallback, preserving immediate output translation.
+    fn chunk_requires_lifecycle(chunk: &ChatChunk<'_>) -> bool {
+        chunk.choices.iter().any(|choice| {
+            choice.finish_reason.is_some()
+                || choice.delta.as_ref().is_some_and(|delta| {
+                    delta.reasoning.is_some()
+                        || delta.reasoning_content.is_some()
+                        || delta.content.as_deref().is_some_and(|content| !content.is_empty())
+                        || delta.refusal.as_deref().is_some_and(|refusal| !refusal.is_empty())
+                        || !delta.tool_calls.is_empty()
+                        || delta.function_call.is_some()
+                })
+        })
     }
 
     /// Translate one choice's delta and finish reason.

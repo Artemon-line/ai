@@ -1343,7 +1343,6 @@ class SimulatorBackendHandler(BaseHTTPRequestHandler):
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": request_body.get("model", VLLM_MODEL),
-                "service_tier": "scale",
                 "choices": [{"index": 0, "delta": {"role": "assistant"}}],
             },
             {
@@ -9632,7 +9631,10 @@ def test_streaming_service_tier_snapshot_uses_provider_value(chat_streaming_clie
         for event in events
         if event.type in {"response.created", "response.in_progress", "response.completed"}
     ]
-    assert snapshots
+    event_types = [event.type for event in events]
+    assert event_types.count("response.created") == 1, event_types
+    assert event_types.count("response.in_progress") == 1, event_types
+    assert len(snapshots) == 3, event_types
     assert all(response.service_tier == "scale" for response in snapshots)
 
     recorded = [
