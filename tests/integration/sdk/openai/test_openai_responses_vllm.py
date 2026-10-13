@@ -1164,12 +1164,12 @@ class NativeCompactionBackendHandler(BaseHTTPRequestHandler):
 
 
 class OversizedCallIdBackendHandler(BaseHTTPRequestHandler):
-    """Native Responses backend scripting one MCP call with an oversized id.
+    """Native Responses backend scripting one MCP call with an escaping id.
 
-    Issue #1400: a provider-emitted ``call_id`` longer than the documented MCP
-    correlation-id bound must fail closed before an approval is persisted or
-    the tool executes. Real vLLM cannot be forced to emit such an id, so this
-    handler scripts the deterministic native Responses output.
+    Issue #1400: a provider-emitted ``call_id`` at the raw-byte bound but whose
+    JSON-serialized fallback exceeds the retained reservation must fail closed
+    before an approval is persisted or the tool executes. Real vLLM cannot be
+    forced to emit such an id, so this handler scripts deterministic output.
     """
 
     request_count: ClassVar[int] = 0
@@ -1193,7 +1193,7 @@ class OversizedCallIdBackendHandler(BaseHTTPRequestHandler):
                     {
                         "type": "function_call",
                         "id": "fc_oversized_call_id",
-                        "call_id": "call_" + "x" * 4096,
+                        "call_id": "\0" * 128,
                         "name": "weather__get_weather",
                         "arguments": json.dumps({"city": "Paris"}),
                         "status": "completed",
@@ -6249,11 +6249,12 @@ class TestAgenticLoopVLLM:
         self,
         oversized_call_id_client,
     ):
-        """Issue #1400: an oversized MCP call id fails closed before dispatch.
+        """Issue #1400: an escaping MCP call id fails closed before dispatch.
 
-        The provider-emitted correlation id exceeds the documented MCP bound,
-        so the round is rejected with a 502 before any approval is persisted
-        and before the MCP tool executes.
+        The provider-emitted correlation id is at the raw-byte bound, but JSON
+        escaping expands its fallback beyond the retained reservation, so the
+        round is rejected with a 502 before any approval is persisted and
+        before the MCP tool executes.
         """
         client, mcp_port = oversized_call_id_client
         calls_before = MCPHandler.tool_call_count()

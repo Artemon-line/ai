@@ -1157,26 +1157,43 @@ fn count_mcp_tool_calls(tool_calls: &[serde_json::Value], tool_index: &McpToolIn
 /// Results are matched and response-wide budgets are deduplicated by `call_id`,
 /// so accepting a missing or repeated value would make separately executed
 /// side effects indistinguishable. The id is also persisted verbatim as an
-/// approval correlation id and echoed by retained results, so its length is
-/// capped at [`MAX_MCP_CALL_ID_BYTES`] before any approval record is created;
-/// that keeps the fixed result-limit fallback inside its reserved bytes.
+/// approval correlation id and echoed by retained results. Its raw length is
+/// capped at [`MAX_MCP_CALL_ID_BYTES`], and its serialized fallback is checked
+/// against [`MIN_RETAINED_RESULT_BYTES`] before any approval record is created.
 fn mcp_call_ids_are_unique_and_new(
     tool_calls: &[&serde_json::Value],
     accumulated_output: &[serde_json::Value],
 ) -> bool {
     let mut seen = HashSet::with_capacity(tool_calls.len());
     tool_calls.iter().all(|call| {
-        call.get("call_id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|call_id| !call_id.is_empty() && call_id.len() <= MAX_MCP_CALL_ID_BYTES)
-            .is_some_and(|call_id| {
-                seen.insert(call_id)
-                    && !accumulated_output.iter().any(|item| {
-                        item.get("type").and_then(serde_json::Value::as_str) == Some("mcp_call")
-                            && item.get("id").and_then(serde_json::Value::as_str) == Some(call_id)
-                    })
+        let Some(call_id) = call.get("call_id").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        if call_id.is_empty() || call_id.len() > MAX_MCP_CALL_ID_BYTES || !call_id_fallback_fits(call) {
+            return false;
+        }
+        seen.insert(call_id)
+            && !accumulated_output.iter().any(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("mcp_call")
+                    && item.get("id").and_then(serde_json::Value::as_str) == Some(call_id)
             })
     })
+}
+
+/// Check whether a future result-limit fallback containing this call id fits
+/// the minimum per-call reservation after JSON escaping.
+fn call_id_fallback_fits(tool_call: &serde_json::Value) -> bool {
+    let (call_id, tool_name) = bounded_fallback_identity(tool_call);
+    build_error_result(
+        call_id,
+        "unknown",
+        tool_name,
+        "",
+        "MCP tool result exceeded the configured retained-byte limit",
+        Some(call_id),
+    )
+    .retained_bytes()
+    .is_some_and(|bytes| bytes <= MIN_RETAINED_RESULT_BYTES)
 }
 
 /// Check whether a tool call is an MCP tool call by matching the
@@ -1413,12 +1430,15 @@ fn fit_result_or_limit_error(
     if result.retained_bytes().is_some_and(|bytes| bytes <= retained_limit) {
         return Ok(result);
     }
-    bounded_result_limit_error(tool_call)
+    bounded_result_limit_error(tool_call, retained_limit)
 }
 
 /// Build the fixed limit-error fallback, or fail when it cannot fit its
-/// pre-dispatch reservation.
-fn bounded_result_limit_error(tool_call: &serde_json::Value) -> Result<McpCallResult, McpResultLimitExceeded> {
+/// call's retained reservation.
+fn bounded_result_limit_error(
+    tool_call: &serde_json::Value,
+    retained_limit: usize,
+) -> Result<McpCallResult, McpResultLimitExceeded> {
     let (call_id, tool_name) = bounded_fallback_identity(tool_call);
     let fallback = build_error_result(
         call_id,
@@ -1428,10 +1448,7 @@ fn bounded_result_limit_error(tool_call: &serde_json::Value) -> Result<McpCallRe
         "MCP tool result exceeded the configured retained-byte limit",
         approval_request_id(tool_call),
     );
-    if fallback
-        .retained_bytes()
-        .is_none_or(|bytes| bytes > MIN_RETAINED_RESULT_BYTES)
-    {
+    if fallback.retained_bytes().is_none_or(|bytes| bytes > retained_limit) {
         warn!(
             approval_request_bytes = approval_request_id(tool_call).map_or(0, str::len),
             "MCP result-limit fallback exceeded its retained reservation; failing the batch"
@@ -1453,7 +1470,7 @@ fn bounded_fallback_identity(tool_call: &serde_json::Value) -> (&str, &str) {
     let call_id = tool_call
         .get("call_id")
         .and_then(serde_json::Value::as_str)
-        .filter(|value| value.len() <= 64)
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| bounded_identity("id"));
     (call_id, bounded_identity("name"))
 }

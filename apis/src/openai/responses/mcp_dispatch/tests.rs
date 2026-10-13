@@ -93,6 +93,21 @@ fn mcp_call_ids_must_be_present_nonempty_unique_and_bounded() {
         "a call_id above the documented bound must be rejected before persistence"
     );
 
+    let at_raw_bound = vec![json!({
+        "call_id": "x".repeat(super::MAX_MCP_CALL_ID_BYTES),
+        "name": "x".repeat(64),
+    })];
+    assert!(mcp_call_ids_are_unique_and_new(&call_refs(&at_raw_bound), &[]));
+
+    let escaping_expands = vec![json!({
+        "call_id": "\0".repeat(super::MAX_MCP_CALL_ID_BYTES),
+        "name": "\0".repeat(64),
+    })];
+    assert!(
+        !mcp_call_ids_are_unique_and_new(&call_refs(&escaping_expands), &[]),
+        "a call_id whose serialized fallback exceeds the reservation must be rejected before persistence"
+    );
+
     let reused = vec![json!({"call_id": "call_1"})];
     assert!(!mcp_call_ids_are_unique_and_new(
         &call_refs(&reused),
@@ -1818,6 +1833,47 @@ fn bounded_approval_id_is_preserved_in_limit_error_fallback() {
         bounded.output_item["approval_request_id"].as_str().unwrap(),
         approval_id,
         "a bounded correlation id must be preserved in full, never truncated"
+    );
+    assert_eq!(
+        bounded.message["call_id"].as_str().unwrap(),
+        approval_id,
+        "the function-call output must preserve the accepted call id"
+    );
+    assert_eq!(
+        bounded.output_item["id"].as_str().unwrap(),
+        approval_id,
+        "the MCP call item must preserve the accepted call id"
+    );
+}
+
+#[test]
+fn oversized_result_fallback_uses_the_call_reservation() {
+    let approval_id = "x".repeat(320);
+    let call = json!({
+        "name": "weather__get_weather",
+        "call_id": approval_id,
+        "approval_request_id": approval_id,
+    });
+    let result = build_success_result(
+        &approval_id,
+        "srv",
+        "tool",
+        "{}",
+        &"x".repeat(8192),
+        false,
+        Some(&approval_id),
+    );
+
+    let bounded = super::fit_result_or_limit_error(&call, result, 2048)
+        .expect("the fallback must fit the call's actual reservation");
+
+    assert!(
+        bounded.retained_bytes().unwrap() > super::MIN_RETAINED_RESULT_BYTES,
+        "the test must exercise a fallback above the minimum reservation"
+    );
+    assert!(
+        bounded.retained_bytes().unwrap() <= 2048,
+        "the fallback must be checked against the call's actual reservation"
     );
 }
 
