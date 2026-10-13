@@ -1536,7 +1536,7 @@ impl StreamConverter {
         // nothing and marks the lifecycle started, so the reserved
         // `response.failed` terminal can still close the stream below.
         match self.ensure_lifecycle(inputs, out) {
-            Ok(()) | Err(ConvertError::FrameSizeLimit | ConvertError::EventLimit) => {},
+            Ok(()) | Err(ConvertError::FrameSizeLimit | ConvertError::EventLimit | ConvertError::ByteLimit) => {},
             Err(other) => return Err(other),
         }
         // A failed response has no completion moment, so no completed_at timestamp.

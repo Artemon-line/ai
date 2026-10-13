@@ -1722,6 +1722,31 @@ fn failed_terminal_does_not_echo_unbounded_request_fields() {
 }
 
 #[test]
+fn bad_first_frame_still_emits_failed_after_oversized_lifecycle() {
+    // A malformed first frame reaches failure handling before the deferred
+    // lifecycle has been emitted. The request-controlled lifecycle snapshot can
+    // exceed the body ceiling, but that rollback must still leave room for the
+    // bounded `response.failed` terminal rather than silently dropping it.
+    let limits = StreamLimits {
+        max_body_bytes: 1000,
+        ..wide_limits()
+    };
+    let body = json!({
+        "model": "gpt-4.1-mini",
+        "input": "hi",
+        "stream": true,
+        "metadata": {"note": "m".repeat(4000)},
+    });
+    let events = run_stream_with_body(&[r#"{"malformed""#], &body, limits);
+
+    assert_eq!(
+        types(&events),
+        ["response.failed"],
+        "an early malformed frame must still terminate with a bounded failure event",
+    );
+}
+
+#[test]
 fn failed_terminal_fallback_is_schema_complete() {
     // The constant-bounded failure fallback must still be a valid Response
     // object: it has to carry every schema-required field, not just id/status/
