@@ -26,6 +26,25 @@ fn req(method: &str, path: &str) -> Request {
     make_request(http::Method::from_bytes(method.as_bytes()).unwrap(), path)
 }
 
+/// Classify one request and assert its published protocol and operation.
+async fn assert_family(method: &str, path: &str, protocol: &'static str, operation_id: &str) {
+    let filter = default_filter();
+    let request = req(method, path);
+    let mut ctx = make_filter_context(&request);
+
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    let matched = ctx.extensions.get::<AiOperationMatch>().copied();
+    assert!(matched.is_some(), "{method} {path} should classify");
+    let matched = matched.unwrap();
+    assert_eq!(
+        matched.application_protocol,
+        ApplicationProtocol::new(protocol),
+        "{method} {path}"
+    );
+    assert_eq!(matched.operation_id, operation_id, "{method} {path}");
+}
+
 /// `WebSocket` opening handshake headers.
 fn websocket_headers() -> http::HeaderMap {
     let mut headers = http::HeaderMap::new();
@@ -35,12 +54,20 @@ fn websocket_headers() -> http::HeaderMap {
 }
 
 #[test]
-fn declares_no_request_body_access_or_buffering() {
+fn observes_the_body_phase_without_buffering() {
     let filter = default_filter();
-    assert_eq!(filter.request_body_access(), BodyAccess::None);
+    assert_eq!(
+        filter.request_body_access(),
+        BodyAccess::ReadOnly,
+        "the body hook observes the phase so it can publish before a buffered pre-read"
+    );
     assert!(
         matches!(filter.request_body_mode(), BodyMode::Stream),
-        "the classifier must not request buffering"
+        "read-only observation must never upgrade the pipeline to buffering"
+    );
+    assert!(
+        filter.needs_request_context(),
+        "the body hook classifies from the request head, which must survive into the body phase"
     );
 }
 
@@ -202,19 +229,69 @@ async fn websocket_handshake_on_conversations_is_not_classified() {
     );
 }
 
+/// Files publishes through the shared classifier, so a chain can branch on a
+/// proxy-owned fact instead of a path prefix.
+#[tokio::test]
+async fn classifies_files_operations() {
+    for (method, path, operation_id) in [
+        ("GET", "/v1/files", "listFiles"),
+        ("POST", "/v1/files", "createFile"),
+        ("GET", "/v1/files/file_abc/content", "downloadFile"),
+    ] {
+        assert_family(method, path, "openai_files", operation_id).await;
+    }
+}
+
+/// Vector Stores nests three levels deep and reuses `{file_id}` beneath a
+/// store, so each template has to resolve to its own operation.
+#[tokio::test]
+async fn classifies_vector_stores_operations() {
+    for (method, path, operation_id) in [
+        ("POST", "/v1/vector_stores", "createVectorStore"),
+        ("GET", "/v1/vector_stores/vs_1/files/file_1", "getVectorStoreFile"),
+        ("POST", "/v1/vector_stores/vs_1/search", "searchVectorStore"),
+        (
+            "GET",
+            "/v1/vector_stores/vs_1/file_batches/b_1/files",
+            "listFilesInVectorStoreBatch",
+        ),
+    ] {
+        assert_family(method, path, "openai_vector_stores", operation_id).await;
+    }
+}
+
+/// An unsupported method on a family path publishes nothing, so it cannot
+/// enter a route keyed on the classifier's output.
+#[tokio::test]
+async fn unsupported_family_methods_publish_no_match() {
+    for (method, path) in [("PUT", "/v1/files"), ("DELETE", "/v1/vector_stores")] {
+        let filter = default_filter();
+        let request = req(method, path);
+        let mut ctx = make_filter_context(&request);
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert!(
+            ctx.extensions.get::<AiOperationMatch>().is_none(),
+            "{method} {path} must not classify"
+        );
+    }
+}
+
 /// The error formatter is installed from the request head, so an OpenAI
 /// client keeps OpenAI-shaped errors on proxy failures without any
 /// protocol-specific filter later in the chain.
 ///
-/// Membership is derived from the protocol name, so a registry added later —
-/// Files and Vector Stores, for instance — is covered without touching this
-/// filter.
+/// Membership is derived from the protocol name, so the Files and Vector
+/// Stores registries are covered without touching this filter.
 #[tokio::test]
 async fn an_openai_operation_installs_the_error_formatter() {
     for (method, path) in [
         ("POST", "/v1/chat/completions"),
         ("POST", "/v1/responses"),
         ("GET", "/v1/conversations/conv_123"),
+        ("GET", "/v1/files"),
+        ("POST", "/v1/vector_stores"),
     ] {
         let filter = default_filter();
         let request = req(method, path);
@@ -767,9 +844,12 @@ async fn unregistered_anthropic_surfaces_publish_no_match() {
     for (method, path) in [
         ("POST", "/v1/complete"),
         ("GET", "/v1/models"),
-        ("POST", "/v1/files"),
         ("GET", "/v1/messages"),
         ("GET", "/v1/messages/msg_123"),
+        // `/v1/files` is deliberately absent: Anthropic and OpenAI share that
+        // path, and the OpenAI Files registry claims it. A request there is
+        // classified, just not as Anthropic — see
+        // `anthropic_paths_shared_with_openai_classify_as_openai`.
     ] {
         let filter = default_filter();
         let request = req(method, path);
@@ -783,6 +863,27 @@ async fn unregistered_anthropic_surfaces_publish_no_match() {
     }
 }
 
+/// A path Anthropic and OpenAI share resolves to the registry that declares it.
+///
+/// Both providers expose `/v1/files`. Only OpenAI Files declares those
+/// operations, so a request there classifies as `openai_files`. Asserted
+/// because the Anthropic scope doc lists `/v1/files` as outside its surface,
+/// which could be misread as "no match".
+#[tokio::test]
+async fn anthropic_paths_shared_with_openai_classify_as_openai() {
+    let filter = default_filter();
+    let request = req("POST", "/v1/files");
+    let mut ctx = make_filter_context(&request);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    let matched = ctx
+        .extensions
+        .get::<AiOperationMatch>()
+        .copied()
+        .expect("the OpenAI Files registry declares this path");
+    assert_eq!(matched.application_protocol.as_str(), "openai_files");
+}
+
 /// The request head alone decides the operation.
 ///
 /// A Chat Completions-shaped, malformed, empty, or absent body must not change
@@ -793,11 +894,11 @@ async fn unregistered_anthropic_surfaces_publish_no_match() {
 async fn a_request_body_never_changes_the_classified_operation() {
     let bodies = [
         None,
-        Some(bytes::Bytes::new()),
-        Some(bytes::Bytes::from_static(b"not json at all")),
-        Some(bytes::Bytes::from_static(br#"{"model":"gpt-4.1","messages":[]}"#)),
-        Some(bytes::Bytes::from_static(br#"{"input":"hi","model":"gpt-4.1"}"#)),
-        Some(bytes::Bytes::from_static(
+        Some(Bytes::new()),
+        Some(Bytes::from_static(b"not json at all")),
+        Some(Bytes::from_static(br#"{"model":"gpt-4.1","messages":[]}"#)),
+        Some(Bytes::from_static(br#"{"input":"hi","model":"gpt-4.1"}"#)),
+        Some(Bytes::from_static(
             br#"{"model":"claude-opus-4-8","max_tokens":1,"messages":[]}"#,
         )),
     ];
@@ -821,6 +922,93 @@ async fn a_request_body_never_changes_the_classified_operation() {
             "body {body:?} changed the classified operation"
         );
     }
+}
+
+/// The body hook publishes the match for a downstream buffered pre-read.
+///
+/// Core runs a `StreamBuffer` consumer's body pre-read before the header phase,
+/// so when this filter is ordered ahead of that consumer its body hook is where
+/// the match first appears. The hook inspects only the head: the chunk passes
+/// through untouched and is never buffered.
+#[tokio::test]
+async fn the_body_hook_publishes_the_match_for_a_pre_read() {
+    let filter = default_filter();
+    let request = req("POST", "/v1/responses");
+    let mut ctx = make_filter_context(&request);
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-5","input":"hi"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(
+        body.as_deref(),
+        Some(&br#"{"model":"gpt-5","input":"hi"}"#[..]),
+        "the body hook must pass the chunk through untouched"
+    );
+    let matched = ctx.extensions.get::<AiOperationMatch>().copied().unwrap();
+    assert_eq!(matched.application_protocol.as_str(), "openai_responses");
+    assert_eq!(matched.operation_id, "createResponse");
+}
+
+/// Classification runs once however the pipeline schedules the hooks.
+///
+/// The body pre-read, every streamed chunk, and the header phase resolve to a
+/// single classify-and-publish pass. Proven through the set-header side effect:
+/// each pass appends the configured routing headers, so one pass leaves exactly
+/// one pair no matter how many times the hooks run.
+#[tokio::test]
+async fn classification_runs_once_across_both_hooks_and_every_chunk() {
+    let filter = filter(
+        "headers:\n  application_protocol: x-praxis-ai-application-protocol\n  operation: x-praxis-ai-operation\n",
+    );
+    let request = req("POST", "/v1/responses");
+    let mut ctx = make_filter_context(&request);
+
+    let mut first = Some(Bytes::from_static(br#"{"model":"gpt-5","#));
+    drop(filter.on_request_body(&mut ctx, &mut first, false).await.unwrap());
+    let mut last = Some(Bytes::from_static(br#""input":"hi"}"#));
+    drop(filter.on_request_body(&mut ctx, &mut last, true).await.unwrap());
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    assert!(
+        ctx.extensions.get::<OperationClassified>().is_some(),
+        "the completion marker records the single pass"
+    );
+    assert_eq!(
+        ctx.request_headers_to_set.len(),
+        2,
+        "the match must be published once, not once per hook or chunk"
+    );
+}
+
+/// An unmatched request classifies once too, rather than on every chunk.
+///
+/// The completion marker is set even when nothing matched, so the header strip
+/// an unmatched request performs runs a single time across the pre-read, the
+/// chunks, and the header phase.
+#[tokio::test]
+async fn an_unmatched_request_classifies_once() {
+    let filter = filter(
+        "headers:\n  application_protocol: x-praxis-ai-application-protocol\n  operation: x-praxis-ai-operation\n",
+    );
+    let request = req("GET", "/healthz");
+    let mut ctx = make_filter_context(&request);
+
+    let mut chunk = Some(Bytes::from_static(b"anything"));
+    drop(filter.on_request_body(&mut ctx, &mut chunk, false).await.unwrap());
+    drop(filter.on_request_body(&mut ctx, &mut chunk, true).await.unwrap());
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    assert!(
+        ctx.extensions.get::<OperationClassified>().is_some(),
+        "a no-match request is still classified exactly once"
+    );
+    assert!(ctx.extensions.get::<AiOperationMatch>().is_none());
+    assert_eq!(
+        ctx.request_headers_to_remove.len(),
+        2,
+        "the strip must happen once, not once per hook or chunk"
+    );
 }
 
 #[tokio::test]

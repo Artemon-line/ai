@@ -370,8 +370,8 @@ filter_chains:
         conversations_table: test_conversations
         items_table: test_conversation_items
 
-      - filter: openai_responses_format
-
+      - filter: openai_responses_request
+        initialize_state: false
       - filter: openai_responses_request
         on_invalid: reject
         headers:
@@ -380,7 +380,7 @@ filter_chains:
           stream: ~
           mode: ~
 
-      - filter: openai_response_store
+      - filter: openai_responses_store
         backend: sqlite
         database_url: "{db_url}"
         responses_table: test_responses

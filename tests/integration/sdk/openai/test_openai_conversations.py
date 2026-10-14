@@ -306,6 +306,7 @@ def _write_passthrough_config(port: int, backend_port: int) -> str:
             {
                 "name": "passthrough-pipeline",
                 "filters": [
+                    {"filter": "ai_operation"},
                     {
                         "filter": "openai_responses_request",
                         "on_invalid": "continue",
@@ -357,7 +358,7 @@ def _chunked_response_store_filters(db_path: str, port: int) -> tuple[dict, dict
 
     conversations = {"filter": "openai_conversations", **store, **tables}
     response_store = {
-        "filter": "openai_response_store",
+        "filter": "openai_responses_store",
         **store,
         "responses_table": f"chunked_{port}_responses",
         "conversations_table": tables["conversations_table"],
@@ -379,13 +380,14 @@ def _write_chunked_response_config(port: int, backend_port: int, db_path: str) -
             {
                 "name": "responses-test-pipeline",
                 "filters": [
+                    {"filter": "ai_operation"},
                     {
                         "filter": "state_owner",
                         "mode": "trusted_owner",
                         "header": OWNER_HEADER,
                     },
                     conversations_filter,
-                    {"filter": "openai_responses_format"},
+                    {"filter": "openai_responses_request", "initialize_state": False},
                     response_store_filter,
                     {
                         "filter": "router",
@@ -585,7 +587,7 @@ def passthrough_client():
 
 
 @pytest.fixture
-def chunked_response_client():
+def chunked_response_store():
     """Start a composed response-store/Conversations proxy and chunked backend."""
     backend = http.server.ThreadingHTTPServer(
         ("127.0.0.1", 0), _ChunkedResponsesBackend
@@ -611,13 +613,14 @@ def chunked_response_client():
         try:
             _wait_for_proxy(proxy_port, proc)
             _wait_for_store_ready(readiness_port, proc)
-            yield OpenAI(
+            client = OpenAI(
                 api_key="not-needed",
                 base_url=f"http://127.0.0.1:{proxy_port}/v1",
                 default_headers={OWNER_HEADER: _owner_assertion("alice")},
                 max_retries=0,
                 timeout=10.0,
             )
+            yield client, db_path, f"chunked_{proxy_port}_responses"
         finally:
             proc.send_signal(signal.SIGINT)
             try:
@@ -629,6 +632,13 @@ def chunked_response_client():
             backend.shutdown()
             backend.server_close()
             backend_thread.join(timeout=5)
+
+
+@pytest.fixture
+def chunked_response_client(chunked_response_store):
+    """Return the SDK client from the composed response-store fixture."""
+    client, _, _ = chunked_response_store
+    return client
 
 
 @pytest.fixture(scope="session")
@@ -812,6 +822,41 @@ class TestOpenAIConversations:
         retrieved = chunked_response_client.responses.retrieve(response.id)
         assert retrieved.id == response.id
         assert retrieved.status == "completed"
+
+    @pytest.mark.skipif(
+        DATABASE_URL.startswith("postgres"),
+        reason="deterministic response-store outage uses a temporary SQLite table",
+    )
+    def test_response_delete_store_failure_returns_server_error_envelope(
+        self, chunked_response_store
+    ):
+        """DELETE maps a live store failure to the Responses error envelope."""
+        client, db_path, responses_table = chunked_response_store
+        database = sqlite3.connect(db_path)
+        try:
+            database.execute(f'DROP TABLE "{responses_table}"')
+            database.commit()
+        finally:
+            database.close()
+
+        with pytest.raises(InternalServerError) as exc_info:
+            client.responses.delete("resp_delete_store_failure")
+
+        error = exc_info.value
+        assert error.status_code == 500, (
+            "a DELETE store failure must return HTTP 500"
+        )
+        assert error.response.headers["content-type"].startswith(
+            "application/json"
+        ), "a DELETE store failure must return a JSON response"
+        assert error.response.json() == {
+            "error": {
+                "code": "server_error",
+                "message": "Internal server error.",
+                "param": None,
+                "type": "server_error",
+            }
+        }, "a DELETE store failure must return the standard server_error envelope"
 
     def test_conversation_create_no_metadata(self, openai_client):
         conversation = openai_client.conversations.create()
@@ -1168,6 +1213,49 @@ class TestOpenAIConversations:
             "item_page_1",
             "item_page_0",
         ]
+
+    @pytest.mark.parametrize("order", ["asc", "desc"])
+    def test_complete_history_order_after_deletes_and_appends(
+        self, openai_client, order
+    ):
+        """#532: paging must preserve append order across deleted sequence gaps."""
+        conversation = openai_client.conversations.create()
+        try:
+            expected = []
+            for batch in range(6):
+                items = _message_items(f"item_history_{order}_{batch}", 20)
+                openai_client.conversations.items.create(conversation.id, items=items)
+                expected.extend(item["id"] for item in items)
+
+            # Remove the head, a page boundary, and the tail before appending.
+            for item_id in [expected[0], expected[19], expected[-1]]:
+                openai_client.conversations.items.delete(
+                    item_id, conversation_id=conversation.id
+                )
+                expected.remove(item_id)
+            appended = _message_items(f"item_history_{order}_final", 8)
+            openai_client.conversations.items.create(conversation.id, items=appended)
+            expected.extend(item["id"] for item in appended)
+
+            seen = []
+            after = None
+            while True:
+                page = openai_client.conversations.items.list(
+                    conversation.id, order=order, limit=17, after=after
+                )
+                assert page.data, "nonterminal pagination must make progress"
+                ids = [item.id for item in page.data]
+                assert page.first_id == ids[0]
+                assert page.last_id == ids[-1]
+                assert not set(ids).intersection(seen), "cursor repeated history"
+                seen.extend(ids)
+                if not page.has_more:
+                    break
+                after = page.last_id
+
+            assert seen == (expected if order == "asc" else expected[::-1])
+        finally:
+            openai_client.conversations.delete(conversation.id)
 
     def test_item_crud_is_sdk_compatible(self, openai_client):
         conversation = openai_client.conversations.create()

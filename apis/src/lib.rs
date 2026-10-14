@@ -117,6 +117,7 @@ pub(crate) mod test_utils {
             cluster: None,
             current_filter_id: None,
             downstream_tls: false,
+            hedge_policy: None,
             extensions: RequestExtensions::default(),
             executed_filter_indices: Vec::new(),
             executed_branch_filters: Vec::new(),
@@ -169,7 +170,7 @@ pub(crate) mod test_utils {
     }
 
     /// Build a stable owner for tests that previously supplied only a tenant.
-    #[cfg(any(feature = "store-sqlite", feature = "store-postgres"))]
+    #[cfg(any(feature = "store-sqlite", feature = "_store-postgres"))]
     #[cfg_attr(
         not(feature = "store-sqlite"),
         allow(
@@ -207,11 +208,15 @@ pub(crate) mod test_utils {
         );
         praxis_filter::register_filters!(
             @register registry,
-            http "openai_responses_format" => crate::openai::ResponsesFormatFilter::from_config
+            http "ai_operation" => crate::operation_classifier::AiOperationFilter::from_config
         );
         praxis_filter::register_filters!(
             @register registry,
-            http "openai_response_store" => crate::openai::ResponseStoreFilter::from_config
+            http "openai_responses_request" => crate::openai::OpenaiResponsesRequestFilter::from_config
+        );
+        praxis_filter::register_filters!(
+            @register registry,
+            http "openai_responses_store" => crate::openai::ResponseStoreFilter::from_config
         );
         praxis_filter::register_filters!(
             @register registry,
@@ -219,7 +224,7 @@ pub(crate) mod test_utils {
         );
         praxis_filter::register_filters!(
             @register registry,
-            http "openai_stream_events" => crate::openai::OpenaiStreamEventsFilter::from_config
+            http "openai_stream_events" => crate::openai::StreamEventsFilter::from_config
         );
         registry
     }

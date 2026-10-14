@@ -3595,7 +3595,7 @@ async fn patch_on_conversation_path_continues() {
 // -----------------------------------------------------------------------------
 
 fn set_append_back_metadata(ctx: &mut HttpFilterContext<'_>) {
-    ctx.set_metadata("openai_responses_format.has_conversation", "true");
+    ctx.set_metadata("openai_responses_request.has_conversation", "true");
     ctx.set_metadata("responses.conversation_id", "conv_test_123");
 }
 
@@ -3639,10 +3639,10 @@ async fn streaming_terminal_appends_once_without_buffering_sse() {
     let mut ctx = conv_ctx(&store, &req);
     ctx.current_filter_id = Some(0);
     ctx.response_body_mode = filter.response_body_mode();
-    ctx.set_metadata("openai_responses_format.has_conversation", "true");
+    ctx.set_metadata("openai_responses_request.has_conversation", "true");
     ctx.set_metadata("responses.conversation_id", &conv_id);
-    ctx.set_metadata("openai_responses_format.stream", "true");
-    ctx.set_metadata("openai_responses_format.store", "false");
+    ctx.set_metadata("openai_responses_request.stream", "true");
+    ctx.set_metadata("openai_responses_request.store", "false");
     ctx.extensions.insert(ResponsesState {
         input: vec![serde_json::json!({"role":"user","content":"streamed question"})],
         response_object: serde_json::json!({
@@ -3697,9 +3697,9 @@ async fn local_stream_completion_appends_before_eos() {
     let req = make_request(Method::POST, "/v1/responses");
     let mut ctx = conv_ctx(&store, &req);
     ctx.current_filter_id = Some(0);
-    ctx.set_metadata("openai_responses_format.has_conversation", "true");
+    ctx.set_metadata("openai_responses_request.has_conversation", "true");
     ctx.set_metadata("responses.conversation_id", &conv_id);
-    ctx.set_metadata("openai_responses_format.stream", "true");
+    ctx.set_metadata("openai_responses_request.stream", "true");
     ctx.extensions.insert(ResponsesState {
         input: vec![serde_json::json!({"type":"message","role":"user","content":"local input"})],
         response_object: serde_json::json!({
@@ -3753,9 +3753,9 @@ async fn stream_without_completed_terminal_does_not_append_conversation_items() 
         let req = make_request(Method::POST, "/v1/responses");
         let mut ctx = conv_ctx(&store, &req);
         ctx.current_filter_id = Some(0);
-        ctx.set_metadata("openai_responses_format.has_conversation", "true");
+        ctx.set_metadata("openai_responses_request.has_conversation", "true");
         ctx.set_metadata("responses.conversation_id", &conv_id);
-        ctx.set_metadata("openai_responses_format.stream", "true");
+        ctx.set_metadata("openai_responses_request.stream", "true");
         ctx.extensions.insert(ResponsesState {
             input: vec![serde_json::json!({"type":"message","role":"user","content":"unfinished"})],
             response_object: serde_json::json!({"status":status,"output":[]}),
@@ -3795,7 +3795,7 @@ async fn on_response_not_armed_when_background() {
     let mut ctx = conv_ctx(&store, &req);
     ctx.current_filter_id = Some(0);
     set_append_back_metadata(&mut ctx);
-    ctx.set_metadata("openai_responses_format.background", "true");
+    ctx.set_metadata("openai_responses_request.background", "true");
 
     let action = filter.on_response(&mut ctx).await.unwrap();
     assert!(matches!(action, FilterAction::Continue));
@@ -4007,7 +4007,7 @@ async fn on_response_body_appends_completed_response() {
     let req = make_request(Method::POST, "/v1/responses");
     let mut ctx = conv_ctx(&store, &req);
     ctx.current_filter_id = Some(0);
-    ctx.set_metadata("openai_responses_format.has_conversation", "true");
+    ctx.set_metadata("openai_responses_request.has_conversation", "true");
     ctx.set_metadata("responses.conversation_id", &conv_id);
 
     let input_items = vec![serde_json::json!({
@@ -4086,7 +4086,7 @@ async fn append_back_cannot_write_another_owners_conversation() {
     let mut ctx = conv_ctx(&store, &req);
     ctx.current_filter_id = Some(0);
     ctx.extensions.insert(other_subject);
-    ctx.set_metadata("openai_responses_format.has_conversation", "true");
+    ctx.set_metadata("openai_responses_request.has_conversation", "true");
     ctx.set_metadata("responses.conversation_id", &conversation_id);
     ctx.extensions.insert(ResponsesState {
         input: vec![serde_json::json!({"type": "message", "role": "user", "content": "intruder"})],
@@ -4177,7 +4177,7 @@ async fn streaming_terminal_propagates_append_failure_before_release() {
     let mut ctx = conv_ctx(&store, &req);
     ctx.current_filter_id = Some(0);
     set_append_back_metadata(&mut ctx);
-    ctx.set_metadata("openai_responses_format.stream", "true");
+    ctx.set_metadata("openai_responses_request.stream", "true");
     ctx.extensions.insert(ResponsesState {
         input: vec![serde_json::json!({"type":"message","role":"user","content":"hello"})],
         response_object: serde_json::json!({"status":"completed","output":[]}),
@@ -4330,9 +4330,55 @@ fn conformance_conversations_generated_schema_check_rejects_wrong_discriminator(
 }
 
 #[tokio::test]
+async fn forwarding_adapter_reads_legacy_prefix_and_item_rows() {
+    let inner = Arc::new(
+        SqliteResponseStore::new(
+            "sqlite::memory:",
+            "test_responses",
+            "test_conversations",
+            Some("test_items"),
+            None,
+            None,
+        )
+        .await
+        .expect("store"),
+    );
+    let owner = crate::test_utils::test_owner(DEFAULT_TENANT_ID);
+    let legacy = serde_json::json!({"role": "user", "content": "legacy"});
+    let store = AppendDuringUpdateStore::new(inner, race_item("unused"));
+    store
+        .upsert_conversation(&ConversationRecord {
+            conversation_id: "conv_race".to_owned(),
+            owner: owner.clone(),
+            created_at: 1,
+            metadata: serde_json::json!({}),
+            messages: serde_json::json!([legacy]),
+        })
+        .await
+        .expect("legacy conversation");
+    let new = race_item("new");
+    store
+        .create_items_and_sync_messages(&owner, "conv_race", std::slice::from_ref(&new))
+        .await
+        .expect("append through adapter");
+    assert_eq!(
+        store.conversation_history(&owner, "conv_race").await.expect("history"),
+        Some(vec![legacy, new.item_data]),
+        "the adapter must forward the complete snapshot, not read the retired cache"
+    );
+    assert_eq!(
+        store
+            .conversation_history(&crate::test_utils::test_owner("another-owner"), "conv_race")
+            .await
+            .expect("other owner"),
+        None,
+        "forwarding preserves owner isolation"
+    );
+}
+
+#[tokio::test]
 async fn update_conversation_metadata_does_not_clobber_concurrent_append() {
-    // #1144: a metadata update must not overwrite conversation history that a
-    // concurrent item append rebuilt between the handler's read and its write.
+    // #1144: metadata writes must not overwrite a concurrent item append.
     let inner = Arc::new(
         SqliteResponseStore::new(
             "sqlite::memory:",
@@ -4389,8 +4435,8 @@ async fn update_conversation_metadata_does_not_clobber_concurrent_append() {
         "response should carry the new metadata"
     );
 
-    // The concurrent append must survive: the cache retains BOTH items and the
-    // metadata is persisted. The old whole-record round-trip clobbered item_b.
+    // The old whole-record round-trip clobbered item_b. History now lives in
+    // item rows, independent of metadata and the retired cache.
     let fetched = ConversationItemStore::get_conversation(
         inner.as_ref(),
         &crate::test_utils::test_owner(DEFAULT_TENANT_ID),
@@ -4399,8 +4445,13 @@ async fn update_conversation_metadata_does_not_clobber_concurrent_append() {
     .await
     .expect("get should succeed")
     .expect("conversation should exist");
+    let history = inner
+        .conversation_history(&crate::test_utils::test_owner(DEFAULT_TENANT_ID), "conv_race")
+        .await
+        .expect("history read should succeed")
+        .expect("conversation should exist");
     assert_eq!(
-        cache_item_ids(&fetched.messages),
+        cache_item_ids(&Value::Array(history)),
         vec!["item_a".to_owned(), "item_b".to_owned()],
         "metadata update must not clobber the concurrently appended item (#1144)"
     );
@@ -4725,6 +4776,14 @@ struct FailingItemStore {
     reason = "test double still uses the former tenant-oriented names"
 )]
 impl ConversationItemStore for FailingItemStore {
+    async fn conversation_history(
+        &self,
+        _owner: &crate::StateOwner,
+        _conversation_id: &str,
+    ) -> Result<Option<Vec<Value>>, StoreError> {
+        Ok(self.conversation_exists.then(Vec::new))
+    }
+
     async fn upsert_conversation(&self, _record: &ConversationRecord) -> Result<(), StoreError> {
         Ok(())
     }
@@ -5007,6 +5066,14 @@ impl AppendDuringUpdateStore {
     reason = "test double still uses the former tenant-oriented names"
 )]
 impl ConversationItemStore for AppendDuringUpdateStore {
+    async fn conversation_history(
+        &self,
+        owner: &crate::StateOwner,
+        conversation_id: &str,
+    ) -> Result<Option<Vec<Value>>, StoreError> {
+        self.inner.conversation_history(owner, conversation_id).await
+    }
+
     async fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), StoreError> {
         self.inner.upsert_conversation(record).await
     }

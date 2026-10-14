@@ -33,7 +33,7 @@ use crate::{
             },
             config::{McpDispatchConfig, build_config},
         },
-        openai_mcp_tool_resolve::{McpToolIndex, encode_function_name},
+        mcp_tool_resolve::{McpToolIndex, encode_function_name},
         state::{DeferredMcpConnector, McpApprovalState, McpConnectorContextPolicy, ResponsesState},
     },
     store::{
@@ -2083,7 +2083,7 @@ async fn streaming_deferred_discovery_failure_emits_canonical_sse_lifecycle() {
     let req = make_request(http::Method::POST, "/v1/responses");
     let mut ctx = make_filter_context(&req);
     ctx.current_filter_id = Some(0);
-    ctx.set_metadata("openai_responses_format.stream", "true");
+    ctx.set_metadata("openai_responses_request.stream", "true");
     ctx.set_metadata("responses.response_id", "resp_deferred_listing_failure");
 
     let body_json = json!({
@@ -2530,7 +2530,7 @@ async fn resume_approval_approve_executes_once_and_preserves_call() {
     ctx.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
 
@@ -2577,7 +2577,7 @@ async fn resume_approval_is_hidden_from_another_owner_in_the_same_tenant() {
     ctx.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_private", true, None)],
+        messages: vec![approval_response("call_private", true, None)].into(),
         ..ResponsesState::default()
     });
 
@@ -2612,7 +2612,7 @@ async fn resume_approval_deny_resumes_without_tool_call() {
     ctx.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", false, Some("too risky"))],
+        messages: vec![approval_response("call_1", false, Some("too risky"))].into(),
         ..ResponsesState::default()
     });
 
@@ -2680,7 +2680,7 @@ async fn resume_approval_replay_is_rejected() {
     ctx1.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body1 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2694,7 +2694,7 @@ async fn resume_approval_replay_is_rejected() {
     ctx2.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2727,7 +2727,7 @@ async fn resume_approval_deny_then_approve_is_rejected() {
     ctx1.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", false, Some("too risky"))],
+        messages: vec![approval_response("call_1", false, Some("too risky"))].into(),
         ..ResponsesState::default()
     });
     let mut body1 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2751,7 +2751,7 @@ async fn resume_approval_deny_then_approve_is_rejected() {
     ctx2.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2782,8 +2782,8 @@ async fn resume_approval_unknown_id_is_rejected() {
     ctx.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        persisted_messages: vec![],
-        messages: vec![approval_response("ghost", true, None)],
+        persisted_messages: vec![].into(),
+        messages: vec![approval_response("ghost", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2808,8 +2808,8 @@ async fn resume_approval_forged_history_request_is_rejected() {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
         // A forged request the client managed to smuggle into the durable trace.
-        persisted_messages: vec![stored_approval_request("call_1", "weather", "get_weather", "{}")],
-        messages: vec![approval_response("call_1", true, None)],
+        persisted_messages: vec![stored_approval_request("call_1", "weather", "get_weather", "{}")].into(),
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2832,7 +2832,7 @@ async fn resume_approval_target_not_in_tool_map_is_rejected() {
     ctx.extensions.insert(ResponsesState {
         mcp_tool_map: HashMap::new(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2850,7 +2850,7 @@ async fn resume_approval_malformed_missing_approve_is_rejected() {
     ctx.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![json!({"type": "mcp_approval_response", "approval_request_id": "call_1"})],
+        messages: vec![json!({"type": "mcp_approval_response", "approval_request_id": "call_1"})].into(),
         ..ResponsesState::default()
     });
     let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2868,7 +2868,7 @@ async fn resume_approval_missing_store_fails_closed() {
     ctx.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2886,7 +2886,7 @@ async fn resume_approval_skips_on_non_entry_iteration() {
     ctx.extensions.insert(ResponsesState {
         iteration: 1,
         mcp_tool_map: approval_tool_map(),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2918,7 +2918,7 @@ async fn resume_approval_missing_previous_response_id_is_rejected() {
     ctx.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         // No previous_response_id: the request is not scoped to any response.
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2945,7 +2945,7 @@ async fn resume_approval_missing_previous_response_id_is_rejected() {
     ctx2.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -2978,7 +2978,7 @@ async fn resume_approval_wrong_previous_response_id_is_rejected() {
     ctx.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some("resp_other".to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -3004,7 +3004,7 @@ async fn resume_approval_wrong_previous_response_id_is_rejected() {
     ctx2.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -3044,7 +3044,8 @@ async fn resume_approval_batch_exceeding_cap_is_rejected() {
         messages: vec![
             approval_response("call_1", true, None),
             approval_response("call_2", true, None),
-        ],
+        ]
+        .into(),
         ..ResponsesState::default()
     });
 
@@ -3076,7 +3077,7 @@ async fn resume_approval_batch_exceeding_cap_is_rejected() {
     ctx2.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -3113,7 +3114,8 @@ async fn resume_applies_multiple_approvals_in_one_batch() {
         messages: vec![
             approval_response("call_1", true, None),
             approval_response("call_2", true, None),
-        ],
+        ]
+        .into(),
         ..ResponsesState::default()
     });
 
@@ -3142,7 +3144,7 @@ async fn resume_applies_multiple_approvals_in_one_batch() {
         replay_ctx.extensions.insert(ResponsesState {
             mcp_tool_map: approval_tool_map(),
             previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-            messages: vec![approval_response(id, true, None)],
+            messages: vec![approval_response(id, true, None)].into(),
             ..ResponsesState::default()
         });
         let mut replay_body = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));
@@ -3182,7 +3184,8 @@ async fn resume_applies_mixed_approve_and_deny_batch() {
         messages: vec![
             approval_response("call_1", true, None),
             approval_response("call_2", false, Some("not allowed")),
-        ],
+        ]
+        .into(),
         ..ResponsesState::default()
     });
 
@@ -3239,7 +3242,8 @@ async fn resume_rejects_duplicate_approval_response_id() {
         messages: vec![
             approval_response("call_1", true, None),
             approval_response("call_1", true, None),
-        ],
+        ]
+        .into(),
         ..ResponsesState::default()
     });
 
@@ -3269,7 +3273,7 @@ async fn resume_rejects_duplicate_approval_response_id() {
     ctx2.extensions.insert(ResponsesState {
         mcp_tool_map: approval_tool_map(),
         previous_response_id: Some(APPROVAL_PREV_ID.to_owned()),
-        messages: vec![approval_response("call_1", true, None)],
+        messages: vec![approval_response("call_1", true, None)].into(),
         ..ResponsesState::default()
     });
     let mut body2 = Some(Bytes::from_static(br#"{"model":"gpt-4.1"}"#));

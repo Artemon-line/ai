@@ -4,8 +4,32 @@
 //! Request-head classification of supported AI operations.
 //!
 //! The filter identifies an operation from the HTTP method, normalized path,
-//! and protocol headers alone. No request body is read or buffered, so the
-//! result is available before any body-handling decision is made.
+//! and protocol headers alone. The request body is never read, buffered, or
+//! modified, so the result is available before any body-handling decision is
+//! made.
+//!
+//! The same head-only classification runs from two hooks. The request-header
+//! hook is the usual path. The request-body hook exists only so the match is
+//! published before a downstream filter's buffered body pre-read: core runs that
+//! pre-read ahead of the header phase, so a consumer that parses the body (for
+//! example `openai_responses_request` under [`BodyMode::StreamBuffer`]) would
+//! otherwise run before this classifier and find no match. Ordered ahead of that
+//! consumer with [`BodyAccess::ReadOnly`] and [`BodyMode::Stream`], this filter's
+//! body hook inspects only the head, publishes once, and returns
+//! [`FilterAction::Continue`] without touching the body bytes. A completion
+//! marker keeps classification to a single pass across both hooks and every
+//! chunk, including when no operation matched. Enrolling in the body phase does
+//! mean the body hook is invoked once per streamed chunk; the marker makes every
+//! call after the first a cheap extension lookup, so the cost is a map read per
+//! chunk, not reclassification.
+//!
+//! This ordering guarantees classification before a downstream filter's body
+//! pre-read, not before all of core's pre-read work. Core enforces the
+//! configured request body size limit while reading, so an oversized body can be
+//! rejected with `413 Payload Too Large` before the first body hook runs and
+//! thus before this filter classifies. That is the weaker guarantee; the
+//! stronger one — classification ahead of every pre-read step — needs the core
+//! hook point tracked in praxis#1142 and is not provided here.
 //!
 //! Every protocol-owned registry is consulted through the shared matcher, so
 //! OpenAI and Anthropic operations are recognized by one filter. The classifier
@@ -34,8 +58,11 @@ mod config;
 mod tests;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use praxis_filter::{
-    ErrorResponseFormatterHandle, FilterAction, FilterError, HttpFilter, HttpFilterContext, parse_filter_config,
+    ErrorResponseFormatterHandle, FilterAction, FilterError, HttpFilter, HttpFilterContext,
+    body::{BodyAccess, BodyMode},
+    parse_filter_config,
 };
 use tracing::debug;
 
@@ -44,7 +71,8 @@ use crate::{
     anthropic::routes as anthropic_messages_routes,
     openai::{
         chat_completions::routes as chat_completions_routes, conversations::routes as conversations_routes,
-        responses::routes as responses_routes,
+        files::routes as files_routes, responses::routes as responses_routes,
+        vector_stores::routes as vector_stores_routes,
     },
     operation::{ApplicationProtocol, OperationEntry, PathParameterOffsets, RequestBody, RouteParams, Transport},
 };
@@ -99,6 +127,48 @@ impl AiOperationFilter {
             ctx.request_headers_to_remove.push(name.clone());
         }
     }
+
+    /// Classify the request head and publish the result exactly once.
+    ///
+    /// Shared by the request-header and request-body hooks so the two cannot
+    /// diverge. The completion marker makes the step idempotent: whichever hook
+    /// runs first does the work, and later calls — the other hook, or a repeated
+    /// body chunk — return without reclassifying. The marker is set even when no
+    /// operation matched, so an unmatched request is classified once rather than
+    /// on every chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] when publishing a matched operation fails.
+    fn classify_and_publish(&self, ctx: &mut HttpFilterContext<'_>) -> Result<(), FilterError> {
+        if ctx.extensions.get::<OperationClassified>().is_some() {
+            return Ok(());
+        }
+
+        let method = ctx.request.method.as_str();
+        let transport = request_transport(method, &ctx.request.headers);
+        let path = ctx.request.uri.path();
+
+        if let Some(matched) = classify(method, path, transport) {
+            debug!(
+                method,
+                path,
+                application_protocol = matched.application_protocol.as_str(),
+                operation_id = matched.operation_id,
+                transport = matched.transport.as_str(),
+                "classified AI operation"
+            );
+            publish_match(ctx, matched)?;
+            install_error_formatter(ctx, matched.application_protocol);
+            self.set_routing_headers(ctx, matched);
+        } else {
+            debug!(method, path, transport = transport.as_str(), "no AI operation matched");
+            self.remove_routing_headers(ctx);
+        }
+
+        ctx.extensions.insert(OperationClassified);
+        Ok(())
+    }
 }
 
 /// One operation classified from a request head.
@@ -126,6 +196,16 @@ pub struct AiOperationMatch {
     pub path_parameters: PathParameterOffsets,
 }
 
+/// Marks that this filter has run its one classify-and-publish pass.
+///
+/// Classification reads only the request head, which both hooks can see, so the
+/// work must happen once however the pipeline schedules them. This zero-sized
+/// extension records that it has, so the request-header hook, the request-body
+/// hook, and every repeated body chunk resolve to a single pass — whether or not
+/// an operation matched.
+#[derive(Clone, Copy)]
+struct OperationClassified;
+
 #[async_trait]
 impl HttpFilter for AiOperationFilter {
     fn name(&self) -> &'static str {
@@ -133,29 +213,46 @@ impl HttpFilter for AiOperationFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let method = ctx.request.method.as_str();
-        let transport = request_transport(method, &ctx.request.headers);
-        let path = ctx.request.uri.path();
+        self.classify_and_publish(ctx)?;
+        Ok(FilterAction::Continue)
+    }
 
-        let Some(matched) = classify(method, path, transport) else {
-            debug!(method, path, transport = transport.as_str(), "no AI operation matched");
-            self.remove_routing_headers(ctx);
-            return Ok(FilterAction::Continue);
-        };
+    /// Read-only: the head carries the whole classification, so the body is only
+    /// observed, never buffered or modified. Declaring access enrolls the filter
+    /// in the body phase so its hook runs there.
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
 
-        debug!(
-            method,
-            path,
-            application_protocol = matched.application_protocol.as_str(),
-            operation_id = matched.operation_id,
-            transport = matched.transport.as_str(),
-            "classified AI operation"
-        );
+    /// Streamed: chunks pass through untouched. The filter never needs the full
+    /// body, so it must not upgrade the pipeline-wide delivery mode to
+    /// [`BodyMode::StreamBuffer`].
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::Stream
+    }
 
-        publish_match(ctx, matched)?;
-        install_error_formatter(ctx, matched.application_protocol);
-        self.set_routing_headers(ctx, matched);
+    /// The body hook classifies from the request head, so the original method,
+    /// path, and headers must be preserved into the body phase.
+    fn needs_request_context(&self) -> bool {
+        true
+    }
 
+    /// Publish the match from the body phase for a downstream buffered pre-read.
+    ///
+    /// A consumer that reads the body with [`BodyMode::StreamBuffer`] triggers a
+    /// pre-read that core runs before the header phase. Ordered ahead of that
+    /// consumer, this hook publishes the match so the consumer sees it. The body
+    /// is never read, buffered, or altered, and the completion marker keeps this
+    /// to one classification across the pre-read, the header phase, and every
+    /// chunk.
+    async fn on_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        let _ = (body, end_of_stream);
+        self.classify_and_publish(ctx)?;
         Ok(FilterAction::Continue)
     }
 }
@@ -226,13 +323,16 @@ fn publish_match(ctx: &mut HttpFilterContext<'_>, matched: AiOperationMatch) -> 
 /// the only protocol reachable over a `WebSocket` upgrade.
 ///
 /// Registered path spaces do not overlap — OpenAI serves `/v1/responses`,
-/// `/v1/conversations`, and `/v1/chat/completions` while Anthropic serves
-/// `/v1/messages` — so at most one registry can match one head, and the order
-/// below does not decide between protocols.
+/// `/v1/conversations`, `/v1/chat/completions`, `/v1/files`, and
+/// `/v1/vector_stores` while Anthropic serves `/v1/messages` — so at most one
+/// registry can match one head, and the order below does not decide between
+/// protocols.
 pub(crate) fn classify(method: &str, path: &str, transport: Transport) -> Option<AiOperationMatch> {
     let http_match = (transport == Transport::Http).then(|| {
         classify_conversation(method, path)
             .or_else(|| classify_chat_completions(method, path))
+            .or_else(|| classify_files(method, path))
+            .or_else(|| classify_vector_stores(method, path))
             .or_else(|| classify_anthropic_messages(method, path))
     });
     http_match
@@ -253,6 +353,16 @@ fn classify_chat_completions(method: &str, path: &str) -> Option<AiOperationMatc
 /// Match one Anthropic Messages operation.
 fn classify_anthropic_messages(method: &str, path: &str) -> Option<AiOperationMatch> {
     anthropic_messages_routes::match_route(method, path).and_then(|route| classified(route.spec, route.params, path))
+}
+
+/// Match one Files operation.
+fn classify_files(method: &str, path: &str) -> Option<AiOperationMatch> {
+    files_routes::match_route(method, path).and_then(|route| classified(route.spec, route.params, path))
+}
+
+/// Match one Vector Stores operation.
+fn classify_vector_stores(method: &str, path: &str) -> Option<AiOperationMatch> {
+    vector_stores_routes::match_route(method, path).and_then(|route| classified(route.spec, route.params, path))
 }
 
 /// Match one Responses operation.
