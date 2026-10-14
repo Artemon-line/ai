@@ -124,6 +124,14 @@ def requires_vllm_compat(test):
     )(test)
 
 
+def requires_simulator(test):
+    """Mark a deterministic simulator-only test and skip it in live mode."""
+    return pytest.mark.skipif(
+        VLLM_TEST_BACKEND != "simulator",
+        reason="test requires deterministic simulator behavior",
+    )(test)
+
+
 def qualification_profile(name):
     """Override GPU report attribution for a test with dynamic fixtures."""
     def decorate(test):
@@ -1272,6 +1280,7 @@ class SimulatorBackendHandler(BaseHTTPRequestHandler):
     """
 
     recorded_requests: ClassVar[list[tuple[str, dict[str, Any]]]] = []
+    web_search_queries: ClassVar[list[str]] = []
 
     def log_message(self, fmt, *args):
         pass
@@ -1347,10 +1356,15 @@ class SimulatorBackendHandler(BaseHTTPRequestHandler):
             }
             finish_reason = "stop"
         else:
-            query = (
-                "latest Praxis Proxy release"
+            queries = (
+                SimulatorBackendHandler.web_search_queries
                 if tool_name == "web_search"
-                else "Praxis marker"
+                and SimulatorBackendHandler.web_search_queries
+                else [
+                    "latest Praxis Proxy release"
+                    if tool_name == "web_search"
+                    else "Praxis marker"
+                ]
             )
             message = {
                 "role": "assistant",
@@ -1361,9 +1375,13 @@ class SimulatorBackendHandler(BaseHTTPRequestHandler):
                         "type": "function",
                         "function": {
                             "name": tool_name,
-                            "arguments": json.dumps({"query": query}),
+                            "arguments": json.dumps(
+                                {"queries": queries}
+                                if tool_name == "web_search"
+                                else {"query": queries[0]}
+                            ),
                         },
-                    }
+                    },
                 ],
             }
             finish_reason = "tool_calls"
@@ -1422,24 +1440,44 @@ def _assert_simulator_auto_tool_round(
             65_536,
         ),
     }[tool_name]
+    if tool_name == "web_search":
+        parameters = {
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": max_length,
+                    },
+                    "minItems": 1,
+                    "maxItems": 64,
+                }
+            },
+            "required": ["queries"],
+            "additionalProperties": False,
+        }
+    else:
+        parameters = {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": max_length,
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        }
     expected_tools = [
         {
             "type": "function",
             "function": {
                 "name": tool_name,
                 "description": description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": max_length,
-                        }
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
+                "parameters": parameters,
                 "strict": True,
             },
         }
@@ -6814,6 +6852,68 @@ class TestAgenticLoopVLLM:
                 recorded_request_count,
                 tool_name="web_search",
             )
+
+    @requires_simulator
+    def test_web_search_multi_query_round_trip_preserves_queries(
+        self,
+        translated_agentic_client,
+    ):
+        try:
+            request_count = len(BraveSearchHandler.request_paths)
+            SimulatorBackendHandler.web_search_queries = [
+                "first Praxis Proxy release",
+                "second Praxis Proxy release",
+            ]
+            response = translated_agentic_client.responses.create(
+                model=VLLM_MODEL,
+                input=(
+                    "You MUST use web search for both questions, then report "
+                    "each result title and URL. /no_think"
+                ),
+                tools=[
+                    {
+                        "type": "web_search",
+                        "search_context_size": "low",
+                    }
+                ],
+                tool_choice=(
+                    "auto"
+                    if VLLM_TEST_BACKEND == "simulator"
+                    else {"type": "web_search"}
+                ),
+                include=["web_search_call.action.sources"],
+                store=False,
+                max_output_tokens=2048,
+            )
+
+            web_search_calls = [
+                item for item in response.output if item.type == "web_search_call"
+            ]
+            assert len(web_search_calls) == 1, response.output
+            assert web_search_calls[0].status == "completed"
+            assert len(BraveSearchHandler.request_paths) == request_count + 2
+
+            completed_call = web_search_calls[0].model_dump()
+            assert completed_call.get("action", {}).get("queries") == [
+                "first Praxis Proxy release",
+                "second Praxis Proxy release",
+            ]
+            sources = completed_call.get("action", {}).get("sources", [])
+            assert any(
+                source.get("url") == "https://example.com/mock"
+                for source in sources
+            )
+
+            messages = [
+                item.model_dump()
+                for item in response.output
+                if item.type == "message"
+            ]
+            assert messages
+            assert "Mock Search Result" in json.dumps(messages)
+        finally:
+            BraveSearchHandler.reset()
+            SimulatorBackendHandler.web_search_queries = []
 
     @requires_real_inference
     def test_live_tavily_web_search_returns_real_sources(
