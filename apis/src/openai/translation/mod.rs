@@ -677,14 +677,14 @@ mod tests {
             assert_eq!(mapped["tools"][0]["function"]["name"], "web_search");
             assert_eq!(
                 mapped["tools"][0]["function"]["parameters"]["required"],
-                json!(["query"])
+                json!(["queries"])
             );
             assert_eq!(
-                mapped["tools"][0]["function"]["parameters"]["properties"]["query"]["minLength"],
+                mapped["tools"][0]["function"]["parameters"]["properties"]["queries"]["items"]["minLength"],
                 1
             );
             assert_eq!(
-                mapped["tools"][0]["function"]["parameters"]["properties"]["query"]["maxLength"],
+                mapped["tools"][0]["function"]["parameters"]["properties"]["queries"]["items"]["maxLength"],
                 4096
             );
             assert_eq!(
@@ -1544,7 +1544,7 @@ mod tests {
                 "id": "call_search_1",
                 "type": "web_search_call",
                 "status": "completed",
-                "action": {"type": "search", "query": "Praxis Proxy"}
+                "action": {"type": "search", "queries": ["Praxis Proxy"]}
             })
         );
         assert_eq!(mapped["tools"], request["tools"]);
