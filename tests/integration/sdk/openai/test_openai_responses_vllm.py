@@ -1389,18 +1389,17 @@ class SimulatorBackendHandler(BaseHTTPRequestHandler):
                 "content": None,
                 "tool_calls": [
                     {
-                        "id": (
-                            f"call_simulator_{tool_name}_{index}"
-                            if len(queries) > 1
-                            else f"call_simulator_{tool_name}"
-                        ),
+                        "id": f"call_simulator_{tool_name}",
                         "type": "function",
                         "function": {
                             "name": tool_name,
-                            "arguments": json.dumps({"query": query}),
+                            "arguments": json.dumps(
+                                {"queries": queries}
+                                if tool_name == "web_search"
+                                else {"query": queries[0]}
+                            ),
                         },
-                    }
-                    for index, query in enumerate(queries)
+                    },
                 ],
             }
             finish_reason = "tool_calls"
@@ -1459,24 +1458,44 @@ def _assert_simulator_auto_tool_round(
             65_536,
         ),
     }[tool_name]
+    if tool_name == "web_search":
+        parameters = {
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": max_length,
+                    },
+                    "minItems": 1,
+                    "maxItems": 64,
+                }
+            },
+            "required": ["queries"],
+            "additionalProperties": False,
+        }
+    else:
+        parameters = {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": max_length,
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        }
     expected_tools = [
         {
             "type": "function",
             "function": {
                 "name": tool_name,
                 "description": description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": max_length,
-                        }
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
+                "parameters": parameters,
                 "strict": True,
             },
         }
@@ -6926,15 +6945,16 @@ class TestAgenticLoopVLLM:
             web_search_calls = [
                 item for item in response.output if item.type == "web_search_call"
             ]
-            assert len(web_search_calls) == 2, response.output
-            assert [call.status for call in web_search_calls] == [
-                "completed",
-                "failed",
-            ]
+            assert len(web_search_calls) == 1, response.output
+            assert web_search_calls[0].status == "failed"
             assert len(BraveSearchHandler.request_paths) == request_count + 2
 
-            completed_call = web_search_calls[0].model_dump()
-            sources = completed_call.get("action", {}).get("sources", [])
+            failed_call = web_search_calls[0].model_dump()
+            assert failed_call.get("action", {}).get("queries") == [
+                "first Praxis Proxy release",
+                "second Praxis Proxy release",
+            ]
+            sources = failed_call.get("action", {}).get("sources", [])
             assert any(
                 source.get("url") == "https://example.com/mock"
                 for source in sources
