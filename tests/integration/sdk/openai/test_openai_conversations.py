@@ -252,6 +252,26 @@ class _ChunkedResponsesBackend(http.server.BaseHTTPRequestHandler):
         return
 
 
+class _MalformedResponsesBackend(http.server.BaseHTTPRequestHandler):
+    """Return a 200 application/json body that is not valid JSON."""
+
+    protocol_version = "HTTP/1.1"
+    response_body = b"not-json"
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        content_length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(content_length)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(self.response_body)))
+        self.end_headers()
+        self.wfile.write(self.response_body)
+        self.wfile.flush()
+
+    def log_message(self, _format, *_args):
+        return
+
+
 class _RecordingResponsesBackend(http.server.BaseHTTPRequestHandler):
     """Return a Responses object and record the request the proxy forwarded."""
 
@@ -389,6 +409,60 @@ def _write_chunked_response_config(port: int, backend_port: int, db_path: str) -
                     conversations_filter,
                     {"filter": "openai_responses_request", "initialize_state": False},
                     response_store_filter,
+                    {
+                        "filter": "router",
+                        "routes": [
+                            {"path": "/v1/responses", "cluster": "responses-backend"}
+                        ],
+                    },
+                    {
+                        "filter": "load_balancer",
+                        "clusters": [
+                            {
+                                "name": "responses-backend",
+                                "endpoints": [f"127.0.0.1:{backend_port}"],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
+        "insecure_options": {"allow_private_endpoints": True},
+    }
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    with os.fdopen(fd, "w") as f:
+        json.dump(config, f)
+    return path
+
+
+def _write_append_back_config(port: int, backend_port: int, db_path: str) -> str:
+    """Write a chain that arms conversation append-back against a backend.
+
+    Unlike the chunked-response chain, `openai_responses_request` keeps its
+    default `initialize_state`, so it publishes `responses.conversation_id` and
+    captures the append owner — the two facts `should_append_back` requires.
+    """
+    conversations_filter, _ = _chunked_response_store_filters(db_path, port)
+    config = {
+        "listeners": [
+            {
+                "name": "append-back-test",
+                "address": f"127.0.0.1:{port}",
+                "filter_chains": ["append-back-pipeline"],
+            }
+        ],
+        "filter_chains": [
+            {
+                "name": "append-back-pipeline",
+                "filters": [
+                    {"filter": "ai_operation"},
+                    {
+                        "filter": "state_owner",
+                        "mode": "trusted_owner",
+                        "header": OWNER_HEADER,
+                    },
+                    conversations_filter,
+                    {"filter": "openai_responses_request"},
                     {
                         "filter": "router",
                         "routes": [
@@ -641,6 +715,53 @@ def chunked_response_client(chunked_response_store):
     return client
 
 
+@pytest.fixture
+def malformed_response_client():
+    """Start an append-back proxy whose backend returns a malformed 200 body."""
+    backend = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _MalformedResponsesBackend
+    )
+    backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
+    backend_thread.start()
+
+    with tempfile.TemporaryDirectory() as db_dir:
+        proxy_port = _free_port()
+        readiness_port = _free_port()
+        db_path = os.path.join(db_dir, "append_back.db")
+        config_path = _write_append_back_config(
+            proxy_port, backend.server_port, db_path
+        )
+        binary = _find_binary()
+        proc = subprocess.Popen(
+            [binary, "-c", config_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_proxy_env(readiness_port),
+        )
+        try:
+            _wait_for_proxy(proxy_port, proc)
+            _wait_for_store_ready(readiness_port, proc)
+            yield OpenAI(
+                api_key="not-needed",
+                base_url=f"http://127.0.0.1:{proxy_port}/v1",
+                default_headers={OWNER_HEADER: _owner_assertion("alice")},
+                max_retries=0,
+                timeout=10.0,
+            )
+        finally:
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            os.unlink(config_path)
+            backend.shutdown()
+            backend.server_close()
+            backend_thread.join(timeout=5)
+
+
 @pytest.fixture(scope="session")
 def other_owner_client(praxis_proxy):
     """Return a same-tenant client with a distinct immutable subject."""
@@ -857,6 +978,58 @@ class TestOpenAIConversations:
                 "type": "server_error",
             }
         }, "a DELETE store failure must return the standard server_error envelope"
+
+    def test_malformed_response_body_never_releases_a_lost_turn(
+        self, malformed_response_client
+    ):
+        """A malformed 2xx body must fail closed instead of silently dropping the turn.
+
+        The backend returns `200 application/json` with an unparseable body, so
+        append-back cannot recover the turn. Releasing that body would report
+        success to the client while the conversation history is lost (#950);
+        under the default `failure_mode: closed` the proxy withholds it instead.
+        """
+        conversation = malformed_response_client.conversations.create()
+
+        # An `APIError` means the proxy withheld the turn. A released malformed
+        # body instead surfaces as a bare `JSONDecodeError` from the SDK's own
+        # parse — the client believing it got a successful response.
+        with pytest.raises(openai.APIError):
+            malformed_response_client.responses.create(
+                model="gpt-4.1",
+                input="Hello",
+                extra_body={"conversation": conversation.id},
+            )
+
+        # The SDK raises for both a withheld 5xx and an unparseable 200, so the
+        # status code is asserted over raw HTTP. Pingora may also reset the
+        # connection rather than emit a status once bytes are committed.
+        base_url = str(malformed_response_client.base_url).rstrip("/")
+        try:
+            raw = httpx.post(
+                f"{base_url}/responses",
+                json={
+                    "model": "gpt-4.1",
+                    "input": "Hello",
+                    "conversation": conversation.id,
+                },
+                headers={OWNER_HEADER: _owner_assertion("alice")},
+                timeout=10.0,
+            )
+        except httpx.HTTPError:
+            pass  # A reset connection is the committed-bytes form of fail-closed.
+        else:
+            assert raw.status_code >= 500, (
+                "a malformed upstream body must not be released as a success: "
+                f"got {raw.status_code} with body {raw.text!r}"
+            )
+
+        page = malformed_response_client.conversations.items.list(conversation.id)
+        assert page.data == [], (
+            "a turn the proxy could not persist must leave no partial history"
+        )
+
+        malformed_response_client.conversations.delete(conversation.id)
 
     def test_conversation_create_no_metadata(self, openai_client):
         conversation = openai_client.conversations.create()
