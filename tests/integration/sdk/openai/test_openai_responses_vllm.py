@@ -6820,7 +6820,8 @@ class TestAgenticLoopVLLM:
         assert not any(item.type == "mcp_call" for item in response.output), (
             response.output
         )
-
+        
+    @qualification_profile("supporting")
     def test_mcp_oversized_call_id_fails_closed_before_dispatch(
         self,
         oversized_call_id_client,
