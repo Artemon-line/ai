@@ -760,16 +760,34 @@ class BraveSearchHandler(BaseHTTPRequestHandler):
 
     #: Total queries served across all instances since the last reset.
     request_count = 0
+    response_code = 200
+    successful_requests_remaining: ClassVar[int | None] = None
 
     @classmethod
     def reset(cls):
         cls.request_count = 0
+        cls.response_code = 200
+        cls.successful_requests_remaining = None
+        cls.request_paths.clear()
 
     request_paths: ClassVar[list[str]] = []
 
     def do_GET(self):
         type(self).request_paths.append(self.path)
         BraveSearchHandler.request_count += 1
+        response_code = BraveSearchHandler.response_code
+        if (
+            response_code == 200
+            and BraveSearchHandler.successful_requests_remaining is not None
+        ):
+            if BraveSearchHandler.successful_requests_remaining > 0:
+                BraveSearchHandler.successful_requests_remaining -= 1
+            else:
+                response_code = 503
+        if response_code != 200:
+            self.send_response(response_code)
+            self.end_headers()
+            return
         payload = json.dumps(
             {
                 "web": {
@@ -1252,6 +1270,7 @@ class SimulatorBackendHandler(BaseHTTPRequestHandler):
 
     recorded_requests: ClassVar[list[tuple[str, dict[str, Any]]]] = []
     web_search_queries: ClassVar[list[str]] = []
+    web_search_multi_query_call: ClassVar[bool] = False
 
     def log_message(self, fmt, *args):
         pass
@@ -1385,23 +1404,40 @@ class SimulatorBackendHandler(BaseHTTPRequestHandler):
                     else "Praxis marker"
                 ]
             )
-            message = {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
+            if (
+                tool_name == "web_search"
+                and SimulatorBackendHandler.web_search_multi_query_call
+            ):
+                tool_calls = [
                     {
                         "id": f"call_simulator_{tool_name}",
                         "type": "function",
                         "function": {
                             "name": tool_name,
-                            "arguments": json.dumps(
-                                {"queries": queries}
-                                if tool_name == "web_search"
-                                else {"query": queries[0]}
-                            ),
+                            "arguments": json.dumps({"queries": queries}),
                         },
-                    },
-                ],
+                    }
+                ]
+            else:
+                tool_calls = [
+                    {
+                        "id": (
+                            f"call_simulator_{tool_name}_{index}"
+                            if len(queries) > 1
+                            else f"call_simulator_{tool_name}"
+                        ),
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": json.dumps({"query": query}),
+                        },
+                    }
+                    for index, query in enumerate(queries)
+                ]
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": tool_calls,
             }
             finish_reason = "tool_calls"
 
@@ -5294,6 +5330,8 @@ class TestResponsesToChatCompletionsVLLM:
                 "/no_think"
             ),
             tools=[{"type": "web_search"}],
+            tool_choice={"type": "web_search"},
+            max_tool_calls=1,
             store=False,
             stream=True,
             max_output_tokens=512,
@@ -6882,6 +6920,105 @@ class TestAgenticLoopVLLM:
                 tool_name="web_search",
             )
 
+    def test_web_search_provider_failure_returns_failed_status(
+        self,
+        translated_agentic_client,
+    ):
+        try:
+            request_count = len(BraveSearchHandler.request_paths)
+            BraveSearchHandler.response_code = 503
+            response = translated_agentic_client.responses.create(
+                model=CHAT_TRANSLATION_MODEL,
+                input=(
+                    "You MUST use web search, then report the result title and "
+                    "URL. /no_think"
+                ),
+                tools=[
+                    {
+                        "type": "web_search",
+                        "search_context_size": "low",
+                    }
+                ],
+                tool_choice=(
+                    "auto"
+                    if VLLM_TEST_BACKEND == "simulator"
+                    else {"type": "web_search"}
+                ),
+                store=False,
+                max_output_tokens=2048,
+            )
+
+            web_search_calls = [
+                item for item in response.output if item.type == "web_search_call"
+            ]
+            assert len(web_search_calls) == 1, response.output
+            assert web_search_calls[0].status == "failed"
+            assert len(BraveSearchHandler.request_paths) > request_count
+        finally:
+            BraveSearchHandler.reset()
+
+    @requires_simulator
+    def test_web_search_partial_provider_failure_keeps_successful_results(
+        self,
+        translated_agentic_client,
+    ):
+        try:
+            request_count = len(BraveSearchHandler.request_paths)
+            BraveSearchHandler.successful_requests_remaining = 1
+            SimulatorBackendHandler.web_search_queries = [
+                "first Praxis Proxy release",
+                "second Praxis Proxy release",
+            ]
+            response = translated_agentic_client.responses.create(
+                model=CHAT_TRANSLATION_MODEL,
+                input=(
+                    "You MUST use web search for both questions, then report "
+                    "each result title and URL. /no_think"
+                ),
+                tools=[
+                    {
+                        "type": "web_search",
+                        "search_context_size": "low",
+                    }
+                ],
+                tool_choice=(
+                    "auto"
+                    if VLLM_TEST_BACKEND == "simulator"
+                    else {"type": "web_search"}
+                ),
+                include=["web_search_call.action.sources"],
+                store=False,
+                max_output_tokens=2048,
+            )
+
+            web_search_calls = [
+                item for item in response.output if item.type == "web_search_call"
+            ]
+            assert len(web_search_calls) == 2, response.output
+            assert [call.status for call in web_search_calls] == [
+                "completed",
+                "failed",
+            ]
+            assert len(BraveSearchHandler.request_paths) == request_count + 2
+
+            completed_call = web_search_calls[0].model_dump()
+            sources = completed_call.get("action", {}).get("sources", [])
+            assert any(
+                source.get("url") == "https://example.com/mock"
+                for source in sources
+            )
+
+            messages = [
+                item.model_dump()
+                for item in response.output
+                if item.type == "message"
+            ]
+            assert messages
+            assert "Mock Search Result" in json.dumps(messages)
+        finally:
+            BraveSearchHandler.reset()
+            SimulatorBackendHandler.web_search_queries = []
+
     @requires_simulator
     def test_web_search_multi_query_round_trip_preserves_queries(
         self,
@@ -6893,6 +7030,7 @@ class TestAgenticLoopVLLM:
                 "first Praxis Proxy release",
                 "second Praxis Proxy release",
             ]
+            SimulatorBackendHandler.web_search_multi_query_call = True
             response = translated_agentic_client.responses.create(
                 model=CHAT_TRANSLATION_MODEL,
                 input=(
@@ -6943,6 +7081,7 @@ class TestAgenticLoopVLLM:
         finally:
             BraveSearchHandler.reset()
             SimulatorBackendHandler.web_search_queries = []
+            SimulatorBackendHandler.web_search_multi_query_call = False
 
     @requires_real_inference
     def test_live_tavily_web_search_returns_real_sources(
@@ -6989,13 +7128,18 @@ class TestAgenticLoopVLLM:
         request_count = len(BraveSearchHandler.request_paths)
         stream = translated_agentic_client.responses.create(
             model=CHAT_TRANSLATION_MODEL,
-            input=("You MUST use web search, then report the result title. /no_think"),
+            input=(
+                "Use web search to find the latest Praxis Proxy release, "
+                "then report the result title. /no_think"
+            ),
             tools=[
                 {
                     "type": "web_search",
                     "search_context_size": "low",
                 }
             ],
+            tool_choice={"type": "web_search"},
+            max_tool_calls=1,
             store=False,
             stream=True,
             max_output_tokens=512,
