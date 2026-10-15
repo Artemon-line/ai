@@ -6894,7 +6894,7 @@ class TestAgenticLoopVLLM:
                 "second Praxis Proxy release",
             ]
             response = translated_agentic_client.responses.create(
-                model=VLLM_MODEL,
+                model=CHAT_TRANSLATION_MODEL,
                 input=(
                     "You MUST use web search for both questions, then report "
                     "each result title and URL. /no_think"
