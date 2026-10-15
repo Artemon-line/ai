@@ -71,6 +71,74 @@ async fn update_conversation_metadata() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_character_boundaries_round_trip() {
+    let proxy = start_test_proxy();
+
+    for (key_character, value_character, key_length, value_length) in [
+        ("k", "v", 64, 512),
+        ("é", "界", 64, 512),
+        ("🦀", "😀", 64, 512),
+        ("é", "界", 33, 171),
+    ] {
+        let metadata = serde_json::json!({key_character.repeat(key_length): value_character.repeat(value_length)});
+        let request = serde_json::json!({"metadata": metadata}).to_string();
+        let raw = http_send(proxy.addr(), &json_post("/v1/conversations", &request));
+        assert_eq!(parse_status(&raw), 200, "create at character limits: {raw}");
+        let body: serde_json::Value = serde_json::from_str(&parse_body(&raw)).unwrap();
+        assert_eq!(body["metadata"], metadata);
+        let conv_id = body["id"].as_str().unwrap();
+
+        let updated_metadata =
+            serde_json::json!({value_character.repeat(key_length): key_character.repeat(value_length)});
+        let request = serde_json::json!({"metadata": updated_metadata}).to_string();
+        let raw = http_send(
+            proxy.addr(),
+            &json_post(&format!("/v1/conversations/{conv_id}"), &request),
+        );
+        assert_eq!(parse_status(&raw), 200, "update at character limits: {raw}");
+        let body: serde_json::Value = serde_json::from_str(&parse_body(&raw)).unwrap();
+        assert_eq!(body["metadata"], updated_metadata);
+
+        let raw = http_send(
+            proxy.addr(),
+            &format!("GET /v1/conversations/{conv_id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        );
+        assert_eq!(parse_status(&raw), 200);
+        let body: serde_json::Value = serde_json::from_str(&parse_body(&raw)).unwrap();
+        assert_eq!(body["metadata"], updated_metadata);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_over_character_limits_is_rejected() {
+    let proxy = start_test_proxy();
+    let conv_id = create_conversation(&proxy, r#"{"metadata":{"topic":"unchanged"}}"#);
+
+    for character in ["a", "é", "界", "🦀"] {
+        for metadata in [
+            serde_json::json!({character.repeat(65): "value"}),
+            serde_json::json!({"key": character.repeat(513)}),
+        ] {
+            let request = serde_json::json!({"metadata": metadata}).to_string();
+            for path in ["/v1/conversations".to_owned(), format!("/v1/conversations/{conv_id}")] {
+                let raw = http_send(proxy.addr(), &json_post(&path, &request));
+                assert_eq!(parse_status(&raw), 400, "over-limit metadata at {path}: {raw}");
+                let body: serde_json::Value = serde_json::from_str(&parse_body(&raw)).unwrap();
+                assert!(body["error"]["message"].as_str().unwrap().contains("characters"));
+            }
+
+            let raw = http_send(
+                proxy.addr(),
+                &format!("GET /v1/conversations/{conv_id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            );
+            assert_eq!(parse_status(&raw), 200);
+            let body: serde_json::Value = serde_json::from_str(&parse_body(&raw)).unwrap();
+            assert_eq!(body["metadata"], serde_json::json!({"topic": "unchanged"}));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_conversation_without_metadata_returns_400() {
     let proxy = start_test_proxy();
     let conv_id = create_conversation(&proxy, r#"{"metadata":{"v":"1"}}"#);

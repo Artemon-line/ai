@@ -1491,25 +1491,42 @@ class TestOpenAIConversations:
         page = openai_client.conversations.items.list(conversation.id)
         assert page.data == [], "rejected batch must not persist any items"
 
-    def test_metadata_length_boundaries_are_accepted(self, openai_client):
-        boundary_metadata = {"k" * 64: "v" * 512}
+    @pytest.mark.parametrize(
+        "key_character,value_character,key_length,value_length",
+        [
+            pytest.param("k", "v", 64, 512, id="ascii-boundary"),
+            pytest.param("é", "界", 64, 512, id="unicode-boundary"),
+            pytest.param("🦀", "😀", 64, 512, id="astral-boundary"),
+            pytest.param("é", "界", 33, 171, id="unicode-byte-regression"),
+        ],
+    )
+    def test_metadata_length_boundaries_are_accepted(
+        self, openai_client, key_character, value_character, key_length, value_length
+    ):
+        boundary_metadata = {key_character * key_length: value_character * value_length}
         conversation = openai_client.conversations.create(
             metadata=boundary_metadata,
         )
         assert conversation.metadata == boundary_metadata
+        assert openai_client.conversations.retrieve(conversation.id).metadata == boundary_metadata
 
-        updated_metadata = {"u" * 64: "w" * 512}
+        updated_metadata = {value_character * key_length: key_character * value_length}
         updated = openai_client.conversations.update(
             conversation.id,
             metadata=updated_metadata,
         )
         assert updated.metadata == updated_metadata
+        assert openai_client.conversations.retrieve(conversation.id).metadata == updated_metadata
 
     @pytest.mark.parametrize(
         "metadata",
         [
             pytest.param({"k" * 65: "value"}, id="key-too-long"),
             pytest.param({"key": "v" * 513}, id="value-too-long"),
+            pytest.param({"é" * 65: "value"}, id="unicode-key-too-long"),
+            pytest.param({"key": "界" * 513}, id="unicode-value-too-long"),
+            pytest.param({"🦀" * 65: "value"}, id="astral-key-too-long"),
+            pytest.param({"key": "😀" * 513}, id="astral-value-too-long"),
             pytest.param({"key": 123}, id="non-string-value"),
         ],
     )
@@ -1527,6 +1544,10 @@ class TestOpenAIConversations:
         [
             pytest.param({"k" * 65: "value"}, id="key-too-long"),
             pytest.param({"key": "v" * 513}, id="value-too-long"),
+            pytest.param({"é" * 65: "value"}, id="unicode-key-too-long"),
+            pytest.param({"key": "界" * 513}, id="unicode-value-too-long"),
+            pytest.param({"🦀" * 65: "value"}, id="astral-key-too-long"),
+            pytest.param({"key": "😀" * 513}, id="astral-value-too-long"),
             pytest.param({"key": 123}, id="non-string-value"),
         ],
     )
@@ -1535,7 +1556,8 @@ class TestOpenAIConversations:
         openai_client,
         metadata,
     ):
-        conversation = openai_client.conversations.create()
+        original_metadata = {"topic": "unchanged"}
+        conversation = openai_client.conversations.create(metadata=original_metadata)
 
         with pytest.raises(BadRequestError) as exc_info:
             openai_client.conversations.update(
@@ -1543,6 +1565,7 @@ class TestOpenAIConversations:
                 metadata=metadata,
             )
         assert exc_info.value.status_code == 400, "invalid metadata must be rejected on update with 400"
+        assert openai_client.conversations.retrieve(conversation.id).metadata == original_metadata
 
     def test_conversation_update_replaces_and_clears_metadata(self, openai_client):
         conversation = openai_client.conversations.create(
