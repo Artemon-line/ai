@@ -42,6 +42,7 @@ for how these are authored and regenerated.
 | [file-descriptor-limits.yaml](configs/file-descriptor-limits.yaml) | Size and protect the descriptor budget of a metered gateway: pin the process limit, shed requests with 503 before descriptors run out, cap concurrent requests and metering callouts, and close idle keep-alive clients and pooled upstream connections so they cannot pin descriptors |
 | [gcp-adc.yaml](configs/gcp-adc.yaml) | Acquires an OAuth2 access token from the GCE/GKE metadata server or a service-account key file and injects "Authorization: Bearer <token>" on every proxied request to Vertex AI |
 | [identity-header-guard.yaml](configs/identity-header-guard.yaml) | Captures identity headers matching a prefix into filter metadata and strips them before forwarding upstream |
+| [inflight-tracking.yaml](configs/inflight-tracking.yaml) | Tracks live request counts and summed token reservations per model in an in-memory InFlightRegistry |
 | [intelligent-route-all-capabilities.yaml](configs/intelligent-route-all-capabilities.yaml) | Demonstrates every candidate capability and selection input handled by intelligent_route today |
 | [intelligent-route-inference.yaml](configs/intelligent-route-inference.yaml) | Routes requests to different upstream clusters based on the inference model name carried in a configured request header.  The header value is set by the `model_to_header` filter, which promotes the JSON body's `model` field and strips any client-supplied copy of the header so routing cannot be spoofed from the wire |
 | [intelligent-route-management-skip.yaml](configs/intelligent-route-management-skip.yaml) | Demonstrates the `intelligent_route` management-path skip list: management and discovery endpoints (model listing, subscriptions, API-key management, health) bypass model resolution entirely, while inference paths are still resolved by model and fail closed on an unknown model |
@@ -56,6 +57,7 @@ for how these are authored and regenerated.
 | [mcp-stateless-broker.yaml](configs/mcp-stateless-broker.yaml) | Configurable stateless MCP broker using the final MCP 2026-07-28 stateless profile |
 | [model-to-header-routing.yaml](configs/model-to-header-routing.yaml) | Routes LLM API requests to different backends based on the "model" field in the JSON request body |
 | [model-to-header-trust-existing.yaml](configs/model-to-header-trust-existing.yaml) | Routes on a model header that a trusted hop in front of Praxis has already set, skipping the filter entirely when the header is present |
+| [model-to-provider.yaml](configs/model-to-provider.yaml) | Map a stable public model ID to an existing upstream cluster and target model |
 | [nemo-guardrails-response.yaml](configs/nemo-guardrails-response.yaml) | Evaluates upstream responses against a NeMo Guardrails service |
 | [nemo-guardrails.yaml](configs/nemo-guardrails.yaml) | Evaluates incoming requests against a NeMo Guardrails service |
 | [project-state-owner-headers.yaml](configs/project-state-owner-headers.yaml) | Demonstrates the production boundary used when an external authenticator injects separate tenant and subject headers. `state_owner` consumes those assertions into an immutable internal owner and strips the inbound copies. `project_state_owner_headers` then recreates destination-specific headers from that normalized context |
@@ -173,3 +175,4 @@ for how these are authored and regenerated.
 | File | Description |
 | ------ | ------------- |
 | [chat-completions-to-gemini.yaml](configs/vertex/chat-completions-to-gemini.yaml) | Transforms OpenAI Chat Completions requests into Vertex AI Gemini generateContent format and translates responses back |
+| [messages-to-anthropic.yaml](configs/vertex/messages-to-anthropic.yaml) | Translates Anthropic Messages requests into Vertex AI rawPredict form and Vertex responses back to the Anthropic dialect after model_to_provider selects an upstream and resolves its exact target model |
