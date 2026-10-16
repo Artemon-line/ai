@@ -10,8 +10,6 @@ pub mod readiness;
 pub(crate) mod reload;
 mod server;
 #[cfg(feature = "_store-backend")]
-mod store_config;
-#[cfg(feature = "_store-backend")]
 pub mod store_provision;
 mod subrequest;
 pub(crate) mod watcher;
