@@ -52,6 +52,9 @@ azure-ad-filter = ["experimental"]
 # Activates the `experimental` marker. `openssl` signs the service-account
 # `JWT` assertion for `source: key_file` in the system library.
 gcp-adc-filter = ["experimental", "dep:openssl"]
+# Experimental: Anthropic Messages to Vertex AI rawPredict translation. Work
+# in progress; the config surface may change. Activates the experimental marker.
+vertex-anthropic-filter = ["experimental", "praxis-ai-apis/vertex-anthropic"]
 # Experimental: the token_rate_limit filter. Its parent proposal
 # (00121_token-rate-limiting in praxis-proxy/enhancements) is not yet
 # `accepted`, and open design questions remain (bucket-keying strategy,
