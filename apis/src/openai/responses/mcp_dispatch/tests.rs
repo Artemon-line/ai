@@ -95,7 +95,7 @@ fn mcp_call_ids_must_be_present_nonempty_unique_and_bounded() {
 
     let at_raw_bound = vec![json!({
         "call_id": "x".repeat(super::MAX_MCP_CALL_ID_BYTES),
-        "name": "x".repeat(64),
+        "name": "tool",
     })];
     assert!(mcp_call_ids_are_unique_and_new(&call_refs(&at_raw_bound), &[]));
 
