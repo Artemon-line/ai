@@ -1125,7 +1125,7 @@ fn mcp_calls_execute_regardless_of_max_tool_calls() {
     assert_eq!(mcp_calls.len(), 2, "both MCP calls appear in the output: {output:#?}");
     assert!(
         mcp_calls.iter().all(|item| {
-            item["error"]
+            item["error"]["content"]
                 .as_str()
                 .is_none_or(|error| !error.contains("max_tool_calls"))
         }),
@@ -2431,11 +2431,16 @@ fn streaming_mcp_failure_synthesizes_failed_progress_in_one_logical_response() {
         Some(mcp_id.as_str()),
         "terminal[2] id: {body}"
     );
+    assert_eq!(
+        output[2]["error"]["type"].as_str(),
+        Some("mcp_tool_execution_error"),
+        "terminal[2] must carry the structured MCP error type: {body}"
+    );
     assert!(
-        output[2]["error"]
+        output[2]["error"]["content"]
             .as_str()
             .is_some_and(|error| error.contains("mock failure for get_weather")),
-        "terminal[2] must carry the MCP error: {body}"
+        "terminal[2] must carry the MCP error content: {body}"
     );
     assert_eq!(output[3]["type"], "message", "terminal[3] type: {body}");
     assert_eq!(
@@ -4162,7 +4167,7 @@ fn web_over_budget_fails_while_mcp_sibling_executes() {
     assert!(
         output.iter().any(|item| {
             item["type"] == "mcp_call"
-                && item["error"]
+                && item["error"]["content"]
                     .as_str()
                     .is_none_or(|error| !error.contains("max_tool_calls"))
         }),
