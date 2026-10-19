@@ -64,6 +64,8 @@ use praxis_filter::{
 };
 use tracing::{debug, warn};
 
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
+use self::config::MAX_MCP_CALL_ID_BYTES;
 use self::{
     approval::{
         ApprovalError, ResolvedApproval, bind_credential_context, bind_forwarded_header_context, bind_owner_context,
@@ -71,20 +73,24 @@ use self::{
         parse_approval_response, resolve_approval, target_fingerprint,
     },
     config::{
-        MAX_MCP_CALL_ID_BYTES, MIN_RETAINED_RESULT_BYTES, McpDispatchConfig, MinimumApproval, build_config,
-        require_inline_outbound_chain,
+        MIN_RETAINED_RESULT_BYTES, McpDispatchConfig, MinimumApproval, build_config, require_inline_outbound_chain,
     },
 };
 use super::{
     DEFAULT_STORE_NAME,
     error::responses_error_rejection,
     mcp_admission::McpAdmissionDecisions,
-    mcp_classify::{ApprovalFloor, McpDisposition, classify_mcp},
+    mcp_classify::ApprovalFloor,
     mcp_tool_resolve::{
         McpToolIndex, McpToolMatch, consume_pending_list_tools_failure,
         discover_deferred_connectors_with_forwarded_headers, has_pending_deferred_discovery, resolve_error_action,
     },
-    state::{DispatchFailure, McpApprovalState, McpConnectorContextPolicy, ResponsesState},
+    state::{DispatchFailure, McpConnectorContextPolicy, ResponsesState},
+};
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
+use super::{
+    mcp_classify::{McpDisposition, classify_mcp},
+    state::McpApprovalState,
 };
 use crate::{
     callout_headers::effective_body_callout_headers,
@@ -647,6 +653,7 @@ fn approval_rejection(error: &ApprovalError) -> Rejection {
 /// response back to this proxy-issued request. Execution provenance is recorded
 /// so `stream_events` may synthesize each approval item's lifecycle; a bare
 /// `accumulated_output` push is not proof that this filter produced the item.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn record_and_emit_approvals(state: &mut ResponsesState, pending: Vec<PendingApproval>) {
     for call in pending {
         let record = PendingApprovalRecord {
@@ -695,6 +702,7 @@ fn record_and_emit_approvals(state: &mut ResponsesState, pending: Vec<PendingApp
 /// The client-controlled `store=false` is a `400`; a store not armed to persist
 /// this response is a server-configuration `500`, mirroring the resume path's
 /// identical guard.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn approval_persistence_rejection(state: &ResponsesState, tool_name: &str) -> Option<ApprovalRejection> {
     if !response_will_be_stored(state) {
         warn!(
@@ -717,6 +725,7 @@ fn approval_persistence_rejection(state: &ResponsesState, tool_name: &str) -> Op
 /// A fail-closed approval rejection as raw parts, so the caller can surface it as
 /// a pre-commitment JSON envelope (buffered) or a committed-stream SSE error
 /// (streaming) without re-deriving the status, code, and message.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 struct ApprovalRejection {
     /// HTTP status for the pre-commitment JSON envelope. Ignored on a committed
     /// stream, where headers are already sent and the error is an SSE event.
@@ -737,6 +746,7 @@ struct ApprovalRejection {
 /// completeness, store availability); those guard against a non-conforming
 /// backend, not client intent, and a failure there still fails closed at resume
 /// time with a 400.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn response_will_be_stored(state: &ResponsesState) -> bool {
     state
         .request_body
@@ -750,6 +760,7 @@ fn response_will_be_stored(state: &ResponsesState) -> bool {
 /// Combining `require_approval` with `store: false` is a client error: the
 /// mandatory `mcp_approval_response` follow-up correlates to server-owned state
 /// via `previous_response_id`, which only exists when the response is stored.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn approval_requires_store_rejection(tool_name: &str) -> ApprovalRejection {
     ApprovalRejection {
         status: 400,
@@ -770,6 +781,7 @@ fn approval_requires_store_rejection(tool_name: &str) -> ApprovalRejection {
 /// absent, request-conditioned out, or ordered after dispatch — so the mandatory
 /// follow-up could never resume. This mirrors the resume path, which returns the
 /// same server error when the store is unavailable.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn approval_store_unavailable_rejection(tool_name: &str) -> ApprovalRejection {
     ApprovalRejection {
         status: 500,
@@ -1088,6 +1100,7 @@ async fn discover_pending_connectors(
 }
 
 /// Return the response fan-out cap this dispatcher published for the owner.
+#[cfg(feature = "openai-agentic-loop")]
 pub(crate) fn configured_max_calls_per_round(ctx: &HttpFilterContext<'_>) -> Option<usize> {
     ctx.get_metadata(MAX_CALLS_METADATA)?.parse().ok()
 }
@@ -1102,6 +1115,7 @@ pub(crate) fn configured_max_calls_per_round(ctx: &HttpFilterContext<'_>) -> Opt
     clippy::too_many_lines,
     reason = "validation and approval partitioning form one atomic pre-dispatch operation"
 )]
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 pub(crate) fn prepare_response_round(
     state: &mut ResponsesState,
     max_calls_per_round: usize,
@@ -1180,6 +1194,7 @@ pub(crate) fn prepare_response_round(
 // -----------------------------------------------------------------------------
 
 /// Info about a tool call that requires approval.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 struct PendingApproval {
     /// Call ID.
     call_id: String,
@@ -1213,6 +1228,7 @@ fn extract_mcp_tool_calls<'a>(
 }
 
 /// Count MCP-owned function calls without cloning provider payloads.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn count_mcp_tool_calls(
     tool_calls: &[serde_json::Value],
     tool_index: &McpToolIndex<'_>,
@@ -1252,6 +1268,7 @@ fn is_mcp_owned_call(
 /// approval correlation id and echoed by retained results. Its raw length is
 /// capped at [`MAX_MCP_CALL_ID_BYTES`], and its serialized fallback is checked
 /// against [`MIN_RETAINED_RESULT_BYTES`] before any approval record is created.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn mcp_call_ids_are_unique_and_new(
     tool_calls: &[&serde_json::Value],
     accumulated_output: &[serde_json::Value],
@@ -1274,6 +1291,7 @@ fn mcp_call_ids_are_unique_and_new(
 
 /// Check whether a future result-limit fallback containing this call id fits
 /// the minimum per-call reservation after JSON escaping.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn call_id_fallback_fits(tool_call: &serde_json::Value) -> bool {
     let (call_id, tool_name) = bounded_fallback_identity(tool_call);
     build_error_result(
@@ -1354,6 +1372,7 @@ fn partition_calls_by_approval(
 }
 
 /// Extract the call ID from a tool call value.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn extract_call_id(tc: &serde_json::Value) -> String {
     tc.get("call_id")
         .or_else(|| tc.get("id"))
@@ -1384,6 +1403,7 @@ fn normalize_arguments(raw: &serde_json::Value) -> Result<(serde_json::Value, St
 /// [`normalize_arguments`] but only produces the canonical string,
 /// avoiding the deep clone that full normalization performs on
 /// non-string values.
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn extract_arguments(tc: &serde_json::Value) -> String {
     match tc.get("arguments") {
         Some(serde_json::Value::String(s)) => s.clone(),
@@ -1402,6 +1422,7 @@ fn extract_arguments(tc: &serde_json::Value) -> String {
 /// [`classify_mcp`]; this function only resolves the identity fields needed to
 /// render the `mcp_approval_request`.
 #[expect(clippy::too_many_lines, reason = "linear validation with clear structure")]
+#[cfg(any(feature = "openai-agentic-loop", all(test, feature = "store-sqlite")))]
 fn check_single_approval(
     tc: &serde_json::Value,
     tool_index: &McpToolIndex<'_>,
