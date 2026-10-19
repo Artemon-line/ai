@@ -115,10 +115,9 @@ pub struct McpToolFixture {
     /// JSON Schema for the tool's input parameters.
     pub input_schema: Value,
 
-    /// When set, advertised as `annotations.readOnlyHint` in `tools/list`
-    /// (`true` = read-only, `false` = writable). `None` omits the annotation so
-    /// the tool defaults to writable, matching the MCP annotation default.
-    pub read_only_hint: Option<bool>,
+    /// Optional MCP tool annotations (e.g. `{"readOnlyHint": true}`) emitted in
+    /// `tools/list`. Used to exercise metadata-admission and read-only trust.
+    pub annotations: Option<Value>,
 }
 
 impl McpToolFixture {
@@ -135,7 +134,7 @@ impl McpToolFixture {
             name: name.into(),
             description: None,
             input_schema: json!({"type": "object"}),
-            read_only_hint: None,
+            annotations: None,
         }
     }
 
@@ -146,10 +145,17 @@ impl McpToolFixture {
         self
     }
 
+    /// Set the tool annotations advertised in `tools/list`.
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: Value) -> Self {
+        self.annotations = Some(annotations);
+        self
+    }
+
     /// Advertise `annotations.readOnlyHint` for this tool in `tools/list`.
     #[must_use]
     pub fn with_read_only(mut self, read_only: bool) -> Self {
-        self.read_only_hint = Some(read_only);
+        self.annotations = Some(json!({"readOnlyHint": read_only}));
         self
     }
 
@@ -495,8 +501,8 @@ fn handle_tools_list(stream: &mut TcpStream, config: &McpMockConfig, id: &Option
             if let Some(desc) = &t.description {
                 tool["description"] = json!(desc);
             }
-            if let Some(read_only) = t.read_only_hint {
-                tool["annotations"] = json!({"readOnlyHint": read_only});
+            if let Some(annotations) = &t.annotations {
+                tool["annotations"] = annotations.clone();
             }
             tool
         })

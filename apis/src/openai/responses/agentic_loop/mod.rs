@@ -722,7 +722,7 @@ fn has_dispatchable_mcp_work(state: &ResponsesState) -> bool {
     if has_pending_deferred_discovery(state) {
         return true;
     }
-    if state.tool_calls.is_empty() || state.mcp_tool_map.is_empty() {
+    if state.tool_calls.is_empty() {
         return false;
     }
     let tool_index = McpToolIndex::new(&state.mcp_tool_map);
@@ -730,10 +730,17 @@ fn has_dispatchable_mcp_work(state: &ResponsesState) -> bool {
     // changes whether a call is MCP at all, so `NotMcp` membership is invariant
     // under it. Pass `None` here: both auto and approval-required calls are
     // dispatchable work that must keep the loop running.
-    state
-        .tool_calls
-        .iter()
-        .any(|call| classify_mcp(call, &tool_index, ApprovalFloor::None) != McpDisposition::NotMcp)
+    state.tool_calls.iter().any(|call| {
+        if classify_mcp(call, &tool_index, ApprovalFloor::None) != McpDisposition::NotMcp {
+            return true;
+        }
+        // A model-generated call to a tool denied by operator admission is
+        // dispatchable: the dispatcher rejects it explicitly rather than letting
+        // the loop return it to the client as an unresolved function (#1724).
+        call.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| state.mcp_admission.is_denied_encoded(name))
+    })
 }
 
 /// Without MCP tool support no call or discovery is MCP-owned.
@@ -927,10 +934,6 @@ fn has_mixed_function_call_ownership(state: &ResponsesState) -> bool {
     if state.tool_calls.is_empty() {
         return has_server && has_client;
     }
-    if state.mcp_tool_map.is_empty() {
-        // With no resolved MCP tools, every function call is client-owned.
-        return has_server;
-    }
     let (server_calls, client_calls) = mcp_call_ownership(state);
     (has_server || server_calls) && (has_client || client_calls)
 }
@@ -943,10 +946,12 @@ fn mcp_call_ownership(state: &ResponsesState) -> (bool, bool) {
     let mut has_server = false;
     let mut has_client = false;
     for call in &state.tool_calls {
+        // A denied MCP call is server-owned: the dispatcher rejects it, so it must
+        // not be treated as a client function and returned unexecuted (#1724).
         let is_mcp = call
             .get("name")
             .and_then(Value::as_str)
-            .is_some_and(|encoded| tool_index.contains(encoded));
+            .is_some_and(|encoded| tool_index.contains(encoded) || state.mcp_admission.is_denied_encoded(encoded));
         has_server |= is_mcp;
         has_client |= !is_mcp;
     }

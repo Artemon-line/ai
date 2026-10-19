@@ -438,6 +438,16 @@ pub(crate) struct ResponsesState {
     #[cfg(feature = "openai-mcp-tools")]
     pub mcp_connector_context_policy: McpConnectorContextPolicy,
 
+    /// Operator metadata-admission decisions for this request (#1724).
+    ///
+    /// Stamped afresh by `openai_mcp_tool_resolve` from operator configuration
+    /// (policy + connector trust), extended through deferred discovery, and
+    /// re-enforced at dispatch. Verdicts are typed and operator-owned; client
+    /// fields, cached definitions, and restored history never supply admission
+    /// authority. Defaults to advisory (empty, no enforcement).
+    #[cfg(feature = "openai-mcp-tools")]
+    pub mcp_admission: super::mcp_admission::McpAdmissionDecisions,
+
     /// Operator approval floor published by `openai_mcp_dispatch` during the
     /// request phase for the `openai_agentic_loop` owner to apply when it
     /// partitions approvals in the response phase of the same IRR iteration.
@@ -917,6 +927,14 @@ pub(crate) struct DeferredMcpConnector {
 
     /// Per-server timeout for the deferred `tools/list` call.
     pub timeout: Duration,
+
+    /// Operator trust stamped from connector configuration at resolve time.
+    ///
+    /// Deferred discovery runs inside `openai_mcp_dispatch`, which has no access
+    /// to the resolver's connector configuration, so the trust is carried here —
+    /// operator-owned and never derived from server, cached, or client data.
+    #[cfg(feature = "openai-mcp-tools")]
+    pub trust: super::mcp_admission::ConnectorTrust,
 }
 
 /// Request-scoped slot policy bound to configured MCP connector state.
@@ -1036,6 +1054,8 @@ impl Default for ResponsesState {
             deferred_mcp: Vec::new(),
             #[cfg(feature = "openai-mcp-tools")]
             mcp_connector_context_policy: McpConnectorContextPolicy::default(),
+            #[cfg(feature = "openai-mcp-tools")]
+            mcp_admission: super::mcp_admission::McpAdmissionDecisions::default(),
             #[cfg(feature = "openai-mcp-tools")]
             mcp_operator_approval_floor: ApprovalFloor::None,
             max_tool_calls: None,
