@@ -37,6 +37,8 @@ use super::{
 pub struct SqliteResponseStore {
     /// Connection pool.
     pool: SqlitePool,
+    #[cfg(test)]
+    history_read_probe: Option<std::sync::Arc<tests::HistoryReadProbe>>,
     /// Configured table names.
     tables: TableNames,
     /// Payload compression codec applied on write.
@@ -119,6 +121,8 @@ impl SqliteResponseStore {
         );
         Ok(Self {
             pool,
+            #[cfg(test)]
+            history_read_probe: None,
             tables,
             compression: compression.cloned().unwrap_or_default(),
         })
@@ -1569,7 +1573,11 @@ impl ConversationItemStore for SqliteResponseStore {
             "SELECT item_data FROM {table} WHERE conversation_id = ? AND tenant_id = ? \
              AND owner_issuer = ? AND owner_subject = ? ORDER BY position ASC, item_id ASC"
         );
+        #[cfg(not(test))]
         let mut history = Vec::new();
+        // The test wrapper observes ownership of the actual decoded prefix.
+        #[cfg(test)]
+        let history = tests::ReadHistory::new();
         {
             let mut rows = sqlx::query_scalar::<_, String>(AssertSqlSafe(select_sql.as_str()))
                 .bind(conversation_id)
@@ -1579,8 +1587,14 @@ impl ConversationItemStore for SqliteResponseStore {
                 .fetch(&mut *tx);
             while let Some(json) = rows.try_next().await.map_err(|e| StoreError::Database(e.to_string()))? {
                 history.push(serde_json::from_str(&json).map_err(|e| StoreError::Serialization(e.to_string()))?);
+                #[cfg(test)]
+                if let Some(probe) = &self.history_read_probe {
+                    probe.after_row(&history).await;
+                }
             }
         }
+        #[cfg(test)]
+        let mut history = history.into_inner();
         {
             let projection = if history.is_empty() {
                 "messages"
@@ -2222,7 +2236,23 @@ fn row_to_owner(row: &sqlx::sqlite::SqliteRow) -> Result<StateOwner, StoreError>
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
+    use std::sync::{Arc, Mutex, Weak};
+
     use super::*;
+
+    #[tokio::test]
+    async fn history_read_cancellation_releases_partial_progress() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), history_read_cleanup(true))
+            .await
+            .expect("cancelled history read must release its only connection");
+    }
+
+    #[tokio::test]
+    async fn history_read_error_releases_partial_progress() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), history_read_cleanup(false))
+            .await
+            .expect("failed history read must release its only connection");
+    }
 
     #[tokio::test]
     #[expect(clippy::too_many_lines, reason = "linear SQL mutation regression assertions")]
@@ -2631,5 +2661,224 @@ mod tests {
             !is_memory_database_url(""),
             "empty URL should not be detected as memory"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "real SQL fixture, cancellation/error, and recovery assertions"
+    )]
+    async fn history_read_cleanup(cancel: bool) {
+        let mut store = SqliteResponseStore::new(
+            "sqlite::memory:",
+            "responses",
+            "conversations",
+            Some("items"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let owner = StateOwner::from_trusted_parts("tenant", "issuer", "subject").unwrap();
+        let legacy = serde_json::json!({"id": "legacy"});
+        store
+            .upsert_conversation(&ConversationRecord {
+                owner: owner.clone(),
+                conversation_id: "c".into(),
+                created_at: 1,
+                metadata: serde_json::json!({"keep": true}),
+                messages: serde_json::json!([legacy]),
+            })
+            .await
+            .unwrap();
+        // 64 rows overflow SQLx's 50-row worker channel: the reader pauses after
+        // one decoded row while the worker is parked on a full channel, so
+        // cancellation and failure must unblock the worker before the rollback
+        // can run. Three rows only ever exercised dropping buffered rows.
+        let items: Vec<_> = (0..64)
+            .map(|index| ConversationItemRecord {
+                owner: owner.clone(),
+                conversation_id: "c".into(),
+                item_id: format!("item_{index:08}"),
+                created_at: 1,
+                position: 0,
+                item_data: serde_json::json!({"id": index, "content": "x".repeat(64)}),
+            })
+            .collect();
+        store.create_items_and_sync_messages(&owner, "c", &items).await.unwrap();
+        if !cancel {
+            sqlx::query(
+                "UPDATE items SET item_data = '{broken-json' WHERE conversation_id = 'c' AND item_id = ? \
+                 AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
+            )
+            .bind(&items.get(1).unwrap().item_id)
+            .bind(owner.tenant_id())
+            .bind(owner.issuer())
+            .bind(owner.subject())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+        let before = read_snapshot(&store, &owner).await;
+        interrupt_history_read(&mut store, &owner, &items.first().unwrap().item_data, cancel).await;
+        let mut connection = store.pool.acquire().await.unwrap();
+        sqlx::query("BEGIN")
+            .execute(&mut *connection)
+            .await
+            .expect("cancel/error rolled back the old transaction");
+        sqlx::query("ROLLBACK").execute(&mut *connection).await.unwrap();
+        drop(connection);
+        assert_eq!(
+            read_snapshot(&store, &owner).await,
+            before,
+            "reads must preserve item bytes, positions, and legacy cache"
+        );
+        let stranger = StateOwner::from_trusted_parts("other-tenant", "issuer", "subject").unwrap();
+        assert!(
+            store.conversation_history(&stranger, "c").await.unwrap().is_none(),
+            "a different tenant must not read the conversation history"
+        );
+        if !cancel {
+            sqlx::query(
+                "UPDATE items SET item_data = ? WHERE conversation_id = 'c' AND item_id = ? \
+                 AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
+            )
+            .bind(serde_json::to_string(&items.get(1).unwrap().item_data).unwrap())
+            .bind(&items.get(1).unwrap().item_id)
+            .bind(owner.tenant_id())
+            .bind(owner.issuer())
+            .bind(owner.subject())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+        let mut expected = Vec::with_capacity(items.len() + 1);
+        expected.push(legacy);
+        for item in &items {
+            expected.push(item.item_data.clone());
+        }
+        assert_eq!(
+            store.conversation_history(&owner, "c").await.unwrap(),
+            Some(expected),
+            "recovery preserves the complete legacy prefix and position/item-id ordering"
+        );
+        store.close().await;
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear checkpoint, cancellation, and ownership-release assertions"
+    )]
+    async fn interrupt_history_read(
+        store: &mut SqliteResponseStore,
+        owner: &StateOwner,
+        expected: &serde_json::Value,
+        cancel: bool,
+    ) {
+        let probe = Arc::new(HistoryReadProbe::default());
+        store.history_read_probe = Some(Arc::clone(&probe));
+        let mut read = Box::pin(store.conversation_history(owner, "c"));
+        let early = tokio::select! {
+            result = &mut read => Some(result),
+            () = probe.reached.notified() => None,
+        };
+        assert!(
+            early.is_none(),
+            "reader completed before the decoded-prefix checkpoint: {early:?}"
+        );
+        {
+            let prefix = probe
+                .prefix
+                .lock()
+                .unwrap()
+                .upgrade()
+                .expect("reader owns the allocated prefix");
+            let values = prefix.lock().unwrap();
+            assert_eq!(values.len(), 1, "pause after a decoded row, not pool acquisition");
+            assert_eq!(
+                values.first(),
+                Some(expected),
+                "the prefix holds the first ordered item"
+            );
+            drop(values);
+        }
+        assert_eq!(store.pool.size(), 1, "the memory store pool has exactly one connection");
+        assert_eq!(store.pool.num_idle(), 0, "reader holds the only lease");
+        if cancel {
+            drop(read);
+        } else {
+            probe.resume.notify_one();
+            assert!(
+                matches!(read.await, Err(StoreError::Serialization(_))),
+                "corrupt second row must not return the valid prefix"
+            );
+        }
+        assert!(
+            probe.prefix.lock().unwrap().upgrade().is_none(),
+            "the actual decoded vector and its payloads were dropped"
+        );
+        store.history_read_probe = None;
+    }
+
+    async fn read_snapshot(store: &SqliteResponseStore, owner: &StateOwner) -> (String, Vec<(String, i64, String)>) {
+        let cache = sqlx::query_scalar(
+            "SELECT messages FROM conversations WHERE conversation_id = 'c' \
+             AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ?",
+        )
+        .bind(owner.tenant_id())
+        .bind(owner.issuer())
+        .bind(owner.subject())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let rows = sqlx::query_as(
+            "SELECT item_id, position, item_data FROM items WHERE conversation_id = 'c' \
+             AND tenant_id = ? AND owner_issuer = ? AND owner_subject = ? ORDER BY position, item_id",
+        )
+        .bind(owner.tenant_id())
+        .bind(owner.issuer())
+        .bind(owner.subject())
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        (cache, rows)
+    }
+
+    #[derive(Default)]
+    pub(super) struct HistoryReadProbe {
+        prefix: Mutex<Weak<Mutex<Vec<serde_json::Value>>>>,
+        reached: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+    }
+
+    impl HistoryReadProbe {
+        pub(super) async fn after_row(&self, history: &ReadHistory) {
+            if history.0.lock().unwrap().len() == 1 {
+                *self.prefix.lock().unwrap() = Arc::downgrade(&history.0);
+                self.reached.notify_one();
+                self.resume.notified().await;
+            }
+        }
+    }
+
+    // Weak observes the allocation that owns the real decoded values, not a
+    // detached drop sentinel. No guard is held while the reader is suspended.
+    pub(super) struct ReadHistory(Arc<Mutex<Vec<serde_json::Value>>>);
+
+    impl ReadHistory {
+        pub(super) fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+
+        pub(super) fn push(&self, item: serde_json::Value) {
+            self.0.lock().unwrap().push(item);
+        }
+
+        pub(super) fn into_inner(self) -> Vec<serde_json::Value> {
+            Arc::try_unwrap(self.0).unwrap().into_inner().unwrap()
+        }
     }
 }
