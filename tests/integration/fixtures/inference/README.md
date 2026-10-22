@@ -78,6 +78,7 @@ The manifest declares **88 features** across **11 scopes**, linked to **68 scena
 | `responses_client_tool_compat` | `responses.client_tool_compat.lower_restore` | `synthetic_only` | `responses/client-tool-compat` | `synthetic`: `synthetic_only` |
 | `responses_client_tool_compat` | `responses.client_tool_compat.mcp_namespace_lower_restore` | `synthetic_only` | `responses/client-tool-compat-mcp-namespace` | `synthetic`: `synthetic_only` |
 | `responses_client_tool_compat` | `responses.client_tool_compat.stream_restore` | `synthetic_only` | `responses/client-tool-compat-stream` | `synthetic`: `synthetic_only` |
+| `responses_client_tool_compat` | `responses.client_tool_compat.stream_opening_order` | `synthetic_only` | `responses/client-tool-compat-stream-shell-order` | `synthetic`: `synthetic_only` |
 | `responses_client_tool_compat`<br>`openai_responses_to_chat_completions` | `responses.client_tool_compat.chat_lower_restore` | `synthetic_only` | `responses/client-tool-compat-chat` | `synthetic`: `synthetic_only` |
 | `responses_client_tool_compat`<br>`openai_responses_to_chat_completions` | `responses.client_tool_compat.chat_stream_restore` | `synthetic_only` | `responses/client-tool-compat-chat-stream` | `synthetic`: `synthetic_only` |
 | `messages_to_chat_completions` | `messages.response.stop_sequence` | `live_covered` | `messages/stop-sequence-nonstream`<br>`messages/stop-sequence-stream` | `vllm`: `live_covered` |
