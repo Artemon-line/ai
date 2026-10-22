@@ -443,7 +443,7 @@ impl CompactFilter {
     }
 
     /// Validate an already collected compact request, then summarize and
-    /// persist it via [`persist_explicit_compaction`].
+    /// persist it via [`Self::persist_explicit_compaction`].
     ///
     /// Keeping the phases separate prevents the callout and persistence
     /// futures from sharing one stack frame with the stored-history lookup
@@ -485,7 +485,7 @@ impl CompactFilter {
     /// compaction result.
     ///
     /// Kept as a separate pinned phase so its callout and persistence futures
-    /// stay off the request filter's stack (see [`finish_explicit_compact`]).
+    /// stay off the request filter's stack (see [`Self::finish_explicit_compact`]).
     /// A schema-valid empty conversation (issue #1139) skips the callout —
     /// there is nothing to summarize — and persists a no-op compaction, the
     /// same result shape a fail-open callout failure produces.
