@@ -1268,11 +1268,13 @@ fn stored_message_array(messages: Value) -> Vec<Value> {
     }
 }
 
-/// Reject source items whose meaning the text-only summarizer cannot retain.
+/// Reject source items the text-only summarizer cannot safely represent.
 ///
 /// Syntax validation deliberately accepts all Responses content kinds. This
 /// separate check runs only once compaction will replace the source, preventing
 /// images, files, audio, and other non-text items from being silently discarded.
+/// Reasoning items have explicit handling below: safe summaries are rendered,
+/// while raw reasoning text is deliberately omitted and encrypted state fails closed.
 fn validate_compaction_source<I>(messages: I) -> Result<(), FilterAction>
 where
     I: IntoIterator,
@@ -1287,6 +1289,7 @@ where
             Some("function_call_output") => {
                 validate_representable_text_field(idx, "output", item.get("output"))?;
             },
+            Some("reasoning") => validate_compactable_reasoning_item(idx, item)?,
             Some("message") => {
                 validate_representable_text_field(idx, "content", item.get("content"))?;
             },
@@ -1299,6 +1302,117 @@ where
         }
     }
     Ok(())
+}
+
+/// Validate the reasoning fields that compaction can safely retain.
+///
+/// A reasoning item's `summary` is safe text and is included in the
+/// summarization prompt. Raw `reasoning_text` is intentionally omitted and is
+/// discarded with the compacted source, so chain-of-thought is not sent to the
+/// summarizer. Provider-encrypted reasoning is opaque and cannot be represented
+/// by the text-only compaction item, so it remains fail-closed.
+fn validate_compactable_reasoning_item(item_idx: usize, item: &Value) -> Result<(), FilterAction> {
+    validate_reasoning_item_fields(item_idx, item)?;
+    validate_reasoning_item_metadata(item_idx, item)?;
+    validate_reasoning_summary(item_idx, item)?;
+    validate_reasoning_content(item_idx, item)
+}
+
+/// Reject reasoning fields that the compaction prompt cannot represent.
+fn validate_reasoning_item_fields(item_idx: usize, item: &Value) -> Result<(), FilterAction> {
+    const ALLOWED_FIELDS: &[&str] = &["type", "id", "status", "summary", "content", "encrypted_content"];
+
+    if let Some(object) = item.as_object() {
+        for key in object.keys() {
+            if !ALLOWED_FIELDS.contains(&key.as_str()) {
+                return Err(reject_reasoning_compaction(
+                    item_idx,
+                    &format!("reasoning.{key} cannot be represented in the summary"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate reasoning identifiers, status, and opaque provider state.
+fn validate_reasoning_item_metadata(item_idx: usize, item: &Value) -> Result<(), FilterAction> {
+    if item.get("encrypted_content").is_some_and(|value| !value.is_null()) {
+        return Err(reject_reasoning_compaction(
+            item_idx,
+            "encrypted reasoning cannot be represented in the summary",
+        ));
+    }
+    if !item.get("id").is_some_and(Value::is_string) {
+        return Err(reject_reasoning_compaction(item_idx, "reasoning.id must be a string"));
+    }
+    if let Some(status) = item.get("status")
+        && !status.is_null()
+        && !matches!(status.as_str(), Some("in_progress" | "completed" | "incomplete"))
+    {
+        return Err(reject_reasoning_compaction(
+            item_idx,
+            "reasoning.status is not representable",
+        ));
+    }
+    Ok(())
+}
+
+/// Require the reasoning summary to contain only plain summary text.
+fn validate_reasoning_summary(item_idx: usize, item: &Value) -> Result<(), FilterAction> {
+    let Some(Value::Array(summary)) = item.get("summary") else {
+        return Err(reject_reasoning_compaction(
+            item_idx,
+            "reasoning.summary must be an array",
+        ));
+    };
+    for (part_idx, part) in summary.iter().enumerate() {
+        if !is_reasoning_text_part(part, "summary_text") {
+            return Err(reject_reasoning_compaction(
+                item_idx,
+                &format!("reasoning.summary[{part_idx}] is not representable"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate optional raw reasoning content without including it in compaction.
+fn validate_reasoning_content(item_idx: usize, item: &Value) -> Result<(), FilterAction> {
+    let Some(content) = item.get("content") else {
+        return Ok(());
+    };
+    let Value::Array(parts) = content else {
+        return Err(reject_reasoning_compaction(
+            item_idx,
+            "reasoning.content must be an array",
+        ));
+    };
+    for (part_idx, part) in parts.iter().enumerate() {
+        if !is_reasoning_text_part(part, "reasoning_text") {
+            return Err(reject_reasoning_compaction(
+                item_idx,
+                &format!("reasoning.content[{part_idx}] is not representable"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check that a reasoning part contains only its expected type and text fields.
+fn is_reasoning_text_part(part: &Value, expected_type: &str) -> bool {
+    part.get("type").and_then(Value::as_str) == Some(expected_type)
+        && part.get("text").is_some_and(Value::is_string)
+        && part.as_object().is_some_and(|object| object.len() == 2)
+}
+
+/// Build a fail-closed rejection for a reasoning item that cannot be compacted.
+fn reject_reasoning_compaction(item_idx: usize, detail: &str) -> FilterAction {
+    reject_compact(
+        400,
+        "invalid_request_error",
+        &format!("compaction cannot replace source item {item_idx}: {detail}"),
+    )
 }
 
 /// Validate only the prefix that [`replace_messages`] will discard.
@@ -1818,7 +1932,7 @@ fn build_context_overhead_text(request_body: &Value) -> String {
 /// Format a message array as readable text for the summarization prompt.
 ///
 /// Each message becomes `<label>: <text>`, separated by blank lines.
-/// Handles regular messages, tool calls, tool outputs, and prior compaction items.
+/// Handles regular messages, tool calls, tool outputs, reasoning summaries, and prior compaction items.
 fn build_conversation_text<'a>(messages: impl IntoIterator<Item = &'a Value> + 'a) -> String {
     let messages = messages.into_iter();
     let mut buf = String::with_capacity(messages.size_hint().0 * 100);
@@ -1832,6 +1946,7 @@ fn build_conversation_text<'a>(messages: impl IntoIterator<Item = &'a Value> + '
 fn append_item(buf: &mut String, msg: &Value) {
     match msg.get("type").and_then(Value::as_str) {
         Some("compaction") => append_compaction_summary(buf, msg),
+        Some("reasoning") => append_reasoning_summary(buf, msg),
         Some("function_call") => {
             let name = msg.get("name").and_then(Value::as_str).unwrap_or("unknown");
             let args = msg.get("arguments").and_then(Value::as_str).unwrap_or("");
@@ -1852,6 +1967,22 @@ fn append_item(buf: &mut String, msg: &Value) {
                 append_line(buf, role, &content);
             }
         },
+    }
+}
+
+/// Append only the safe summary from a reasoning item, never raw reasoning text.
+fn append_reasoning_summary(buf: &mut String, msg: &Value) {
+    let Some(parts) = msg.get("summary").and_then(Value::as_array) else {
+        return;
+    };
+    let mut summary = String::new();
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(Value::as_str) {
+            summary.push_str(text);
+        }
+    }
+    if !summary.is_empty() {
+        append_line(buf, "assistant reasoning summary", &summary);
     }
 }
 
