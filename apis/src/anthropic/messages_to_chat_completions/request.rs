@@ -501,9 +501,7 @@ fn validate_faithful_request(body: &Map<String, Value>) -> Result<(), String> {
                 for block in blocks {
                     if !text_block_is_supported(block) {
                         return Err(if text_block_shape_is_supported(block) {
-                            // The marker alone failed the block; name it and the
-                            // opt-in that degrades it (issue #1856).
-                            cache_control_rejection("system")
+                            cache_control_rejection("system", block)
                         } else {
                             "`system` must be a string or array of text blocks".to_owned()
                         });
@@ -645,9 +643,7 @@ fn validate_content_blocks(blocks: &[Value], role: &str) -> Result<(), String> {
             Some("text") if text_block_is_supported(block) => {},
             Some("text") => {
                 return Err(if text_block_shape_is_supported(block) {
-                    // The marker alone failed the block; name it and the opt-in
-                    // that degrades it (issue #1856).
-                    cache_control_rejection("content")
+                    cache_control_rejection("content", block)
                 } else {
                     "unsupported Anthropic content block `text`".to_owned()
                 });
@@ -741,14 +737,22 @@ fn text_block_shape_is_supported(block: &Value) -> bool {
 
 /// The rejection for a block whose `cache_control` marker cannot be translated.
 ///
-/// Names the marker and the `allow_lossy_features` opt-in that degrades it, so
-/// an operator can resolve the rejection from the error alone instead of
-/// reverse-engineering the cause from a generic shape error (issue #1856).
-fn cache_control_rejection(position: &str) -> String {
-    format!(
-        "`{position}` block carries `cache_control`, which cannot be translated; \
-         add `prompt_caching` to `allow_lossy_features` to degrade it"
-    )
+/// For a recognized marker, names the `allow_lossy_features` opt-in that
+/// degrades it, so an operator can resolve the rejection from the error alone
+/// instead of reverse-engineering the cause from a generic shape error (issue
+/// #1856). An unrecognized marker is rejected by the degradation path too, so
+/// recommending the opt-in would be misleading; report it as unsupported
+/// instead.
+fn cache_control_rejection(position: &str, block: &Value) -> String {
+    let marker = block.get("cache_control");
+    if marker.is_some_and(cache_control_marker_is_recognized) {
+        format!(
+            "`{position}` block carries `cache_control`, which cannot be translated; \
+             add `prompt_caching` to `allow_lossy_features` to degrade it"
+        )
+    } else {
+        format!("`{position}` block carries an unsupported `cache_control` marker, which cannot be translated")
+    }
 }
 
 /// Nullable request metadata has no effect when absent or null.
@@ -1702,6 +1706,42 @@ mod tests {
         let error = transform_request(body).unwrap_err();
         assert!(error.contains("`content` block carries `cache_control`"), "{error}");
         assert!(error.contains("`prompt_caching` to `allow_lossy_features`"), "{error}");
+    }
+
+    #[test]
+    fn cache_control_rejection_does_not_recommend_degradation_for_unrecognized_marker() {
+        // The degradation path also rejects unrecognized markers, so the strict
+        // rejection must not recommend the `prompt_caching` opt-in for them.
+        let cases = [
+            (
+                json!({"system": [
+                    {"type": "text", "text": "You are helpful",
+                     "cache_control": {"type": "ephemeral", "ttl": "7m"}}
+                ]}),
+                "`system`",
+            ),
+            (
+                json!({"messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "Hi", "cache_control": "ephemeral"}
+                ]}]}),
+                "`content`",
+            ),
+        ];
+        for (body, position) in cases {
+            let mut request = json!({"model": "m", "messages": [{"role": "user", "content": "Hi"}]});
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(body.as_object().unwrap().clone());
+            let error = transform_request(request).unwrap_err();
+            assert!(
+                error.contains(&format!(
+                    "{position} block carries an unsupported `cache_control` marker"
+                )),
+                "{position}: {error}"
+            );
+            assert!(!error.contains("allow_lossy_features"), "{position}: {error}");
+        }
     }
 
     #[test]
